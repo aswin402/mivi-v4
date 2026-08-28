@@ -5,6 +5,7 @@ use rayon::prelude::*;
 
 pub const Q4_K_BLOCK_SIZE: usize = 256;
 pub const Q4_K_BYTES: usize = 144;
+pub const PARALLEL_CHUNK_SIZE: usize = 16;
 
 /// Dequantize one Q4_K_M block (144 bytes) into 256 f32 outputs.
 #[inline]
@@ -81,10 +82,10 @@ pub fn matvec_q4_k_m(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: us
     let row_bytes = blocks_per_row * Q4_K_BYTES;
 
     if n >= 64 {
-        out.par_chunks_mut(16)
+        out.par_chunks_mut(PARALLEL_CHUNK_SIZE)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
-                let start_row = chunk_idx * 16;
+                let start_row = chunk_idx * PARALLEL_CHUNK_SIZE;
                 let mut dequant_buf = [0.0f32; Q4_K_BLOCK_SIZE];
 
                 for (r, out_val) in out_chunk.iter_mut().enumerate() {

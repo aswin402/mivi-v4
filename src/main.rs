@@ -31,10 +31,27 @@ async fn main() -> anyhow::Result<()> {
             let broker = mivi_tools::ToolBroker::new();
             mivi_tools::register_builtin_tools(&broker, std::path::Path::new(".")).await;
 
+            let loaded_model = if let Some(p) = model.as_ref() {
+                if p.exists() {
+                    match mivi_model::Model::load(p) {
+                        Ok(m) => Some(Arc::new(Mutex::new(m))),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to load model from {:?}: {}", p, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let state = Arc::new(Mutex::new(AppState {
                 model_name: model_name.clone(),
                 start_time: std::time::Instant::now(),
                 broker,
+                model: loaded_model,
             }));
 
             let app = create_router(state);

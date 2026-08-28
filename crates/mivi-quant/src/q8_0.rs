@@ -8,6 +8,7 @@ use std::arch::x86_64::*;
 
 pub const Q8_0_BLOCK_SIZE: usize = 32;
 pub const Q8_0_BYTES: usize = 34;
+pub const PARALLEL_CHUNK_SIZE: usize = 16;
 
 /// Dequantize one Q8_0 block (34 bytes) into 32 f32 outputs.
 #[inline]
@@ -42,10 +43,10 @@ pub fn matvec_q8_0(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usiz
 
     // Use Rayon chunk parallelization for larger matrices
     if n >= 64 {
-        out.par_chunks_mut(16)
+        out.par_chunks_mut(PARALLEL_CHUNK_SIZE)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
-                let start_row = chunk_idx * 16;
+                let start_row = chunk_idx * PARALLEL_CHUNK_SIZE;
                 for (r, out_val) in out_chunk.iter_mut().enumerate() {
                     let i = start_row + r;
                     let row_start = i * row_bytes;
@@ -96,6 +97,8 @@ fn compute_single_row_q8_0_scalar(row_weights: &[u8], x: &[f32], blocks_per_row:
 #[target_feature(enable = "avx2", enable = "fma")]
 #[inline]
 unsafe fn compute_single_row_q8_0_avx2(row_weights: &[u8], x: &[f32], blocks_per_row: usize) -> f32 {
+    assert!(row_weights.len() >= blocks_per_row * Q8_0_BYTES);
+    assert!(x.len() >= blocks_per_row * Q8_0_BLOCK_SIZE);
     let mut total_acc = 0.0f32;
 
     for b in 0..blocks_per_row {

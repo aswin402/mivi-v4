@@ -1,7 +1,8 @@
-//! Complete MiviModel forward pass and generation engine.
+//! Complete MiviModel forward pass, dynamic LoRA adapters, and generation engine.
 
 use crate::config::{BlockType, ModelConfig};
 use crate::gguf::{GgufFile, GgufValue};
+use crate::lora::ActiveAdapters;
 use crate::sampler::{Sampler, SamplerConfig};
 use crate::ssm::{ssm_forward, SsmWeights};
 use crate::transformer::{attention_forward, AttentionWeights};
@@ -21,6 +22,10 @@ pub enum ModelError {
     Tokenizer(#[from] mivi_tokenizer::TokenizerError),
     #[error("Missing model weight: {0}")]
     MissingWeight(String),
+    #[error("Invalid token ID: {0}")]
+    InvalidToken(u32),
+    #[error("Context overflow: current pos {pos} >= max_seq_len {max}")]
+    ContextOverflow { pos: usize, max: usize },
 }
 
 pub type Result<T> = std::result::Result<T, ModelError>;
@@ -32,6 +37,7 @@ pub struct Model {
     pub kv_cache: KvCache,
     pub tokenizer: Tokenizer,
     pub sampler: Sampler,
+    pub active_adapters: ActiveAdapters,
 }
 
 impl Model {
@@ -65,7 +71,11 @@ impl Model {
             config.rope_base = *v;
         }
 
-        config.head_dim = if config.n_heads > 0 { config.dim / config.n_heads } else { 64 };
+        config.head_dim = if config.n_heads > 0 {
+            config.dim / config.n_heads
+        } else {
+            64
+        };
         config.kv_dim = config.n_kv_heads * config.head_dim;
 
         // Discover block types per layer
@@ -118,6 +128,7 @@ impl Model {
         let vocab = mivi_tokenizer::Vocab::new(tokens);
         let tokenizer = Tokenizer::new(vocab, std::collections::HashMap::new());
         let sampler = Sampler::new(SamplerConfig::default());
+        let active_adapters = ActiveAdapters::new();
 
         Ok(Self {
             config,
@@ -126,27 +137,35 @@ impl Model {
             kv_cache,
             tokenizer,
             sampler,
+            active_adapters,
         })
     }
 
     /// Single token forward pass at given context position.
     /// Returns slice of unnormalized logits over vocabulary.
     pub fn forward(&mut self, token_id: u32, pos: usize) -> Result<&[f32]> {
+        if (token_id as usize) >= self.config.vocab_size {
+            return Err(ModelError::InvalidToken(token_id));
+        }
+        if pos >= self.config.max_seq_len {
+            return Err(ModelError::ContextOverflow {
+                pos,
+                max: self.config.max_seq_len,
+            });
+        }
+
         let dim = self.config.dim;
 
         // 1. Embedding lookup: token_embd.weight
         let (emb_info, emb_data) = self
             .gguf
             .get_tensor_data("token_embd.weight")
-            .unwrap_or_else(|_| {
-                // If model has standard name
-                self.gguf
-                    .get_tensor_data("model.embed_tokens.weight")
-                    .unwrap()
-            });
+            .or_else(|_| self.gguf.get_tensor_data("model.embed_tokens.weight"))
+            .map_err(|_| ModelError::MissingWeight("token_embd.weight".into()))?;
 
         // Dequantize / copy token embedding to state.x
-        let row_bytes_len = (dim * emb_info.ggml_type.type_size()) / emb_info.ggml_type.block_size();
+        let row_bytes_len =
+            (dim * emb_info.ggml_type.type_size()) / emb_info.ggml_type.block_size();
         let row_offset = (token_id as usize) * row_bytes_len;
         let row_bytes = &emb_data[row_offset..row_offset + row_bytes_len];
         let _ = mivi_quant::dequantize_slice(emb_info.ggml_type, row_bytes, &mut self.state.x);
@@ -233,6 +252,9 @@ impl Model {
                     let ffn_up_name = format!("blk.{}.ffn_up.weight", layer_idx);
                     let ffn_down_name = format!("blk.{}.ffn_down.weight", layer_idx);
 
+                    let a_name = format!("blk.{}.ssm_a.weight", layer_idx);
+                    let conv_name = format!("blk.{}.ssm_conv.weight", layer_idx);
+
                     if let (
                         Ok((_, ssm_norm_raw)),
                         Ok((in_info, in_raw)),
@@ -263,14 +285,26 @@ impl Model {
                             )
                         };
 
-                        let ssm_a = [0.95f32; 512];
-                        let conv_weight = [0.25f32; 4];
+                        let default_ssm_a = [0.95f32; 512];
+                        let default_conv_weight = [0.25f32; 4];
+
+                        let ssm_a: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&a_name) {
+                            unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) }
+                        } else {
+                            &default_ssm_a
+                        };
+
+                        let conv_weight: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&conv_name) {
+                            unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) }
+                        } else {
+                            &default_conv_weight
+                        };
 
                         let w = SsmWeights {
                             ssm_norm,
                             in_proj: (in_info.ggml_type, in_raw),
-                            conv_weight: &conv_weight,
-                            ssm_a: &ssm_a,
+                            conv_weight,
+                            ssm_a,
                             ssm_b: (in_info.ggml_type, in_raw),
                             ssm_c: (out_info.ggml_type, out_raw),
                             out_proj: (out_info.ggml_type, out_raw),
@@ -320,6 +354,11 @@ impl Model {
         let mut generated_ids = Vec::new();
         let mut recent_tokens = Vec::new();
 
+        let eos_token_id = match self.gguf.metadata.get("tokenizer.ggml.eos_token_id") {
+            Some(GgufValue::U32(id)) => *id,
+            _ => 2,
+        };
+
         let mut pos = 0;
         // Prefill prompt
         for &tok in &token_ids {
@@ -339,13 +378,17 @@ impl Model {
             let mut logits_clone = logits.to_vec();
             let next_token = self.sampler.sample(&mut logits_clone, &recent_tokens);
 
+            if next_token == eos_token_id {
+                break;
+            }
+
             generated_ids.push(next_token);
             recent_tokens.push(next_token);
             if recent_tokens.len() > 64 {
                 recent_tokens.remove(0);
             }
 
-            // Check for EOS token
+            // Check for EOS token strings
             if let Some(tok_str) = self.tokenizer.decode_token(next_token) {
                 if tok_str == "<|im_end|>" || tok_str == "<|endoftext|>" {
                     break;

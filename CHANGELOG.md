@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.0.2] - 2026-08-28
+
+### Security Hardening, Undefined Behavior Fixes & Core Engine Correctness
+
+#### 🛡️ Security & Memory Safety (UB Elimination)
+- **Path Traversal Sandboxing**: Added `safe_join` to `mivi-tools` using component-level inspection, blocking `..`, root dir, and UNC prefix traversal attacks in `read_file`, `write_file`, and `list_dir`. Sanitized memory record types and IDs in `mivi-memory`.
+- **Safe Memory Alignment**: Eliminated raw unaligned `&[u8]` to `&[f32]` pointer casts across `mivi-quant`, enforcing alignment checks with `f32::from_ne_bytes` safe iteration fallback.
+- **Unsafe SIMD Invariant Enforcement**: Replaced all `debug_assert!` macros guarding `unsafe` SIMD kernels (`matvec_f32`, `rms_norm_simd`, `matvec_q8_0`) with unconditional `assert_eq!` / `assert!`, preventing release-mode out-of-bounds execution.
+- **GGUF Security Limits & Overflow Protection**: Enforced bounds on GGUF string lengths (1MB), metadata keys (100k), tensor counts (50k), and array lengths (10M). Added `checked_mul` arithmetic on tensor dimensions and byte lengths, preventing CVE-style integer overflows and memory exhaustion.
+- **Bounds Checking**: Added explicit slice and buffer length checks in `f16` / `bf16` dequantization and matrix operations.
+
+#### 🧠 Correctness & Production Logic
+- **Standard BPE Tokenizer**: Replaced naive prefix matching with true Byte-Pair Encoding (BPE) iterative merge loop with rank scanning.
+- **Real SSM / Mamba Weight Loading**: Loaded dynamic continuous state matrices (`blk.{i}.ssm_a.weight`) and depthwise convolutions (`blk.{i}.ssm_conv.weight`) from GGUF.
+- **Zero-Panic Embedding Lookup**: Replaced `.unwrap()` fallbacks with typed `ModelError::MissingWeight` and enforced `token_id < vocab_size` bounds validation.
+- **Context Window Overflow Guard**: Enforced `pos < max_seq_len` bounds check at the entry of `Model::forward()`.
+- **KV Cache Bounds & Error Types**: Added `KvError::DimMismatch` and strict layer/position bounds verification.
+- **Pratt Parser Expression Evaluator**: Replaced naive substring math splitting with a Pratt Parser supporting unary minus, nested parentheses, and operator precedence (`-5 + 10 = 5`, `3 - -5 = 8`).
+- **Dynamic EOS Token Detection**: Extracted `tokenizer.ggml.eos_token_id` dynamically from GGUF metadata.
+
+#### ⚡ Performance & Polish
+- **MPSC Streaming Server**: Wired model token generation to Axum SSE streaming via Tokio MPSC channels with automatic cancellation on client disconnect.
+- **LazyLock Regexes**: Migrated tool and think tag regexes in `mivi-tools` to `std::sync::LazyLock` for zero-allocation reuse.
+- **Agent Loop Stagnation Guards**: Added 3-cycle repetition detection and explicit `finish` tool support to `AgentLoop`.
+- **Context VM Implementation**: Built real substring search, slice extraction, and recursive subtask dispatch in `ContextVm`.
+- **Grammar Error Tracking**: Added syntax error detection on unmatched closing braces/brackets to `JsonConstraintState`.
+- **Extracted Constants**: Extracted `PARALLEL_CHUNK_SIZE` across Q8_0 and Q4_K_M kernels.
+
+#### 🧪 Test Suite
+- Expanded to **18 unit, integration, and golden oracle tests** passing with 0 failures across all 12 crates in both debug and release modes.
+
+---
+
 ## [v0.0.1] - 2026-08-28
 
 ### Initial Release: Architectural Foundation & High-Performance CPU Engine

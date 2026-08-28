@@ -1,4 +1,4 @@
-//! Contiguous preallocated Key-Value Cache.
+//! Contiguous preallocated Key-Value Cache with strict validation.
 
 use thiserror::Error;
 
@@ -8,6 +8,8 @@ pub enum KvError {
     ContextOverflow { pos: usize, max: usize },
     #[error("Layer index out of bounds: {layer} >= {max}")]
     InvalidLayer { layer: usize, max: usize },
+    #[error("Dimension mismatch: expected kv_dim {expected}, got {got}")]
+    DimMismatch { expected: usize, got: usize },
 }
 
 pub type Result<T> = std::result::Result<T, KvError>;
@@ -70,6 +72,18 @@ impl KvCache {
                 max: self.max_seq_len,
             });
         }
+        if k.len() != self.kv_dim {
+            return Err(KvError::DimMismatch {
+                expected: self.kv_dim,
+                got: k.len(),
+            });
+        }
+        if v.len() != self.kv_dim {
+            return Err(KvError::DimMismatch {
+                expected: self.kv_dim,
+                got: v.len(),
+            });
+        }
 
         let offset = (layer * self.max_seq_len + pos) * self.kv_dim;
         self.k_cache[offset..offset + self.kv_dim].copy_from_slice(k);
@@ -85,6 +99,8 @@ impl KvCache {
     /// Read Key vector slice for a given layer and position.
     #[inline]
     pub fn get_k(&self, layer: usize, pos: usize) -> &[f32] {
+        assert!(layer < self.n_layers, "Layer index out of bounds");
+        assert!(pos < self.max_seq_len, "Position index out of bounds");
         let offset = (layer * self.max_seq_len + pos) * self.kv_dim;
         &self.k_cache[offset..offset + self.kv_dim]
     }
@@ -92,6 +108,8 @@ impl KvCache {
     /// Read Value vector slice for a given layer and position.
     #[inline]
     pub fn get_v(&self, layer: usize, pos: usize) -> &[f32] {
+        assert!(layer < self.n_layers, "Layer index out of bounds");
+        assert!(pos < self.max_seq_len, "Position index out of bounds");
         let offset = (layer * self.max_seq_len + pos) * self.kv_dim;
         &self.v_cache[offset..offset + self.kv_dim]
     }

@@ -24,17 +24,89 @@ impl<'a> ContextVm<'a> {
         match op {
             ContextOp::Search { query } => {
                 let results = self.store.search(&query);
-                format!("Found {} relevant blocks for '{}'", results.len(), query)
+                if results.is_empty() {
+                    format!("No matching context blocks found for query '{}'", query)
+                } else {
+                    let mut out = format!("Found {} relevant context blocks:\n", results.len());
+                    for b in results.iter().take(5) {
+                        let snippet: String = b.content.chars().take(120).collect();
+                        out.push_str(&format!("- [{}] (source: {}): {}...\n", b.id, b.source, snippet));
+                    }
+                    out
+                }
             }
             ContextOp::Slice { source, start, end } => {
-                format!("Sliced region [{}..{}] from source {}", start, end, source)
+                let matching = self
+                    .store
+                    .blocks
+                    .iter()
+                    .find(|b| b.source == source || b.id == source);
+
+                if let Some(b) = matching {
+                    let char_count = b.content.chars().count();
+                    let safe_start = start.min(char_count);
+                    let safe_end = end.min(char_count).max(safe_start);
+                    let slice: String = b.content.chars().skip(safe_start).take(safe_end - safe_start).collect();
+                    format!("Slice [{}..{}] from '{}':\n{}", safe_start, safe_end, source, slice)
+                } else {
+                    format!("Context source '{}' not found in store.", source)
+                }
             }
             ContextOp::Summarize { source } => {
-                format!("Summary of {}", source)
+                let matching = self
+                    .store
+                    .blocks
+                    .iter()
+                    .find(|b| b.source == source || b.id == source);
+
+                if let Some(b) = matching {
+                    let preview: String = b.content.lines().take(3).collect::<Vec<_>>().join(" ");
+                    format!("Summary of '{}' ({} chars): {}", source, b.content.len(), preview)
+                } else {
+                    format!("Context source '{}' not found in store.", source)
+                }
             }
             ContextOp::Recurse { task, context_ids } => {
-                format!("Recursive dispatch of subtask '{}' on {} blocks", task, context_ids.len())
+                let mut combined_len = 0;
+                for cid in &context_ids {
+                    if let Some(b) = self.store.blocks.iter().find(|b| &b.id == cid) {
+                        combined_len += b.content.len();
+                    }
+                }
+                format!(
+                    "Recursive subtask '{}' scheduled on {} blocks (total {} bytes).",
+                    task,
+                    context_ids.len(),
+                    combined_len
+                )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_vm_operations() {
+        let mut store = ContextStore::new();
+        store.add_block(
+            "doc1",
+            "rust_intro.md",
+            "Rust is a systems programming language focused on safety and speed.",
+            false,
+        );
+
+        let mut vm = ContextVm::new(&mut store);
+        let search_res = vm.execute(ContextOp::Search { query: "safety".to_string() });
+        assert!(search_res.contains("Found 1"));
+
+        let slice_res = vm.execute(ContextOp::Slice {
+            source: "rust_intro.md".to_string(),
+            start: 0,
+            end: 4,
+        });
+        assert!(slice_res.contains("Rust"));
     }
 }

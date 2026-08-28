@@ -1,13 +1,21 @@
-//! Parser for <tool_call> and <think> markup in generated tokens.
+//! Parser for <tool_call> and <think> markup in generated tokens using zero-allocation LazyLock regexes.
 
 use crate::schema::ToolCall;
 use regex::Regex;
+use std::sync::LazyLock;
+
+static TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<tool_call>([\s\S]*?)</tool_call>").expect("Invalid tool call regex pattern")
+});
+
+static THINKING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<think>([\s\S]*?)</think>").expect("Invalid thinking regex pattern")
+});
 
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
     let mut tool_calls = Vec::new();
-    let re = Regex::new(r"<tool_call>([\s\S]*?)</tool_call>").unwrap();
 
-    for cap in re.captures_iter(text) {
+    for cap in TOOL_CALL_RE.captures_iter(text) {
         if let Some(json_str) = cap.get(1) {
             if let Ok(tc) = serde_json::from_str::<serde_json::Value>(json_str.as_str().trim()) {
                 if let (Some(name), Some(args)) = (tc.get("name"), tc.get("arguments")) {
@@ -25,8 +33,8 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
 }
 
 pub fn extract_thinking(text: &str) -> Option<String> {
-    let re = Regex::new(r"<think>([\s\S]*?)</think>").unwrap();
-    re.captures(text)
+    THINKING_RE
+        .captures(text)
         .and_then(|cap| cap.get(1))
         .map(|m| m.as_str().trim().to_string())
 }
@@ -53,6 +61,9 @@ Finished."#;
     fn test_extract_thinking() {
         let text = "<think>I should inspect the repository first.</think>\nHello world!";
         let think = extract_thinking(text);
-        assert_eq!(think.as_deref(), Some("I should inspect the repository first."));
+        assert_eq!(
+            think.as_deref(),
+            Some("I should inspect the repository first.")
+        );
     }
 }

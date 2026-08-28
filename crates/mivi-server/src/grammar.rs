@@ -1,4 +1,4 @@
-//! Grammar and JSON Schema constrained decoding tracker.
+//! Grammar and JSON Schema constrained decoding tracker with syntax error detection.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,7 @@ pub struct JsonConstraintState {
     pub brace_depth: usize,
     pub bracket_depth: usize,
     pub completed: bool,
+    pub has_error: bool,
 }
 
 impl JsonConstraintState {
@@ -26,6 +27,10 @@ impl JsonConstraintState {
 
     /// Advance parser state with a decoded token string chunk.
     pub fn feed(&mut self, chunk: &str) -> bool {
+        if self.has_error {
+            return false;
+        }
+
         for ch in chunk.chars() {
             if self.escape {
                 self.escape = false;
@@ -48,12 +53,18 @@ impl JsonConstraintState {
                     '}' => {
                         if self.brace_depth > 0 {
                             self.brace_depth -= 1;
+                        } else {
+                            self.has_error = true;
+                            return false;
                         }
                     }
                     '[' => self.bracket_depth += 1,
                     ']' => {
                         if self.bracket_depth > 0 {
                             self.bracket_depth -= 1;
+                        } else {
+                            self.has_error = true;
+                            return false;
                         }
                     }
                     _ => {}
@@ -70,13 +81,16 @@ impl JsonConstraintState {
 
     #[inline]
     pub fn is_valid(&self) -> bool {
-        // As long as brackets are properly balanced and not in broken state
-        true
+        !self.has_error
     }
 
     #[inline]
     pub fn is_complete(&self) -> bool {
-        self.completed && self.brace_depth == 0 && self.bracket_depth == 0 && !self.in_string
+        !self.has_error
+            && self.completed
+            && self.brace_depth == 0
+            && self.bracket_depth == 0
+            && !self.in_string
     }
 }
 
@@ -93,5 +107,11 @@ mod tests {
         assert!(!tracker.is_complete());
         assert!(tracker.feed(r#""arguments": {"expr": "1+1"}}"#));
         assert!(tracker.is_complete());
+        assert!(tracker.is_valid());
+
+        // Error detection on unmatched closing bracket
+        let mut broken_tracker = JsonConstraintState::new();
+        assert!(!broken_tracker.feed("}"));
+        assert!(!broken_tracker.is_valid());
     }
 }

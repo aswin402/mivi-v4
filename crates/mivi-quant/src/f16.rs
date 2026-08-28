@@ -5,6 +5,7 @@ use half::{bf16, f16};
 /// Dequantize F16 slice to F32
 pub fn dequantize_f16(input: &[u8], out: &mut [f32]) {
     let count = input.len() / 2;
+    assert!(out.len() >= count, "Output buffer too small for F16 dequant");
     for i in 0..count {
         let val = f16::from_le_bytes([input[2 * i], input[2 * i + 1]]).to_f32();
         out[i] = val;
@@ -14,6 +15,7 @@ pub fn dequantize_f16(input: &[u8], out: &mut [f32]) {
 /// Dequantize BF16 slice to F32
 pub fn dequantize_bf16(input: &[u8], out: &mut [f32]) {
     let count = input.len() / 2;
+    assert!(out.len() >= count, "Output buffer too small for BF16 dequant");
     for i in 0..count {
         let val = bf16::from_le_bytes([input[2 * i], input[2 * i + 1]]).to_f32();
         out[i] = val;
@@ -22,6 +24,10 @@ pub fn dequantize_bf16(input: &[u8], out: &mut [f32]) {
 
 /// Matvec for F16 weights: out[n] = W[n, d] * x[d]
 pub fn matvec_f16(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usize) {
+    assert_eq!(out.len(), n);
+    assert_eq!(x.len(), d);
+    assert!(weights.len() >= n * d * 2);
+
     for i in 0..n {
         let row_offset = i * d * 2;
         let mut sum = 0.0f32;

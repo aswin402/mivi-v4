@@ -26,10 +26,11 @@ pub fn dequantize_slice(ggml_type: GgmlType, bytes: &[u8], out: &mut [f32]) -> R
             Ok(())
         }
         GgmlType::F32 => {
-            let float_slice = unsafe {
-                std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
-            };
-            out.copy_from_slice(float_slice);
+            let count = bytes.len() / 4;
+            assert!(out.len() >= count, "Output buffer too small for F32 dequant");
+            for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+                out[i] = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
             Ok(())
         }
         other => Err(QuantError::UnsupportedType(other as u32)),
@@ -59,10 +60,18 @@ pub fn quantized_matvec(
             Ok(())
         }
         GgmlType::F32 => {
-            let float_slice = unsafe {
-                std::slice::from_raw_parts(weights.as_ptr() as *const f32, weights.len() / 4)
-            };
-            mivi_core::simd::matvec_f32(out, float_slice, x, n, d);
+            if weights.as_ptr() as usize % std::mem::align_of::<f32>() == 0 {
+                let float_slice = unsafe {
+                    std::slice::from_raw_parts(weights.as_ptr() as *const f32, weights.len() / 4)
+                };
+                mivi_core::simd::matvec_f32(out, float_slice, x, n, d);
+            } else {
+                let mut aligned = vec![0.0f32; weights.len() / 4];
+                for (i, chunk) in weights.chunks_exact(4).enumerate() {
+                    aligned[i] = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                }
+                mivi_core::simd::matvec_f32(out, &aligned, x, n, d);
+            }
             Ok(())
         }
         other => Err(QuantError::UnsupportedType(other as u32)),

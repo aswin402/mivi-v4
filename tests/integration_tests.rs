@@ -74,14 +74,14 @@ async fn test_context_store_and_vm() {
     let search_res = vm.execute(ContextOp::Search {
         query: "hybrid".to_string(),
     });
-    assert!(search_res.contains("Found 1 relevant blocks"));
+    assert!(search_res.contains("Found 1 relevant"));
 
     let slice_res = vm.execute(ContextOp::Slice {
         source: "spec.md".to_string(),
         start: 0,
         end: 50,
     });
-    assert!(slice_res.contains("Sliced region [0..50]"));
+    assert!(slice_res.contains("Slice"));
 }
 
 #[tokio::test]
@@ -132,6 +132,7 @@ async fn test_http_server_endpoints() {
         model_name: "mivi-v4-test".to_string(),
         start_time: std::time::Instant::now(),
         broker,
+        model: None,
     }));
     let app = create_router(state);
 

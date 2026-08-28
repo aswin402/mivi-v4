@@ -6,8 +6,8 @@ use std::arch::x86_64::*;
 /// Vectorized RMS Normalization: out = x * weight / sqrt(mean(x^2) + eps)
 #[inline]
 pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
-    debug_assert_eq!(out.len(), x.len());
-    debug_assert_eq!(x.len(), weight.len());
+    assert_eq!(out.len(), x.len());
+    assert_eq!(x.len(), weight.len());
 
     let len = x.len();
 

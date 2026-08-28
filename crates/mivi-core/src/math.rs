@@ -65,7 +65,7 @@ pub fn swiglu(gate: &mut [f32], up: &[f32]) {
 /// Elementwise vector addition: out[i] += src[i]
 #[inline]
 pub fn vec_add(out: &mut [f32], src: &[f32]) {
-    debug_assert_eq!(out.len(), src.len());
+    assert_eq!(out.len(), src.len());
     for i in 0..out.len() {
         out[i] += src[i];
     }
@@ -74,14 +74,16 @@ pub fn vec_add(out: &mut [f32], src: &[f32]) {
 /// Vector dot product.
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
 /// Rotary Position Embedding (RoPE) applied to query and key heads.
 #[inline]
 pub fn apply_rope(q: &mut [f32], k: &mut [f32], head_dim: usize, pos: usize, rope_base: f32) {
-    debug_assert!(head_dim % 2 == 0);
+    assert!(head_dim % 2 == 0);
+    assert!(q.len() >= head_dim);
+    assert!(k.len() >= head_dim);
 
     for i in (0..head_dim).step_by(2) {
         let freq = 1.0 / rope_base.powf(i as f32 / head_dim as f32);
@@ -89,20 +91,16 @@ pub fn apply_rope(q: &mut [f32], k: &mut [f32], head_dim: usize, pos: usize, rop
         let (sin, cos) = angle.sin_cos();
 
         // Rotate Query
-        if i + 1 < q.len() {
-            let q0 = q[i];
-            let q1 = q[i + 1];
-            q[i] = q0 * cos - q1 * sin;
-            q[i + 1] = q0 * sin + q1 * cos;
-        }
+        let q0 = q[i];
+        let q1 = q[i + 1];
+        q[i] = q0 * cos - q1 * sin;
+        q[i + 1] = q0 * sin + q1 * cos;
 
         // Rotate Key
-        if i + 1 < k.len() {
-            let k0 = k[i];
-            let k1 = k[i + 1];
-            k[i] = k0 * cos - k1 * sin;
-            k[i + 1] = k0 * sin + k1 * cos;
-        }
+        let k0 = k[i];
+        let k1 = k[i + 1];
+        k[i] = k0 * cos - k1 * sin;
+        k[i + 1] = k0 * sin + k1 * cos;
     }
 }
 

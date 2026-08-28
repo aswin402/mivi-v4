@@ -1,4 +1,4 @@
-//! GGUF v3 file parser with zero-copy memory mapping.
+//! GGUF v3 file parser with zero-copy memory mapping and security validation.
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
@@ -10,6 +10,10 @@ use std::path::Path;
 use thiserror::Error;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in LE
+const MAX_STRING_LEN: usize = 1024 * 1024; // 1 MB limit for individual strings
+const MAX_METADATA_COUNT: usize = 100_000;
+const MAX_TENSOR_COUNT: usize = 50_000;
+const MAX_ARRAY_LEN: usize = 10_000_000;
 
 #[derive(Error, Debug)]
 pub enum GgufError {
@@ -25,6 +29,8 @@ pub enum GgufError {
     UnsupportedValueType(u32),
     #[error("Tensor '{0}' not found in GGUF file")]
     TensorNotFound(String),
+    #[error("Malformed GGUF file: {0}")]
+    MalformedFile(String),
 }
 
 pub type Result<T> = std::result::Result<T, GgufError>;
@@ -60,13 +66,17 @@ pub struct GgufFile {
     pub metadata: HashMap<String, GgufValue>,
     pub tensors: HashMap<String, TensorInfo>,
     pub data_offset: usize,
-    mmap: Mmap,
+    pub mmap: Mmap,
 }
 
 impl GgufFile {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
+
+        if mmap.len() < 16 {
+            return Err(GgufError::MalformedFile("File too small to contain valid GGUF header".into()));
+        }
 
         let mut cursor = Cursor::new(&mmap[..]);
 
@@ -81,7 +91,20 @@ impl GgufFile {
         }
 
         let tensor_count = cursor.read_u64::<LittleEndian>()? as usize;
+        if tensor_count > MAX_TENSOR_COUNT {
+            return Err(GgufError::MalformedFile(format!(
+                "Tensor count {} exceeds security limit {}",
+                tensor_count, MAX_TENSOR_COUNT
+            )));
+        }
+
         let metadata_kv_count = cursor.read_u64::<LittleEndian>()? as usize;
+        if metadata_kv_count > MAX_METADATA_COUNT {
+            return Err(GgufError::MalformedFile(format!(
+                "Metadata count {} exceeds security limit {}",
+                metadata_kv_count, MAX_METADATA_COUNT
+            )));
+        }
 
         // Parse metadata KV pairs
         let mut metadata = HashMap::with_capacity(metadata_kv_count);
@@ -134,17 +157,47 @@ impl GgufFile {
         })
     }
 
-    /// Read raw tensor bytes by name
+    /// Read raw tensor bytes by name with strict overflow and bounds verification
     pub fn get_tensor_data(&self, name: &str) -> Result<(&TensorInfo, &[u8])> {
         let info = self
             .tensors
             .get(name)
             .ok_or_else(|| GgufError::TensorNotFound(name.to_string()))?;
 
-        let start = self.data_offset + info.offset as usize;
-        let num_elements: usize = info.dims.iter().product();
-        let bytes_len = (num_elements * info.ggml_type.type_size()) / info.ggml_type.block_size();
-        let end = start + bytes_len;
+        let start = self
+            .data_offset
+            .checked_add(info.offset as usize)
+            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor start offset".into()))?;
+
+        let num_elements = info
+            .dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor dimensions".into()))?;
+
+        let type_size = info.ggml_type.type_size();
+        let block_size = info.ggml_type.block_size();
+        if block_size == 0 {
+            return Err(GgufError::MalformedFile("Block size cannot be zero".into()));
+        }
+
+        let bytes_len = (num_elements.checked_mul(type_size))
+            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor byte length".into()))?
+            / block_size;
+
+        let end = start
+            .checked_add(bytes_len)
+            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor range".into()))?;
+
+        if end > self.mmap.len() {
+            return Err(GgufError::MalformedFile(format!(
+                "Tensor '{}' range [{}..{}] exceeds mapped file size {}",
+                name,
+                start,
+                end,
+                self.mmap.len()
+            )));
+        }
 
         Ok((info, &self.mmap[start..end]))
     }
@@ -152,6 +205,12 @@ impl GgufFile {
 
 fn read_gguf_string<R: Read>(r: &mut R) -> Result<String> {
     let len = r.read_u64::<LittleEndian>()? as usize;
+    if len > MAX_STRING_LEN {
+        return Err(GgufError::MalformedFile(format!(
+            "String length {} exceeds limit {}",
+            len, MAX_STRING_LEN
+        )));
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(String::from_utf8(buf)?)
@@ -176,6 +235,12 @@ fn read_value_by_type<R: Read + Seek>(r: &mut R, val_type: u32) -> Result<GgufVa
         9 => {
             let elem_type = r.read_u32::<LittleEndian>()?;
             let len = r.read_u64::<LittleEndian>()? as usize;
+            if len > MAX_ARRAY_LEN {
+                return Err(GgufError::MalformedFile(format!(
+                    "Array length {} exceeds limit {}",
+                    len, MAX_ARRAY_LEN
+                )));
+            }
             let mut arr = Vec::with_capacity(len);
             for _ in 0..len {
                 arr.push(read_value_by_type(r, elem_type)?);

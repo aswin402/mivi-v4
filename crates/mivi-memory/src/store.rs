@@ -31,7 +31,20 @@ impl MemoryStore {
 
     pub fn save_record(&self, record: &MemoryRecord) -> Result<PathBuf> {
         self.init()?;
-        let filename = format!("{}_{}.md", record.r#type, record.id);
+        // Sanitize type and id: strip any slashes, backslashes, or dots
+        let clean_type: String = record
+            .r#type
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let clean_id: String = record
+            .id
+            .to_string()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+
+        let filename = format!("{}_{}.md", clean_type, clean_id);
         let path = self.root_dir.join(filename);
 
         let yaml_frontmatter = serde_yaml::to_string(record)?;
