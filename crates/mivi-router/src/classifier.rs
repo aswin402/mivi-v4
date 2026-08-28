@@ -1,6 +1,15 @@
-//! Intent classifier and task domain categorization.
-
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+
+static RE_DEBUG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(fix|bug|error|failing|panic|crash|traceback)\b").unwrap());
+static RE_RESEARCH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(search|latest|research|find|lookup|browse|paper)\b").unwrap());
+static RE_TEST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(test|tests|testing|assert|benchmark|suite)\b").unwrap());
+static RE_CODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(code|function|rust|python|impl|struct|class|fn|def)\b").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskFamily {
@@ -32,29 +41,29 @@ pub struct RouteDecision {
 pub struct IntentClassifier;
 
 impl IntentClassifier {
-    /// Fast heuristic intent classification (Level 1 + Level 2 routing)
+    /// Fast heuristic intent classification (Level 1 + Level 2 routing) with word boundary precision
     pub fn classify(prompt: &str) -> RouteDecision {
         let p = prompt.to_lowercase();
 
-        if p.contains("fix") || p.contains("bug") || p.contains("error") || p.contains("failing") {
+        if RE_DEBUG.is_match(&p) {
             RouteDecision {
                 primary: TaskFamily::Debug,
                 secondary: Some(CodeSpecialization::Debugging),
                 confidence: 0.9,
             }
-        } else if p.contains("search") || p.contains("latest") || p.contains("research") {
+        } else if RE_RESEARCH.is_match(&p) {
             RouteDecision {
                 primary: TaskFamily::Research,
                 secondary: None,
                 confidence: 0.85,
             }
-        } else if p.contains("test") {
+        } else if RE_TEST.is_match(&p) {
             RouteDecision {
                 primary: TaskFamily::Code,
                 secondary: Some(CodeSpecialization::Testing),
                 confidence: 0.85,
             }
-        } else if p.contains("code") || p.contains("function") || p.contains("rust") || p.contains("python") {
+        } else if RE_CODE.is_match(&p) {
             RouteDecision {
                 primary: TaskFamily::Code,
                 secondary: Some(CodeSpecialization::Implementation),

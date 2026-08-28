@@ -3,8 +3,11 @@
 /// RMS Normalization: y = x * weight / sqrt(mean(x^2) + eps)
 #[inline]
 pub fn rms_norm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
-    debug_assert_eq!(out.len(), x.len());
-    debug_assert_eq!(x.len(), weight.len());
+    if x.is_empty() {
+        return;
+    }
+    assert_eq!(out.len(), x.len());
+    assert_eq!(x.len(), weight.len());
 
     let len = x.len();
     let sum_sq: f32 = x.iter().map(|&v| v * v).sum();
@@ -53,12 +56,11 @@ pub fn silu(x: &mut [f32]) {
 /// SwiGLU in-place: gate[i] = silu(gate[i]) * up[i]
 #[inline]
 pub fn swiglu(gate: &mut [f32], up: &[f32]) {
-    debug_assert_eq!(gate.len(), up.len());
+    assert_eq!(gate.len(), up.len());
 
-    for i in 0..gate.len() {
-        let g = gate[i];
-        let silu_g = g / (1.0 + (-g).exp());
-        gate[i] = silu_g * up[i];
+    for (g, &u) in gate.iter_mut().zip(up.iter()) {
+        let silu_g = *g / (1.0 + (-*g).exp());
+        *g = silu_g * u;
     }
 }
 

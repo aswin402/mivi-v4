@@ -58,6 +58,15 @@ fn test_rust_forward_matches_oracle() {
             "Top token mismatch at pos {}",
             trace.pos
         );
+
+        for (idx, &expected_logit) in trace.logits_sample.iter().enumerate() {
+            let diff = (logits[idx] - expected_logit).abs();
+            assert!(
+                diff < 0.25,
+                "Logit mismatch at pos {}, index {}: rust={:.4}, oracle={:.4}, diff={:.4}",
+                trace.pos, idx, logits[idx], expected_logit, diff
+            );
+        }
     }
 
     println!("✅ Rust engine matches Python Oracle ground-truth perfectly!");

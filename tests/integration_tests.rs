@@ -252,3 +252,52 @@ async fn test_http_server_endpoints() {
     let content_type = res.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(content_type.contains("text/event-stream"));
 }
+
+#[tokio::test]
+async fn test_http_server_with_real_model() {
+    let model_path = std::path::Path::new("models/mivi-tiny-test.gguf");
+    if !model_path.exists() {
+        return;
+    }
+
+    let model = mivi_model::Model::load(model_path).expect("Failed to load test model");
+    let broker = ToolBroker::new();
+    let state = Arc::new(Mutex::new(AppState {
+        model_name: "mivi-tiny-test".to_string(),
+        start_time: std::time::Instant::now(),
+        broker,
+        model: Some(Arc::new(Mutex::new(model))),
+    }));
+    let app = create_router(state);
+
+    let chat_req = ChatCompletionRequest {
+        model: "mivi-tiny-test".to_string(),
+        messages: vec![MessageDto {
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            name: None,
+            thinking: None,
+            tool_calls: None,
+        }],
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_tokens: Some(4),
+        stream: Some(false),
+        tools: None,
+        tool_choice: None,
+    };
+
+    let req = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&chat_req).unwrap()))
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["model"], "mivi-tiny-test");
+    assert!(json["choices"][0]["message"]["content"].is_string());
+}

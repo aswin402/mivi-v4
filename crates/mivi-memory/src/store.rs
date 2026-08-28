@@ -32,17 +32,24 @@ impl MemoryStore {
     pub fn save_record(&self, record: &MemoryRecord) -> Result<PathBuf> {
         self.init()?;
         // Sanitize type and id: strip any slashes, backslashes, or dots
-        let clean_type: String = record
+        let mut clean_type: String = record
             .r#type
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
             .collect();
-        let clean_id: String = record
+        if clean_type.is_empty() {
+            clean_type = "record".to_string();
+        }
+
+        let mut clean_id: String = record
             .id
             .to_string()
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
             .collect();
+        if clean_id.is_empty() {
+            clean_id = uuid::Uuid::new_v4().to_string();
+        }
 
         let filename = format!("{}_{}.md", clean_type, clean_id);
         let path = self.root_dir.join(filename);

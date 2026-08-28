@@ -55,7 +55,10 @@ async fn main() -> anyhow::Result<()> {
             }));
 
             let app = create_router(state);
-            let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+            let ip: std::net::IpAddr = host
+                .parse()
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+            let addr = SocketAddr::new(ip, port);
 
             println!(
                 r#"

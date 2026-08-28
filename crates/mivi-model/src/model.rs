@@ -38,6 +38,18 @@ pub struct Model {
     pub tokenizer: Tokenizer,
     pub sampler: Sampler,
     pub active_adapters: ActiveAdapters,
+    pub rope_cache: mivi_core::RopeCache,
+}
+
+#[inline]
+fn safe_f32_slice(raw: &[u8]) -> &[f32] {
+    let ptr = raw.as_ptr();
+    assert_eq!(
+        ptr as usize % std::mem::align_of::<f32>(),
+        0,
+        "GGUF tensor buffer is not 4-byte aligned"
+    );
+    unsafe { std::slice::from_raw_parts(ptr as *const f32, raw.len() / 4) }
 }
 
 impl Model {
@@ -46,29 +58,29 @@ impl Model {
 
         // Extract metadata dynamically from GGUF
         let mut config = ModelConfig::default();
-        if let Some(GgufValue::String(s)) = gguf.metadata.get("general.name") {
-            config.name = s.clone();
+        if let Some(s) = gguf.metadata.get("general.name").and_then(|v| v.as_str()) {
+            config.name = s.to_string();
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.context_length") {
-            config.max_seq_len = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.context_length").and_then(|v| v.as_usize()) {
+            config.max_seq_len = v;
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.embedding_length") {
-            config.dim = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.embedding_length").and_then(|v| v.as_usize()) {
+            config.dim = v;
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.feed_forward_length") {
-            config.hidden_dim = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.feed_forward_length").and_then(|v| v.as_usize()) {
+            config.hidden_dim = v;
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.block_count") {
-            config.n_layers = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.block_count").and_then(|v| v.as_usize()) {
+            config.n_layers = v;
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.attention.head_count") {
-            config.n_heads = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.attention.head_count").and_then(|v| v.as_usize()) {
+            config.n_heads = v;
         }
-        if let Some(GgufValue::U32(v)) = gguf.metadata.get("lfm.attention.head_count_kv") {
-            config.n_kv_heads = *v as usize;
+        if let Some(v) = gguf.metadata.get("lfm.attention.head_count_kv").and_then(|v| v.as_usize()) {
+            config.n_kv_heads = v;
         }
-        if let Some(GgufValue::F32(v)) = gguf.metadata.get("lfm.rope.freq_base") {
-            config.rope_base = *v;
+        if let Some(v) = gguf.metadata.get("lfm.rope.freq_base").and_then(|v| v.as_f32()) {
+            config.rope_base = v;
         }
 
         config.head_dim = if config.n_heads > 0 {
@@ -129,6 +141,11 @@ impl Model {
         let tokenizer = Tokenizer::new(vocab, std::collections::HashMap::new());
         let sampler = Sampler::new(SamplerConfig::default());
         let active_adapters = ActiveAdapters::new();
+        let rope_cache = mivi_core::RopeCache::new(
+            config.head_dim,
+            config.max_seq_len,
+            config.rope_base,
+        );
 
         Ok(Self {
             config,
@@ -138,10 +155,10 @@ impl Model {
             tokenizer,
             sampler,
             active_adapters,
+            rope_cache,
         })
     }
 
-    /// Single token forward pass at given context position.
     /// Returns slice of unnormalized logits over vocabulary.
     pub fn forward(&mut self, token_id: u32, pos: usize) -> Result<&[f32]> {
         if (token_id as usize) >= self.config.vocab_size {
@@ -167,6 +184,9 @@ impl Model {
         let row_bytes_len =
             (dim * emb_info.ggml_type.type_size()) / emb_info.ggml_type.block_size();
         let row_offset = (token_id as usize) * row_bytes_len;
+        if row_offset + row_bytes_len > emb_data.len() {
+            return Err(ModelError::InvalidToken(token_id));
+        }
         let row_bytes = &emb_data[row_offset..row_offset + row_bytes_len];
         let _ = mivi_quant::dequantize_slice(emb_info.ggml_type, row_bytes, &mut self.state.x);
 
@@ -208,18 +228,8 @@ impl Model {
                         self.gguf.get_tensor_data(&ffn_up_name),
                         self.gguf.get_tensor_data(&ffn_down_name),
                     ) {
-                        let attn_norm = unsafe {
-                            std::slice::from_raw_parts(
-                                attn_norm_raw.as_ptr() as *const f32,
-                                attn_norm_raw.len() / 4,
-                            )
-                        };
-                        let ffn_norm = unsafe {
-                            std::slice::from_raw_parts(
-                                ffn_norm_raw.as_ptr() as *const f32,
-                                ffn_norm_raw.len() / 4,
-                            )
-                        };
+                        let attn_norm = safe_f32_slice(attn_norm_raw);
+                        let ffn_norm = safe_f32_slice(ffn_norm_raw);
 
                         let w = AttentionWeights {
                             attn_norm,
@@ -240,6 +250,8 @@ impl Model {
                             &mut self.kv_cache,
                             &w,
                             &self.config,
+                            &self.active_adapters,
+                            &self.rope_cache,
                         );
                     }
                 }
@@ -272,30 +284,20 @@ impl Model {
                         self.gguf.get_tensor_data(&ffn_up_name),
                         self.gguf.get_tensor_data(&ffn_down_name),
                     ) {
-                        let ssm_norm = unsafe {
-                            std::slice::from_raw_parts(
-                                ssm_norm_raw.as_ptr() as *const f32,
-                                ssm_norm_raw.len() / 4,
-                            )
-                        };
-                        let ffn_norm = unsafe {
-                            std::slice::from_raw_parts(
-                                ffn_norm_raw.as_ptr() as *const f32,
-                                ffn_norm_raw.len() / 4,
-                            )
-                        };
+                        let ssm_norm = safe_f32_slice(ssm_norm_raw);
+                        let ffn_norm = safe_f32_slice(ffn_norm_raw);
 
                         let default_ssm_a = [0.95f32; 512];
                         let default_conv_weight = [0.25f32; 4];
 
                         let ssm_a: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&a_name) {
-                            unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) }
+                            safe_f32_slice(raw)
                         } else {
                             &default_ssm_a
                         };
 
                         let conv_weight: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&conv_name) {
-                            unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len() / 4) }
+                            safe_f32_slice(raw)
                         } else {
                             &default_conv_weight
                         };
@@ -314,7 +316,7 @@ impl Model {
                             ffn_down: (down_info.ggml_type, down_raw),
                         };
 
-                        ssm_forward(layer_idx, &mut self.state, &w, &self.config);
+                        ssm_forward(layer_idx, &mut self.state, &w, &self.config, &self.active_adapters);
                     }
                 }
             }
@@ -322,9 +324,7 @@ impl Model {
 
         // 3. Final RMSNorm
         if let Ok((_, norm_raw)) = self.gguf.get_tensor_data("output_norm.weight") {
-            let final_norm = unsafe {
-                std::slice::from_raw_parts(norm_raw.as_ptr() as *const f32, norm_raw.len() / 4)
-            };
+            let final_norm = safe_f32_slice(norm_raw);
             rms_norm(&mut self.state.xb, &self.state.x, final_norm, 1e-5);
         } else {
             self.state.xb.copy_from_slice(&self.state.x);
@@ -339,6 +339,12 @@ impl Model {
                 &self.state.xb,
                 self.config.vocab_size,
                 dim,
+            );
+            self.active_adapters.apply_module(
+                "output",
+                &self.state.xb,
+                &mut self.state.lora_down,
+                &mut self.state.logits,
             );
         }
 

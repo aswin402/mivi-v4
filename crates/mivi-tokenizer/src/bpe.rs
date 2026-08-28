@@ -70,8 +70,7 @@ impl Tokenizer {
         }
 
         if piece.len() == 1 {
-            let key = piece.to_vec();
-            if let Some(&rank) = self.byte_ranks.get(&key) {
+            if let Some(&rank) = self.byte_ranks.get(piece) {
                 return vec![rank as u32];
             }
             if let Some(id) = self.vocab.get_id(&format!("<0x{:02X}>", piece[0])) {
@@ -85,8 +84,7 @@ impl Tokenizer {
         let mut min_rank = (usize::MAX, usize::MAX);
 
         for i in 0..piece.len() - 1 {
-            let pair = piece[i..i + 2].to_vec();
-            let rank = self.byte_ranks.get(&pair).copied().unwrap_or(usize::MAX);
+            let rank = self.byte_ranks.get(&piece[i..i + 2]).copied().unwrap_or(usize::MAX);
             if rank < min_rank.0 {
                 min_rank = (rank, i);
             }
@@ -99,8 +97,7 @@ impl Tokenizer {
             if idx + 2 < parts.len() {
                 let start = parts[idx].0;
                 let end = parts[idx + 2].0;
-                let pair = piece[start..end].to_vec();
-                self.byte_ranks.get(&pair).copied().unwrap_or(usize::MAX)
+                self.byte_ranks.get(&piece[start..end]).copied().unwrap_or(usize::MAX)
             } else {
                 usize::MAX
             }
@@ -133,21 +130,21 @@ impl Tokenizer {
         for i in 0..parts.len() - 1 {
             let start = parts[i].0;
             let end = parts[i + 1].0;
-            let chunk = piece[start..end].to_vec();
+            let chunk_slice = &piece[start..end];
 
-            if let Some(&id) = self.byte_ranks.get(&chunk) {
+            if let Some(&id) = self.byte_ranks.get(chunk_slice) {
                 out.push(id as u32);
-            } else if let Ok(s) = std::str::from_utf8(&chunk) {
+            } else if let Ok(s) = std::str::from_utf8(chunk_slice) {
                 if let Some(id) = self.vocab.get_id(s) {
                     out.push(id);
                 } else {
-                    for &b in &chunk {
+                    for &b in chunk_slice {
                         let hex = format!("<0x{:02X}>", b);
                         out.push(self.vocab.get_id(&hex).unwrap_or(0));
                     }
                 }
             } else {
-                for &b in &chunk {
+                for &b in chunk_slice {
                     let hex = format!("<0x{:02X}>", b);
                     out.push(self.vocab.get_id(&hex).unwrap_or(0));
                 }

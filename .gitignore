@@ -1,7 +1,6 @@
 # Rust build artifacts
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Model checkpoints (keep large GGUF files out of git)
 models/*.gguf

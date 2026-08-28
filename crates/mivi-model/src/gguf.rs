@@ -52,6 +52,37 @@ pub enum GgufValue {
     Array(Vec<GgufValue>),
 }
 
+impl GgufValue {
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            GgufValue::U8(v) => Some(*v as usize),
+            GgufValue::U16(v) => Some(*v as usize),
+            GgufValue::U32(v) => Some(*v as usize),
+            GgufValue::U64(v) => Some(*v as usize),
+            GgufValue::I8(v) if *v >= 0 => Some(*v as usize),
+            GgufValue::I16(v) if *v >= 0 => Some(*v as usize),
+            GgufValue::I32(v) if *v >= 0 => Some(*v as usize),
+            GgufValue::I64(v) if *v >= 0 => Some(*v as usize),
+            _ => None,
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            GgufValue::F32(v) => Some(*v),
+            GgufValue::F64(v) => Some(*v as f32),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            GgufValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub name: String,

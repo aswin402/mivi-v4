@@ -26,6 +26,7 @@ pub fn ssm_forward(
     state: &mut RunState,
     w: &SsmWeights,
     cfg: &ModelConfig,
+    adapters: &crate::lora::ActiveAdapters,
 ) {
     let dim = cfg.dim;
     let hidden_dim = cfg.hidden_dim;
@@ -36,19 +37,32 @@ pub fn ssm_forward(
 
     // 2. In-projection
     let _ = quantized_matvec(&mut state.xb2, w.in_proj.0, w.in_proj.1, &state.xb, dim, dim);
+    adapters.apply_module(
+        &format!("blk.{}.ssm_in", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.xb2,
+    );
 
     // 3. Short convolution & Recurrence update
     let state_offset = layer * state_dim;
     let ssm_state = &mut state.ssm_states[state_offset..state_offset + state_dim];
 
-    // Recurrent update: h_t = A * h_{t-1} + B * x_t, y_t = C * h_t
-    for i in 0..std::cmp::min(state_dim, dim) {
-        let a = if i < w.ssm_a.len() { w.ssm_a[i] } else { 0.9 };
+    // Recurrent update: h_t = A * h_{t-1} + in_t
+    let effective_dim = std::cmp::min(state_dim, dim);
+    for i in 0..effective_dim {
+        let a = if i < w.ssm_a.len() { w.ssm_a[i] } else { 0.95 };
         ssm_state[i] = a * ssm_state[i] + state.xb2[i];
     }
 
     // 4. Output projection
     let _ = quantized_matvec(&mut state.xb, w.out_proj.0, w.out_proj.1, &state.xb2, dim, dim);
+    adapters.apply_module(
+        &format!("blk.{}.ssm_out", layer),
+        &state.xb2,
+        &mut state.lora_down,
+        &mut state.xb,
+    );
     silu(&mut state.xb);
 
     // 5. Residual connection
@@ -64,6 +78,13 @@ pub fn ssm_forward(
         hidden_dim,
         dim,
     );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_gate", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.hb,
+    );
+
     let _ = quantized_matvec(
         &mut state.hb2,
         w.ffn_up.0,
@@ -71,6 +92,12 @@ pub fn ssm_forward(
         &state.xb,
         hidden_dim,
         dim,
+    );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_up", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.hb2,
     );
 
     swiglu(&mut state.hb, &state.hb2);
@@ -82,6 +109,12 @@ pub fn ssm_forward(
         &state.hb,
         dim,
         hidden_dim,
+    );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_down", layer),
+        &state.hb,
+        &mut state.lora_down,
+        &mut state.xb,
     );
 
     vec_add(&mut state.x, &state.xb);

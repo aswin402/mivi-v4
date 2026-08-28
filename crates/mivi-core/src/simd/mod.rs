@@ -9,6 +9,11 @@ pub mod avx2;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX2_FMA: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+});
+
 pub use norm::rms_norm_simd;
 
 /// Matrix-vector multiplication for dense f32 matrices: out[n] = w[n, d] * x[d]
@@ -20,7 +25,7 @@ pub fn matvec_f32(out: &mut [f32], w: &[f32], x: &[f32], n: usize, d: usize) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if *HAS_AVX2_FMA {
             unsafe {
                 return avx2::matvec_f32_avx2(out, w, x, n, d);
             }

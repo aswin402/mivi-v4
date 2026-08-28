@@ -50,11 +50,9 @@ impl KvCache {
         self.max_seq_len
     }
 
-    /// Reset cache position to start of sequence.
+    /// Reset cache position to start of sequence without expensive memory clearing.
     pub fn reset(&mut self) {
         self.current_pos = 0;
-        self.k_cache.fill(0.0);
-        self.v_cache.fill(0.0);
     }
 
     /// Store Key and Value vectors for a given layer at current position.

@@ -3,6 +3,11 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX2_FMA: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+});
+
 /// Vectorized RMS Normalization: out = x * weight / sqrt(mean(x^2) + eps)
 #[inline]
 pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
@@ -13,7 +18,7 @@ pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if *HAS_AVX2_FMA {
             unsafe {
                 let mut sum_sq_vec = _mm256_setzero_ps();
                 let chunks = len / 8;

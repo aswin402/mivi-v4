@@ -43,11 +43,23 @@ impl<'a> ContextVm<'a> {
                     .find(|b| b.source == source || b.id == source);
 
                 if let Some(b) = matching {
-                    let char_count = b.content.chars().count();
-                    let safe_start = start.min(char_count);
-                    let safe_end = end.min(char_count).max(safe_start);
-                    let slice: String = b.content.chars().skip(safe_start).take(safe_end - safe_start).collect();
-                    format!("Slice [{}..{}] from '{}':\n{}", safe_start, safe_end, source, slice)
+                    let mut indices = b.content.char_indices().map(|(idx, _)| idx);
+                    let byte_start = if start == 0 {
+                        0
+                    } else {
+                        indices.nth(start - 1).unwrap_or(b.content.len())
+                    };
+                    let byte_end = if end <= start {
+                        byte_start
+                    } else {
+                        b.content
+                            .char_indices()
+                            .nth(end)
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(b.content.len())
+                    };
+                    let slice = &b.content[byte_start..byte_end];
+                    format!("Slice [{}..{}] from '{}':\n{}", start, end, source, slice)
                 } else {
                     format!("Context source '{}' not found in store.", source)
                 }

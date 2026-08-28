@@ -22,6 +22,14 @@ impl<'a> AgentLoop<'a> {
     pub async fn step(&mut self, model_output: &str) -> String {
         self.state.step_count += 1;
 
+        if self.state.step_count > self.state.max_steps {
+            self.state.phase = AgentPhase::Failed;
+            return format!(
+                "<error>Agent exceeded maximum step limit of {}. Terminating loop.</error>",
+                self.state.max_steps
+            );
+        }
+
         if let Some(think) = extract_thinking(model_output) {
             self.state.memory.push(format!("Thinking: {}", think));
         }

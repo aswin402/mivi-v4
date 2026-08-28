@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.0.3] - 2026-08-28
+
+### Mamba SSM Math, Dynamic LoRA Dispatch, RoPE Frequency Cache & Zero-Allocation Pipelines
+
+#### 🧠 Mathematical Correctness & Adapter Infrastructure
+- **Full Mamba SSM Forward Pass**: Implemented the complete 12-step State Space Model pipeline with short causal convolution state tracking, continuous state recurrence $h_t = A \cdot h_{t-1} + \text{in}_t$, output projection, and SiLU gating.
+- **Dynamic LoRA Adapter Dispatch**: Wired active LoRA adapter execution directly into attention ($Q, K, V, O$), SSM ($\text{in}, \text{out}$), and FFN ($\text{gate}, \text{up}, \text{down}$) matrix-vector forward passes via `active_adapters.apply_module()`.
+- **Precomputed RoPE Frequency Cache**: Built `RopeCache` in `mivi-core`, precomputing full $\sin/\cos$ tables up to `max_seq_len` at model load time, eliminating per-token trigonometric and exponentiation overhead.
+- **Safe 4-Byte Alignment Verification**: Replaced unaligned memory pointer conversions with `safe_f32_slice()` guaranteeing safe alignment across all GGUF tensor lookups.
+- **Strict Little-Endian Conversion**: Enforced `f32::from_le_bytes` across `mivi-quant` and GGUF parsers.
+
+#### ⚡ Performance & Zero-Allocation Tokenization
+- **Zero-Allocation BPE Querying**: Refactored `bpe_encode_piece()` to perform direct slice queries on `HashMap<Vec<u8>, usize>` via Rust's `Borrow<[u8]>` trait, eliminating thousands of per-lookup heap allocations.
+- **Stack-Buffered MatVec Fallback**: Replaced per-token dynamic heap allocations in unaligned matrix-vector multiplication with a 1KB stack buffer (`[f32; 256]`).
+- **CPUID Detection Caching**: Cached AVX2 + FMA hardware capability checks via `LazyLock` in `mivi-core::simd`, removing runtime branching overhead in hot inner loops.
+- **Fast KV Cache Reset**: Optimized `KvCache::reset()` to O(1) by resetting `current_pos` without redundant multi-megabyte `fill(0.0)` memory sweeps.
+- **Parallel F16 MatVec**: Added Rayon chunked multi-threading to `matvec_f16`.
+
+#### 🛡️ Server Safety & Sandboxing
+- **Symlink Traversal Prevention**: Hardened `safe_join` in `mivi-tools` with canonical filesystem root containment checks.
+- **Non-Blocking Inference Execution**: Offloaded CPU-bound `m.generate()` calls to `tokio::task::spawn_blocking` to prevent Tokio worker thread starvation.
+- **Real Agent Loop Integration**: Connected `/v1/mivi/agent` directly to the `AgentLoop` state machine.
+- **Dynamic Token Usage Tracking**: Computed exact prompt and completion token counts from the tokenizer in `/v1/chat/completions`.
+- **Robust IPv6 Binding**: Handled dual-stack IPv4/IPv6 socket binding with parsed `IpAddr`.
+- **Word-Boundary Intent Routing**: Replaced naive substring matching in `IntentClassifier` with compiled regexes.
+
+#### 🧪 Testing & Verification
+- Added `test_http_server_with_real_model` loading real GGUF weights into Axum server.
+- Added sample logit tolerance assertions (`diff < 0.25`) to `test_rust_forward_matches_oracle`.
+- **20 comprehensive unit and integration tests passing** across all 12 crates.
+
+---
+
 ## [v0.0.2] - 2026-08-28
 
 ### Security Hardening, Undefined Behavior Fixes & Core Engine Correctness

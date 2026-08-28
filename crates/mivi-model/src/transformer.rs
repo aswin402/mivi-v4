@@ -2,7 +2,7 @@
 
 use crate::config::ModelConfig;
 use mivi_core::arena::RunState;
-use mivi_core::math::{apply_rope, dot_product, rms_norm, softmax, swiglu, vec_add};
+use mivi_core::math::{dot_product, rms_norm, softmax, swiglu, vec_add};
 use mivi_kv::KvCache;
 use mivi_quant::{quantized_matvec, GgmlType};
 
@@ -27,6 +27,8 @@ pub fn attention_forward(
     kv: &mut KvCache,
     w: &AttentionWeights,
     cfg: &ModelConfig,
+    adapters: &crate::lora::ActiveAdapters,
+    rope: &mivi_core::RopeCache,
 ) {
     let dim = cfg.dim;
     let kv_dim = cfg.kv_dim;
@@ -41,11 +43,31 @@ pub fn attention_forward(
 
     // 2. Q, K, V projections
     let _ = quantized_matvec(&mut state.q, w.q_weight.0, w.q_weight.1, &state.xb, dim, dim);
-    let _ = quantized_matvec(&mut state.k, w.k_weight.0, w.k_weight.1, &state.xb, kv_dim, dim);
-    let _ = quantized_matvec(&mut state.v, w.v_weight.0, w.v_weight.1, &state.xb, kv_dim, dim);
+    adapters.apply_module(
+        &format!("blk.{}.attn_q", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.q,
+    );
 
-    // 3. Apply RoPE
-    apply_rope(&mut state.q, &mut state.k, head_dim, pos, cfg.rope_base);
+    let _ = quantized_matvec(&mut state.k, w.k_weight.0, w.k_weight.1, &state.xb, kv_dim, dim);
+    adapters.apply_module(
+        &format!("blk.{}.attn_k", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.k,
+    );
+
+    let _ = quantized_matvec(&mut state.v, w.v_weight.0, w.v_weight.1, &state.xb, kv_dim, dim);
+    adapters.apply_module(
+        &format!("blk.{}.attn_v", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.v,
+    );
+
+    // 3. Apply RoPE using zero-allocation precomputed lookup table
+    rope.apply(&mut state.q, &mut state.k, pos, n_heads, n_kv_heads);
 
     // 4. Store K, V in KV cache
     let _ = kv.store(layer, pos, &state.k, &state.v);
@@ -92,6 +114,12 @@ pub fn attention_forward(
         dim,
         dim,
     );
+    adapters.apply_module(
+        &format!("blk.{}.attn_output", layer),
+        &state.attn_out,
+        &mut state.lora_down,
+        &mut state.xb,
+    );
 
     // 7. Residual connection: x = x + xb
     vec_add(&mut state.x, &state.xb);
@@ -108,6 +136,13 @@ pub fn attention_forward(
         hidden_dim,
         dim,
     );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_gate", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.hb,
+    );
+
     let _ = quantized_matvec(
         &mut state.hb2,
         w.ffn_up.0,
@@ -115,6 +150,12 @@ pub fn attention_forward(
         &state.xb,
         hidden_dim,
         dim,
+    );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_up", layer),
+        &state.xb,
+        &mut state.lora_down,
+        &mut state.hb2,
     );
 
     swiglu(&mut state.hb, &state.hb2);
@@ -127,6 +168,12 @@ pub fn attention_forward(
         &state.hb,
         dim,
         hidden_dim,
+    );
+    adapters.apply_module(
+        &format!("blk.{}.ffn_down", layer),
+        &state.hb,
+        &mut state.lora_down,
+        &mut state.xb,
     );
 
     // 11. Residual connection: x = x + xb

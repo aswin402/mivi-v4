@@ -29,7 +29,7 @@ pub fn dequantize_slice(ggml_type: GgmlType, bytes: &[u8], out: &mut [f32]) -> R
             let count = bytes.len() / 4;
             assert!(out.len() >= count, "Output buffer too small for F32 dequant");
             for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-                out[i] = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
             Ok(())
         }
@@ -66,11 +66,29 @@ pub fn quantized_matvec(
                 };
                 mivi_core::simd::matvec_f32(out, float_slice, x, n, d);
             } else {
-                let mut aligned = vec![0.0f32; weights.len() / 4];
-                for (i, chunk) in weights.chunks_exact(4).enumerate() {
-                    aligned[i] = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                // Zero-allocation fallback for unaligned F32 weights using 1KB stack buffer
+                const STACK_CHUNK: usize = 256;
+                let mut stack_buf = [0.0f32; STACK_CHUNK];
+                for row in 0..n {
+                    let row_offset = row * d * 4;
+                    let mut sum = 0.0f32;
+                    let mut col = 0;
+                    while col < d {
+                        let chunk_len = (d - col).min(STACK_CHUNK);
+                        let byte_start = row_offset + col * 4;
+                        let byte_end = byte_start + chunk_len * 4;
+                        let chunk_bytes = &weights[byte_start..byte_end];
+                        for (i, chunk) in chunk_bytes.chunks_exact(4).enumerate() {
+                            stack_buf[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        }
+                        let x_chunk = &x[col..col + chunk_len];
+                        for k in 0..chunk_len {
+                            sum += stack_buf[k] * x_chunk[k];
+                        }
+                        col += chunk_len;
+                    }
+                    out[row] = sum;
                 }
-                mivi_core::simd::matvec_f32(out, &aligned, x, n, d);
             }
             Ok(())
         }
