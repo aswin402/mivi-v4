@@ -1,0 +1,30 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Model checkpoints (keep large GGUF files out of git)
+models/*.gguf
+!models/.gitkeep
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+
+# Agent runtime state and memory logs
+.mivi/
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example

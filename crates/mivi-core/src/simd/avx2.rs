@@ -1,0 +1,45 @@
+//! x86_64 AVX2 + FMA optimized kernels.
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[target_feature(enable = "avx2", enable = "fma")]
+#[inline]
+pub unsafe fn matvec_f32_avx2(out: &mut [f32], w: &[f32], x: &[f32], n: usize, d: usize) {
+    let chunks = d / 8;
+    let remainder = d % 8;
+
+    for i in 0..n {
+        let row_ptr = w.as_ptr().add(i * d);
+        let x_ptr = x.as_ptr();
+
+        let mut acc = _mm256_setzero_ps();
+
+        for c in 0..chunks {
+            let offset = c * 8;
+            let wv = _mm256_loadu_ps(row_ptr.add(offset));
+            let xv = _mm256_loadu_ps(x_ptr.add(offset));
+            acc = _mm256_fmadd_ps(wv, xv, acc);
+        }
+
+        // Horizontal sum of acc
+        // [a0..a7]
+        let lo = _mm256_castps256_ps128(acc);
+        let hi = _mm256_extractf128_ps(acc, 1);
+        let sum128 = _mm_add_ps(lo, hi);
+        let shuf = _mm_movehl_ps(sum128, sum128);
+        let sum64 = _mm_add_ps(sum128, shuf);
+        let shuf2 = _mm_shuffle_ps(sum64, sum64, 1);
+        let sum32 = _mm_add_ss(sum64, shuf2);
+
+        let mut sum = _mm_cvtss_f32(sum32);
+
+        // Process scalar remainder
+        let rem_start = chunks * 8;
+        for r in 0..remainder {
+            sum += *row_ptr.add(rem_start + r) * *x_ptr.add(rem_start + r);
+        }
+
+        out[i] = sum;
+    }
+}

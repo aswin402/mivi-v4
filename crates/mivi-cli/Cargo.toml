@@ -1,0 +1,19 @@
+[package]
+name = "mivi-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line interface, chat repl, server orchestrator, diagnostics, and benchmark suite for Mivi"
+
+[dependencies]
+mivi-core.workspace = true
+mivi-model.workspace = true
+mivi-tokenizer.workspace = true
+mivi-server.workspace = true
+mivi-agent.workspace = true
+clap.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

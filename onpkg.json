@@ -1,0 +1,37 @@
+{
+  "name": "mivi-v4",
+  "version": "0.1.0",
+  "description": "CPU-first, low-memory, agent-native SLM engine in Rust",
+  "runtime": "native",
+  "package_manager": "cargo",
+  "architecture": {
+    "entrypoint": "src/main.rs",
+    "crates": [
+      "crates/mivi-core",
+      "crates/mivi-quant",
+      "crates/mivi-tokenizer",
+      "crates/mivi-model",
+      "crates/mivi-kv",
+      "crates/mivi-context",
+      "crates/mivi-memory",
+      "crates/mivi-tools",
+      "crates/mivi-router",
+      "crates/mivi-agent",
+      "crates/mivi-server",
+      "crates/mivi-cli"
+    ],
+    "docs": "docs",
+    "training": "training",
+    "evals": "evals",
+    "skills": "skills"
+  },
+  "active_skills": [
+    "docs/CORE_IDEA.md",
+    "docs/PRD.md",
+    "docs/SPEC.md",
+    "docs/INSPIRATIONS.md",
+    "docs/IMPLEMENTATION_PLAN.md",
+    "docs/RESEARCH.md",
+    "docs/REVISED_ARCHITECTURE.md"
+  ]
+}

@@ -1,0 +1,15 @@
+[package]
+name = "mivi-quant"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Quantization types (Q4_K_M, Q8_0, F16), block layouts, dequantization, and matrix-vector compute"
+
+[dependencies]
+mivi-core.workspace = true
+thiserror.workspace = true
+half.workspace = true
+byteorder.workspace = true
+rayon.workspace = true
+tracing.workspace = true
