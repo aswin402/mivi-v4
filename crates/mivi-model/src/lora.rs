@@ -17,6 +17,7 @@ pub struct LoraWeightPair {
 
 impl LoraWeightPair {
     pub fn new(rank: usize, alpha: f32, in_dim: usize, out_dim: usize) -> Self {
+        assert!(rank > 0, "LoRA rank must be greater than 0");
         Self {
             rank,
             alpha,
@@ -32,6 +33,9 @@ impl LoraWeightPair {
     /// out_buf: output accumulation buffer of size `out_dim`
     #[inline]
     pub fn apply(&self, x: &[f32], down_buf: &mut [f32], out_buf: &mut [f32], scale_factor: f32) {
+        if self.rank == 0 {
+            return;
+        }
         debug_assert_eq!(x.len(), self.in_dim);
         debug_assert!(down_buf.len() >= self.rank);
         debug_assert_eq!(out_buf.len(), self.out_dim);

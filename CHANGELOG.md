@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.0.4] - 2026-08-29
+
+### Engine Actor Concurrency, Stateful PRNG, BPE Merge Ranks, API Key Auth & Enterprise Hardening
+
+#### 🧵 Concurrency & Architectural Safety
+- **Dedicated `EngineActor` OS Compute Thread**: Replaced `Arc<Mutex<Model>>` shared locks with an actor architecture running model compute on a dedicated OS thread `"mivi-engine-actor"` communicating via non-blocking Tokio `mpsc` channels (`EngineHandle`), eliminating lock contention during parallel HTTP requests and streaming.
+- **Optional API Key Authentication**: Added `require_api_key` Axum middleware for `/v1/*` routes checking `Bearer` authorization headers against the `MIVI_API_KEY` environment variable.
+- **Strict Server Body & Token Limits**: Enforced `DefaultBodyLimit::max(2MB)` and clamped `max_tokens` (1 to 8192) on chat completions with structured OpenAI error responses (`invalid_request_error`).
+- **Structured Error Handling (`AppError`)**: Implemented `IntoResponse` for `AppError` returning RFC-compliant `OpenAiErrorResponse` JSON with HTTP status codes (400, 401, 500, 503).
+- **Non-Blocking Tool Execution**: Wrapped tool execution in `tokio::task::spawn_blocking` and enforced a default 30-second execution timeout via `tokio::time::timeout`.
+
+#### 🧠 Mathematical Correctness & Tokenizer Precision
+- **Stateful Xorshift64* PRNG**: Replaced per-sample `SystemTime::now()` non-deterministic RNG with a fast, seedable 64-bit linear state machine (`Sampler::with_seed()`), ensuring reproducible sampling and low overhead.
+- **True BPE Merge Rank Ordering**: Updated BPE encoder to look up merges against a precomputed `merge_ranks: HashMap<Vec<u8>, usize>` rather than relying on vocabulary IDs.
+- **UTF-8 Multi-Byte Fallback Decoding**: Replaced raw `char` casting with a raw byte accumulator (`Vec<u8>`) and `String::from_utf8_lossy`, properly decoding multi-byte UTF-8 Unicode characters without corruption.
+- **GPT-4 / LLaMA Style Regex Pre-Tokenization**: Integrated regex pre-tokenization into BPE encoding to match standard language model tokenization boundaries.
+- **Context Length Overflow Guard**: Added explicit sequence length check in `generate()` loop, cleanly terminating generation before exceeding model context capacity.
+- **Zero-Allocation Logits Scratchpad**: Added `logits_scratch: Box<[f32]>` to `RunState`, eliminating per-token heap allocations during model output projection.
+- **Error Propagation Across Forward Pass**: Updated `ssm_forward` and `attention_forward` to return `Result<()>` and propagate quantization and KV cache errors with `?`.
+- **Result-Returning KV Cache Accessors**: Refactored `KvCache::get_k` and `get_v` to return `Result<&[f32]>` with out-of-bounds error verification.
+
+#### 🛡️ Tool Robustness & Feedback
+- **Malformed Tool Call Error Feedback**: Updated markup parser to generate structured `__parse_error` synthetic tool calls when invalid JSON or missing fields are produced by the model.
+- **Dynamic SSM Sizing**: Dynamically sized fallback state vectors from model configuration (`ssm_state_dim`, `ssm_conv_kernel`).
+- **LoRA Rank-0 Guard**: Added explicit zero-rank protection and dimension assertions to LoRA adapter computations.
+- **Dynamic Sysconf Page Size**: Calculated Linux memory RSS telemetry dynamically via `sysconf(_SC_PAGESIZE)`.
+
+#### 📦 Build Hygiene & Expanded Test Suite
+- **Modernized Dependencies**: Migrated from unmaintained `serde_yaml` to `serde_yaml_ng` v0.10. Trimmed unused dependencies across 6 workspace crates (`mivi-core`, `mivi-model`, `mivi-server`, `mivi-agent`, `mivi-tools`, `mivi-memory`).
+- **Isolated Test Environments**: Replaced shared temp directories with isolated `tempfile::tempdir()` across tests.
+- **Robust Integration Testing**: Added tests for agent step exhaustion, stagnation detection, unknown tool handling, and verified SSE stream chunk payloads.
+- **Manifest-Relative Pathing**: Updated oracle and integration tests to resolve test fixtures relative to `CARGO_MANIFEST_DIR`.
+- **26 comprehensive unit, integration, and golden oracle tests passing**.
+
+---
+
 ## [v0.0.3] - 2026-08-28
 
 ### Mamba SSM Math, Dynamic LoRA Dispatch, RoPE Frequency Cache & Zero-Allocation Pipelines

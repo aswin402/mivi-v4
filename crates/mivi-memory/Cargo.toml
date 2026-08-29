@@ -9,8 +9,6 @@ description = "Persistent agent memory, Open Knowledge Format (.mivi/ directory)
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-tracing.workspace = true

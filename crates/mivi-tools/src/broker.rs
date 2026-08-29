@@ -25,9 +25,22 @@ impl ToolBroker {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let map = self.handlers.read().await;
-        if let Some(handler) = map.get(&call.name) {
-            handler(call.arguments.clone())
+        let handler = {
+            let map = self.handlers.read().await;
+            map.get(&call.name).cloned()
+        };
+        if let Some(handler) = handler {
+            let args = call.arguments.clone();
+            let call_name = call.name.clone();
+            match tokio::task::spawn_blocking(move || handler(args)).await {
+                Ok(result) => result,
+                Err(e) => ToolResult {
+                    name: call_name,
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Tool execution task failed: {}", e)),
+                },
+            }
         } else {
             ToolResult {
                 name: call.name.clone(),

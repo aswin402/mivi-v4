@@ -16,11 +16,20 @@ pub enum TokenizerError {
 
 pub type Result<T> = std::result::Result<T, TokenizerError>;
 
+static PRE_TOKENIZE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    // Standard Rust-compatible GPT-2 / GPT-4 / LLaMA pre-tokenization regex pattern
+    regex::Regex::new(
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+",
+    )
+    .expect("Invalid pre-tokenizer regex pattern")
+});
+
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     vocab: Vocab,
     merges: HashMap<(String, String), u32>,
     byte_ranks: HashMap<Vec<u8>, usize>,
+    merge_ranks: HashMap<Vec<u8>, usize>,
 }
 
 impl Tokenizer {
@@ -30,10 +39,24 @@ impl Tokenizer {
             byte_ranks.insert(token.as_bytes().to_vec(), i);
         }
 
+        let mut merge_ranks: HashMap<Vec<u8>, usize> = HashMap::new();
+        if merges.is_empty() {
+            for (i, token) in vocab.id_to_token.iter().enumerate() {
+                merge_ranks.insert(token.as_bytes().to_vec(), i);
+            }
+        } else {
+            for ((left, right), rank) in &merges {
+                let mut key = left.as_bytes().to_vec();
+                key.extend_from_slice(right.as_bytes());
+                merge_ranks.insert(key, *rank as usize);
+            }
+        }
+
         Self {
             vocab,
             merges,
             byte_ranks,
+            merge_ranks,
         }
     }
 
@@ -45,7 +68,7 @@ impl Tokenizer {
         &self.merges
     }
 
-    /// Encode input text into a sequence of BPE token IDs.
+    /// Encode input text into a sequence of BPE token IDs using standard regex pre-tokenization.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         if text.is_empty() {
             return Vec::new();
@@ -53,9 +76,9 @@ impl Tokenizer {
 
         let mut tokens = Vec::new();
 
-        // Split text by standard whitespace / word boundaries
-        for word in text.split_inclusive(' ') {
-            let piece = word.as_bytes();
+        // Split text with pre-tokenization regex
+        for m in PRE_TOKENIZE_REGEX.find_iter(text) {
+            let piece = m.as_str().as_bytes();
             let piece_tokens = self.bpe_encode_piece(piece);
             tokens.extend(piece_tokens);
         }
@@ -84,7 +107,7 @@ impl Tokenizer {
         let mut min_rank = (usize::MAX, usize::MAX);
 
         for i in 0..piece.len() - 1 {
-            let rank = self.byte_ranks.get(&piece[i..i + 2]).copied().unwrap_or(usize::MAX);
+            let rank = self.merge_ranks.get(&piece[i..i + 2]).copied().unwrap_or(usize::MAX);
             if rank < min_rank.0 {
                 min_rank = (rank, i);
             }
@@ -97,7 +120,7 @@ impl Tokenizer {
             if idx + 2 < parts.len() {
                 let start = parts[idx].0;
                 let end = parts[idx + 2].0;
-                self.byte_ranks.get(&piece[start..end]).copied().unwrap_or(usize::MAX)
+                self.merge_ranks.get(&piece[start..end]).copied().unwrap_or(usize::MAX)
             } else {
                 usize::MAX
             }
@@ -154,22 +177,22 @@ impl Tokenizer {
         out
     }
 
-    /// Decode sequence of token IDs to text
+    /// Decode sequence of token IDs to text with lossless byte fallback accumulation.
     pub fn decode(&self, ids: &[u32]) -> String {
-        let mut out = String::new();
+        let mut raw_bytes = Vec::new();
         for &id in ids {
             if let Some(token_str) = self.vocab.get_token(id) {
-                // Check if byte fallback token like <0x0A>
+                // Check if byte fallback token like <0x0A> or <0xE2>
                 if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
                     if let Ok(byte_val) = u8::from_str_radix(&token_str[3..5], 16) {
-                        out.push(byte_val as char);
+                        raw_bytes.push(byte_val);
                         continue;
                     }
                 }
-                out.push_str(token_str);
+                raw_bytes.extend_from_slice(token_str.as_bytes());
             }
         }
-        out
+        String::from_utf8_lossy(&raw_bytes).into_owned()
     }
 
     /// Decode single token ID
@@ -203,5 +226,21 @@ mod tests {
 
         let decoded = tokenizer.decode(&encoded);
         assert_eq!(decoded, "hello");
+    }
+
+    #[test]
+    fn test_byte_fallback_utf8_decode() {
+        // Multi-byte UTF-8 symbol: € is [0xE2, 0x82, 0xAC]
+        let tokens = vec![
+            "<unk>".to_string(),
+            "<0xE2>".to_string(),
+            "<0x82>".to_string(),
+            "<0xAC>".to_string(),
+        ];
+        let vocab = Vocab::new(tokens);
+        let tokenizer = Tokenizer::new(vocab, HashMap::new());
+
+        let decoded = tokenizer.decode(&[1, 2, 3]);
+        assert_eq!(decoded, "€");
     }
 }

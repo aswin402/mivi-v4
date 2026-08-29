@@ -13,18 +13,20 @@ struct OracleTrace {
 
 #[test]
 fn test_rust_forward_matches_oracle() {
-    let model_path = Path::new("models/mivi-tiny-test.gguf");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model_path = manifest_dir.join("models/mivi-tiny-test.gguf");
     assert!(
         model_path.exists(),
         "Test GGUF model must exist. Run python3 training/export/generate_fixture.py first."
     );
 
-    let mut model = Model::load(model_path).expect("Failed to load test model in Rust");
+    let mut model = Model::load(&model_path).expect("Failed to load test model in Rust");
     assert_eq!(model.config.dim, 64);
     assert_eq!(model.config.n_layers, 2);
     assert_eq!(model.config.vocab_size, 64);
 
-    let oracle_data_str = std::fs::read_to_string("tests/fixtures/oracle_output.json")
+    let oracle_path = manifest_dir.join("tests/fixtures/oracle_output.json");
+    let oracle_data_str = std::fs::read_to_string(&oracle_path)
         .expect("Failed to read oracle_output.json");
     let oracle_traces: Vec<OracleTrace> =
         serde_json::from_str(&oracle_data_str).expect("Failed to parse oracle json");

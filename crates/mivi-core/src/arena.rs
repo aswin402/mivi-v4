@@ -44,6 +44,8 @@ pub struct RunState {
     pub attn_out: Box<[f32]>,
     // Logits over entire vocabulary (vocab_size)
     pub logits: Box<[f32]>,
+    // Logits scratchpad for non-destructive temperature/top-p sampling
+    pub logits_scratch: Box<[f32]>,
 
     // SSM state (recurrent state per SSM block)
     pub ssm_states: Box<[f32]>,
@@ -69,6 +71,7 @@ impl RunState {
             att: vec![0.0f32; cfg.n_heads * cfg.max_seq_len].into_boxed_slice(),
             attn_out: vec![0.0f32; cfg.dim].into_boxed_slice(),
             logits: vec![0.0f32; cfg.vocab_size].into_boxed_slice(),
+            logits_scratch: vec![0.0f32; cfg.vocab_size].into_boxed_slice(),
             ssm_states: vec![0.0f32; cfg.n_layers * cfg.ssm_state_dim].into_boxed_slice(),
             lora_down: vec![0.0f32; cfg.max_lora_rank].into_boxed_slice(),
             lora_up: vec![0.0f32; cfg.dim].into_boxed_slice(),
@@ -89,6 +92,7 @@ impl RunState {
         self.att.fill(0.0);
         self.attn_out.fill(0.0);
         self.logits.fill(0.0);
+        self.logits_scratch.fill(0.0);
         self.ssm_states.fill(0.0);
         self.lora_down.fill(0.0);
         self.lora_up.fill(0.0);

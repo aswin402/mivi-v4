@@ -27,7 +27,7 @@ pub fn ssm_forward(
     w: &SsmWeights,
     cfg: &ModelConfig,
     adapters: &crate::lora::ActiveAdapters,
-) {
+) -> crate::model::Result<()> {
     let dim = cfg.dim;
     let hidden_dim = cfg.hidden_dim;
     let state_dim = cfg.ssm_state_dim;
@@ -36,7 +36,7 @@ pub fn ssm_forward(
     rms_norm(&mut state.xb, &state.x, w.ssm_norm, 1e-5);
 
     // 2. In-projection
-    let _ = quantized_matvec(&mut state.xb2, w.in_proj.0, w.in_proj.1, &state.xb, dim, dim);
+    quantized_matvec(&mut state.xb2, w.in_proj.0, w.in_proj.1, &state.xb, dim, dim)?;
     adapters.apply_module(
         &format!("blk.{}.ssm_in", layer),
         &state.xb,
@@ -56,7 +56,7 @@ pub fn ssm_forward(
     }
 
     // 4. Output projection
-    let _ = quantized_matvec(&mut state.xb, w.out_proj.0, w.out_proj.1, &state.xb2, dim, dim);
+    quantized_matvec(&mut state.xb, w.out_proj.0, w.out_proj.1, &state.xb2, dim, dim)?;
     adapters.apply_module(
         &format!("blk.{}.ssm_out", layer),
         &state.xb2,
@@ -70,14 +70,14 @@ pub fn ssm_forward(
 
     // 6. FFN Pre-Norm + SwiGLU
     rms_norm(&mut state.xb, &state.x, w.ffn_norm, 1e-5);
-    let _ = quantized_matvec(
+    quantized_matvec(
         &mut state.hb,
         w.ffn_gate.0,
         w.ffn_gate.1,
         &state.xb,
         hidden_dim,
         dim,
-    );
+    )?;
     adapters.apply_module(
         &format!("blk.{}.ffn_gate", layer),
         &state.xb,
@@ -85,14 +85,14 @@ pub fn ssm_forward(
         &mut state.hb,
     );
 
-    let _ = quantized_matvec(
+    quantized_matvec(
         &mut state.hb2,
         w.ffn_up.0,
         w.ffn_up.1,
         &state.xb,
         hidden_dim,
         dim,
-    );
+    )?;
     adapters.apply_module(
         &format!("blk.{}.ffn_up", layer),
         &state.xb,
@@ -102,14 +102,14 @@ pub fn ssm_forward(
 
     swiglu(&mut state.hb, &state.hb2);
 
-    let _ = quantized_matvec(
+    quantized_matvec(
         &mut state.xb,
         w.ffn_down.0,
         w.ffn_down.1,
         &state.hb,
         dim,
         hidden_dim,
-    );
+    )?;
     adapters.apply_module(
         &format!("blk.{}.ffn_down", layer),
         &state.hb,
@@ -118,4 +118,5 @@ pub fn ssm_forward(
     );
 
     vec_add(&mut state.x, &state.xb);
+    Ok(())
 }

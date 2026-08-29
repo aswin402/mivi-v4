@@ -21,17 +21,41 @@ impl Default for SamplerConfig {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Sampler {
     config: SamplerConfig,
+    rng_state: u64,
 }
 
 impl Sampler {
     pub fn new(config: SamplerConfig) -> Self {
-        Self { config }
+        Self::with_seed(config, None)
+    }
+
+    pub fn with_seed(config: SamplerConfig, seed: Option<u64>) -> Self {
+        let rng_state = seed.unwrap_or_else(|| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            if nanos == 0 { 0x853c49e6748fea9b } else { nanos }
+        });
+        Self { config, rng_state }
+    }
+
+    /// Fast stateful xorshift64* pseudo-random number generator producing a float in [0.0, 1.0).
+    #[inline]
+    pub fn random_f32(&mut self) -> f32 {
+        self.rng_state ^= self.rng_state >> 12;
+        self.rng_state ^= self.rng_state << 25;
+        self.rng_state ^= self.rng_state >> 27;
+        let r = self.rng_state.wrapping_mul(0x2545F4914F6CDD1D) >> 32;
+        (r >> 8) as f32 / 16777216.0
     }
 
     /// Sample token index from raw unnormalized logits.
-    pub fn sample(&self, logits: &mut [f32], recent_tokens: &[u32]) -> u32 {
+    pub fn sample(&mut self, logits: &mut [f32], recent_tokens: &[u32]) -> u32 {
         if self.config.temperature <= 0.0 {
             // Greedy argmax
             return argmax(logits);
@@ -88,7 +112,7 @@ impl Sampler {
 
         // Renormalize and sample with random uniform
         let sum: f32 = filtered.iter().map(|(_, p)| *p).sum();
-        let r = pseudo_random() * sum;
+        let r = self.random_f32() * sum;
         let mut acc = 0.0;
         for (idx, prob) in filtered {
             acc += prob;
@@ -112,16 +136,4 @@ fn argmax(logits: &[f32]) -> u32 {
         }
     }
     max_idx as u32
-}
-
-// Simple fast pseudo-random generator
-fn pseudo_random() -> f32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    // Linear congruential generator step
-    let seed = nanos.wrapping_mul(1664525).wrapping_add(1013904223);
-    (seed as f32) / (u32::MAX as f32)
 }

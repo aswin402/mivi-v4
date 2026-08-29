@@ -96,19 +96,39 @@ impl KvCache {
 
     /// Read Key vector slice for a given layer and position.
     #[inline]
-    pub fn get_k(&self, layer: usize, pos: usize) -> &[f32] {
-        assert!(layer < self.n_layers, "Layer index out of bounds");
-        assert!(pos < self.max_seq_len, "Position index out of bounds");
+    pub fn get_k(&self, layer: usize, pos: usize) -> Result<&[f32]> {
+        if layer >= self.n_layers {
+            return Err(KvError::InvalidLayer {
+                layer,
+                max: self.n_layers,
+            });
+        }
+        if pos >= self.max_seq_len {
+            return Err(KvError::ContextOverflow {
+                pos,
+                max: self.max_seq_len,
+            });
+        }
         let offset = (layer * self.max_seq_len + pos) * self.kv_dim;
-        &self.k_cache[offset..offset + self.kv_dim]
+        Ok(&self.k_cache[offset..offset + self.kv_dim])
     }
 
     /// Read Value vector slice for a given layer and position.
     #[inline]
-    pub fn get_v(&self, layer: usize, pos: usize) -> &[f32] {
-        assert!(layer < self.n_layers, "Layer index out of bounds");
-        assert!(pos < self.max_seq_len, "Position index out of bounds");
+    pub fn get_v(&self, layer: usize, pos: usize) -> Result<&[f32]> {
+        if layer >= self.n_layers {
+            return Err(KvError::InvalidLayer {
+                layer,
+                max: self.n_layers,
+            });
+        }
+        if pos >= self.max_seq_len {
+            return Err(KvError::ContextOverflow {
+                pos,
+                max: self.max_seq_len,
+            });
+        }
         let offset = (layer * self.max_seq_len + pos) * self.kv_dim;
-        &self.v_cache[offset..offset + self.kv_dim]
+        Ok(&self.v_cache[offset..offset + self.kv_dim])
     }
 }

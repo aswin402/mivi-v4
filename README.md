@@ -13,7 +13,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-blue.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-16%20passed-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-26%20passed-brightgreen.svg?style=flat-square)](tests/)
 [![Memory Target](https://img.shields.io/badge/memory-%3C1GB%20RAM-purple.svg?style=flat-square)](#-memory-budget)
 [![Speed](https://img.shields.io/badge/throughput-46.6%20GFLOPS%20CPU-success.svg?style=flat-square)](#-performance--benchmarks)
 

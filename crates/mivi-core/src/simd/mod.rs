@@ -19,9 +19,9 @@ pub use norm::rms_norm_simd;
 /// Matrix-vector multiplication for dense f32 matrices: out[n] = w[n, d] * x[d]
 #[inline]
 pub fn matvec_f32(out: &mut [f32], w: &[f32], x: &[f32], n: usize, d: usize) {
-    assert_eq!(out.len(), n);
-    assert_eq!(w.len(), n * d);
-    assert_eq!(x.len(), d);
+    assert!(out.len() >= n, "Output buffer too small: {} < {}", out.len(), n);
+    assert!(w.len() >= n * d, "Weight buffer too small: {} < {}", w.len(), n * d);
+    assert!(x.len() >= d, "Input vector too small: {} < {}", x.len(), d);
 
     #[cfg(target_arch = "x86_64")]
     {

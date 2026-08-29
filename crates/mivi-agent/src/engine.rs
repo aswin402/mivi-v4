@@ -1,11 +1,11 @@
-//! Canonical agent execution loop with state machine and stagnation guards.
-
 use crate::state::{AgentPhase, AgentState};
-use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker};
+use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolResult};
+use std::time::Duration;
 
 pub struct AgentLoop<'a> {
     pub state: AgentState,
     pub broker: &'a ToolBroker,
+    pub tool_timeout: Duration,
     recent_actions: Vec<String>,
 }
 
@@ -14,8 +14,14 @@ impl<'a> AgentLoop<'a> {
         Self {
             state,
             broker,
+            tool_timeout: Duration::from_secs(30),
             recent_actions: Vec::new(),
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
     }
 
     /// Process step output from model and execute requested actions.
@@ -62,7 +68,16 @@ impl<'a> AgentLoop<'a> {
         let mut results_str = String::new();
 
         for call in &calls {
-            let res = self.broker.execute(call).await;
+            let res = match tokio::time::timeout(self.tool_timeout, self.broker.execute(call)).await {
+                Ok(result) => result,
+                Err(_) => ToolResult {
+                    name: call.name.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Tool '{}' timed out after {:?}", call.name, self.tool_timeout)),
+                },
+            };
+
             results_str.push_str(&format!(
                 "<tool_result name=\"{}\">{}</tool_result>\n",
                 res.name,

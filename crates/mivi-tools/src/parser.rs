@@ -16,15 +16,43 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
     let mut tool_calls = Vec::new();
 
     for cap in TOOL_CALL_RE.captures_iter(text) {
-        if let Some(json_str) = cap.get(1) {
-            if let Ok(tc) = serde_json::from_str::<serde_json::Value>(json_str.as_str().trim()) {
-                if let (Some(name), Some(args)) = (tc.get("name"), tc.get("arguments")) {
-                    if let Some(name_str) = name.as_str() {
+        if let Some(json_match) = cap.get(1) {
+            let raw_str = json_match.as_str().trim();
+            match serde_json::from_str::<serde_json::Value>(raw_str) {
+                Ok(tc) => {
+                    if let (Some(name), Some(args)) = (tc.get("name"), tc.get("arguments")) {
+                        if let Some(name_str) = name.as_str() {
+                            tool_calls.push(ToolCall {
+                                name: name_str.to_string(),
+                                arguments: args.clone(),
+                            });
+                        } else {
+                            tool_calls.push(ToolCall {
+                                name: "__parse_error".to_string(),
+                                arguments: serde_json::json!({
+                                    "error": "Tool call 'name' field must be a string",
+                                    "raw": raw_str
+                                }),
+                            });
+                        }
+                    } else {
                         tool_calls.push(ToolCall {
-                            name: name_str.to_string(),
-                            arguments: args.clone(),
+                            name: "__parse_error".to_string(),
+                            arguments: serde_json::json!({
+                                "error": "Tool call JSON must contain 'name' and 'arguments' fields",
+                                "raw": raw_str
+                            }),
                         });
                     }
+                }
+                Err(e) => {
+                    tool_calls.push(ToolCall {
+                        name: "__parse_error".to_string(),
+                        arguments: serde_json::json!({
+                            "error": format!("Invalid JSON in <tool_call>: {}", e),
+                            "raw": raw_str
+                        }),
+                    });
                 }
             }
         }

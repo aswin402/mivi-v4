@@ -83,3 +83,74 @@ pub struct MiviStatusResponse {
     pub status: String,
     pub uptime_seconds: u64,
 }
+
+/// Standard OpenAI-compatible error response wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiErrorResponse {
+    pub error: OpenAiErrorDetail,
+}
+
+/// Standard OpenAI-compatible error details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiErrorDetail {
+    pub message: String,
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("Inference failed: {0}")]
+    InferenceError(String),
+    #[error("Internal server error: {0}")]
+    Internal(String),
+}
+
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, err_type, code, msg) = match &self {
+            AppError::Unauthorized(m) => (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_request_error",
+                Some("invalid_api_key"),
+                m.clone(),
+            ),
+            AppError::InvalidRequest(m) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("invalid_request"),
+                m.clone(),
+            ),
+            AppError::InferenceError(m) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                Some("inference_error"),
+                m.clone(),
+            ),
+            AppError::Internal(m) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                Some("internal_error"),
+                m.clone(),
+            ),
+        };
+
+        let payload = OpenAiErrorResponse {
+            error: OpenAiErrorDetail {
+                message: msg,
+                r#type: err_type.to_string(),
+                param: None,
+                code: code.map(String::from),
+            },
+        };
+
+        (status, axum::Json(payload)).into_response()
+    }
+}

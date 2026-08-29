@@ -9,16 +9,14 @@ use mivi_router::{IntentClassifier, TaskFamily};
 use mivi_server::{create_router, AppState, ChatCompletionRequest, MessageDto};
 use mivi_tools::{get_builtin_tool_definitions, register_builtin_tools, ToolBroker, ToolCall};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn test_builtins_and_tool_broker() {
     let broker = ToolBroker::new();
-    let temp_dir = std::env::temp_dir().join("mivi_test_tools");
-    let _ = std::fs::create_dir_all(&temp_dir);
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
-    register_builtin_tools(&broker, &temp_dir).await;
+    register_builtin_tools(&broker, temp_dir.path()).await;
 
     // 1. Test calculator tool
     let calc_call = ToolCall {
@@ -78,10 +76,10 @@ async fn test_context_store_and_vm() {
 
     let slice_res = vm.execute(ContextOp::Slice {
         source: "spec.md".to_string(),
-        start: 0,
-        end: 50,
+        start: 5,
+        end: 25,
     });
-    assert!(slice_res.contains("Slice"));
+    assert!(slice_res.contains("uses hybrid SSM"));
 }
 
 #[tokio::test]
@@ -102,8 +100,8 @@ async fn test_intent_classifier_routing() {
 #[tokio::test]
 async fn test_agent_loop_execution() {
     let broker = ToolBroker::new();
-    let temp_dir = std::env::temp_dir();
-    register_builtin_tools(&broker, &temp_dir).await;
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    register_builtin_tools(&broker, temp_dir.path()).await;
 
     let state = AgentState::new("Compute 25 * 4 and tell me", 10);
     let mut agent = AgentLoop::new(state, &broker);
@@ -126,14 +124,58 @@ async fn test_agent_loop_execution() {
 }
 
 #[tokio::test]
+async fn test_agent_max_steps_exhaustion() {
+    let broker = ToolBroker::new();
+    let state = AgentState::new("Infinite loop task", 2);
+    let mut agent = AgentLoop::new(state, &broker);
+
+    let call_step = r#"<tool_call>{"name": "calculator", "arguments": {"expression": "1 + 1"}}</tool_call>"#;
+    let _ = agent.step(call_step).await;
+    let _ = agent.step(call_step).await;
+    let res = agent.step(call_step).await;
+
+    assert_eq!(agent.state.phase, AgentPhase::Failed);
+    assert!(res.contains("exceeded maximum step limit"));
+}
+
+#[tokio::test]
+async fn test_agent_stagnation_guard() {
+    let broker = ToolBroker::new();
+    let state = AgentState::new("Stagnant task", 10);
+    let mut agent = AgentLoop::new(state, &broker);
+
+    let same_call = r#"<tool_call>{"name": "calculator", "arguments": {"expression": "2 + 2"}}</tool_call>"#;
+    let _ = agent.step(same_call).await;
+    let _ = agent.step(same_call).await;
+    let res = agent.step(same_call).await;
+
+    assert_eq!(agent.state.phase, AgentPhase::Completed);
+    assert!(res.contains("Agent stagnation detected"));
+}
+
+#[tokio::test]
+async fn test_agent_tool_failure_propagation() {
+    let broker = ToolBroker::new();
+    let state = AgentState::new("Unknown tool call", 5);
+    let mut agent = AgentLoop::new(state, &broker);
+
+    let unknown_call = r#"<tool_call>{"name": "non_existent_tool", "arguments": {}}</tool_call>"#;
+    let res = agent.step(unknown_call).await;
+
+    assert!(res.contains("not registered in broker"));
+}
+
+#[tokio::test]
 async fn test_http_server_endpoints() {
     let broker = ToolBroker::new();
-    let state = Arc::new(Mutex::new(AppState {
+    let engine = mivi_server::EngineActor::spawn(None);
+    let state = Arc::new(AppState {
         model_name: "mivi-v4-test".to_string(),
         start_time: std::time::Instant::now(),
         broker,
-        model: None,
-    }));
+        engine,
+        api_key: None,
+    });
     let app = create_router(state);
 
     // 1. GET /health
@@ -206,6 +248,10 @@ async fn test_http_server_endpoints() {
     assert_eq!(res.status(), StatusCode::OK);
     let content_type = res.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(content_type.contains("text/event-stream"));
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("data: "));
+    assert!(body_str.contains("[DONE]"));
 
     // 5. GET /v1/mivi/status
     let req = Request::builder()
@@ -251,23 +297,30 @@ async fn test_http_server_endpoints() {
     assert_eq!(res.status(), StatusCode::OK);
     let content_type = res.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(content_type.contains("text/event-stream"));
+    let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("data: "));
+    assert!(body_str.contains("[DONE]"));
 }
 
 #[tokio::test]
 async fn test_http_server_with_real_model() {
-    let model_path = std::path::Path::new("models/mivi-tiny-test.gguf");
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model_path = manifest_dir.join("models/mivi-tiny-test.gguf");
     if !model_path.exists() {
         return;
     }
 
-    let model = mivi_model::Model::load(model_path).expect("Failed to load test model");
+    let model = mivi_model::Model::load(&model_path).expect("Failed to load test model");
     let broker = ToolBroker::new();
-    let state = Arc::new(Mutex::new(AppState {
+    let engine = mivi_server::EngineActor::spawn(Some(model));
+    let state = Arc::new(AppState {
         model_name: "mivi-tiny-test".to_string(),
         start_time: std::time::Instant::now(),
         broker,
-        model: Some(Arc::new(Mutex::new(model))),
-    }));
+        engine,
+        api_key: None,
+    });
     let app = create_router(state);
 
     let chat_req = ChatCompletionRequest {

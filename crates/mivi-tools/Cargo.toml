@@ -7,10 +7,7 @@ license.workspace = true
 description = "Tool registry, schema definitions, tool broker, sandboxed executor, and built-in tool suite"
 
 [dependencies]
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-reqwest.workspace = true
 regex.workspace = true

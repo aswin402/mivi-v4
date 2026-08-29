@@ -11,8 +11,8 @@ static HAS_AVX2_FMA: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
 /// Vectorized RMS Normalization: out = x * weight / sqrt(mean(x^2) + eps)
 #[inline]
 pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
-    assert_eq!(out.len(), x.len());
-    assert_eq!(x.len(), weight.len());
+    assert!(out.len() >= x.len(), "Output buffer too small for norm: {} < {}", out.len(), x.len());
+    assert!(weight.len() >= x.len(), "Weight vector too small for norm: {} < {}", weight.len(), x.len());
 
     let len = x.len();
 

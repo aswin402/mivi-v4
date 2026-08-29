@@ -20,6 +20,10 @@ pub enum ModelError {
     Gguf(#[from] crate::gguf::GgufError),
     #[error("Tokenizer error: {0}")]
     Tokenizer(#[from] mivi_tokenizer::TokenizerError),
+    #[error("Quantization error: {0}")]
+    Quant(#[from] mivi_quant::QuantError),
+    #[error("KV cache error: {0}")]
+    KvCache(#[from] mivi_kv::KvError),
     #[error("Missing model weight: {0}")]
     MissingWeight(String),
     #[error("Invalid token ID: {0}")]
@@ -252,7 +256,7 @@ impl Model {
                             &self.config,
                             &self.active_adapters,
                             &self.rope_cache,
-                        );
+                        )?;
                     }
                 }
                 BlockType::SSM => {
@@ -287,8 +291,8 @@ impl Model {
                         let ssm_norm = safe_f32_slice(ssm_norm_raw);
                         let ffn_norm = safe_f32_slice(ffn_norm_raw);
 
-                        let default_ssm_a = [0.95f32; 512];
-                        let default_conv_weight = [0.25f32; 4];
+                        let default_ssm_a = vec![0.95f32; self.config.ssm_state_dim];
+                        let default_conv_weight = vec![0.25f32; self.config.ssm_conv_kernel];
 
                         let ssm_a: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&a_name) {
                             safe_f32_slice(raw)
@@ -316,7 +320,7 @@ impl Model {
                             ffn_down: (down_info.ggml_type, down_raw),
                         };
 
-                        ssm_forward(layer_idx, &mut self.state, &w, &self.config, &self.active_adapters);
+                        ssm_forward(layer_idx, &mut self.state, &w, &self.config, &self.active_adapters)?;
                     }
                 }
             }
@@ -332,14 +336,14 @@ impl Model {
 
         // 4. Output projection to vocabulary logits (output.weight / lm_head.weight)
         if let Ok((head_info, head_raw)) = self.gguf.get_tensor_data("output.weight") {
-            let _ = quantized_matvec(
+            quantized_matvec(
                 &mut self.state.logits,
                 head_info.ggml_type,
                 head_raw,
                 &self.state.xb,
                 self.config.vocab_size,
                 dim,
-            );
+            )?;
             self.active_adapters.apply_module(
                 "output",
                 &self.state.xb,
@@ -380,9 +384,14 @@ impl Model {
 
         // Generation loop
         for _ in 0..max_tokens {
-            let logits = self.forward(current_token, pos)?;
-            let mut logits_clone = logits.to_vec();
-            let next_token = self.sampler.sample(&mut logits_clone, &recent_tokens);
+            if pos >= self.config.max_seq_len {
+                // Gracefully stop at context window limit
+                break;
+            }
+
+            let _ = self.forward(current_token, pos)?;
+            self.state.logits_scratch.copy_from_slice(&self.state.logits);
+            let next_token = self.sampler.sample(&mut self.state.logits_scratch, &recent_tokens);
 
             if next_token == eos_token_id {
                 break;
