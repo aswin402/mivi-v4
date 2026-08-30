@@ -26,8 +26,8 @@ fn test_rust_forward_matches_oracle() {
     assert_eq!(model.config.vocab_size, 64);
 
     let oracle_path = manifest_dir.join("tests/fixtures/oracle_output.json");
-    let oracle_data_str = std::fs::read_to_string(&oracle_path)
-        .expect("Failed to read oracle_output.json");
+    let oracle_data_str =
+        std::fs::read_to_string(&oracle_path).expect("Failed to read oracle_output.json");
     let oracle_traces: Vec<OracleTrace> =
         serde_json::from_str(&oracle_data_str).expect("Failed to parse oracle json");
 
@@ -64,9 +64,13 @@ fn test_rust_forward_matches_oracle() {
         for (idx, &expected_logit) in trace.logits_sample.iter().enumerate() {
             let diff = (logits[idx] - expected_logit).abs();
             assert!(
-                diff < 0.25,
+                diff < 0.05,
                 "Logit mismatch at pos {}, index {}: rust={:.4}, oracle={:.4}, diff={:.4}",
-                trace.pos, idx, logits[idx], expected_logit, diff
+                trace.pos,
+                idx,
+                logits[idx],
+                expected_logit,
+                diff
             );
         }
     }

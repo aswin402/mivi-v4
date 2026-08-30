@@ -1,23 +1,21 @@
 //! Q8_0 (8-bit quantization) implementation with AVX2 SIMD & Rayon parallelism.
 
 use half::f16;
-use rayon::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 pub const Q8_0_BLOCK_SIZE: usize = 32;
 pub const Q8_0_BYTES: usize = 34;
-pub const PARALLEL_CHUNK_SIZE: usize = 16;
 
 /// Dequantize one Q8_0 block (34 bytes) into 32 f32 outputs.
 #[inline]
 pub fn dequantize_q8_0(block: &[u8], out: &mut [f32]) {
-    debug_assert!(block.len() >= Q8_0_BYTES);
-    debug_assert!(out.len() >= Q8_0_BLOCK_SIZE);
+    assert!(block.len() >= Q8_0_BYTES, "Q8_0 block buffer too small");
+    assert!(out.len() >= Q8_0_BLOCK_SIZE, "Q8_0 output buffer too small");
 
     let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
-    for i in 0..32 {
+    for i in 0..Q8_0_BLOCK_SIZE {
         let q = block[2 + i] as i8;
         out[i] = (q as f32) * d;
     }
@@ -25,53 +23,60 @@ pub fn dequantize_q8_0(block: &[u8], out: &mut [f32]) {
 
 /// Dequantize multi-block Q8_0 buffer into f32 slice.
 pub fn dequantize_q8_0_slice(bytes: &[u8], out: &mut [f32]) {
-    let n_blocks = out.len() / Q8_0_BLOCK_SIZE;
-    debug_assert!(bytes.len() >= n_blocks * Q8_0_BYTES);
+    crate::types::dequantize_blocks(bytes, out, Q8_0_BYTES, Q8_0_BLOCK_SIZE, dequantize_q8_0);
+}
 
-    for b in 0..n_blocks {
-        let block = &bytes[b * Q8_0_BYTES..(b + 1) * Q8_0_BYTES];
-        let out_sub = &mut out[b * Q8_0_BLOCK_SIZE..(b + 1) * Q8_0_BLOCK_SIZE];
-        dequantize_q8_0(block, out_sub);
-    }
+/// Checked matvec for Q8_0 weights returning QuantError on dimension mismatch.
+pub fn try_matvec_q8_0(
+    out: &mut [f32],
+    weights: &[u8],
+    x: &[f32],
+    n: usize,
+    d: usize,
+) -> crate::types::Result<()> {
+    let blocks_per_row = d / Q8_0_BLOCK_SIZE;
+    let row_bytes = blocks_per_row * Q8_0_BYTES;
+    crate::types::validate_matvec_args(out, weights, x, n, d, row_bytes, Q8_0_BLOCK_SIZE)?;
+
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_avx2 = false;
+
+    crate::types::parallel_row_matvec(out, weights, n, row_bytes, |row_slice, _| {
+        compute_single_row_q8_0(row_slice, x, blocks_per_row, use_avx2)
+    });
+    Ok(())
 }
 
 /// High-performance Quantized matrix-vector multiplication for Q8_0 weights: out[n] = W[n, d] * x[d]
+///
+/// # Panics
+/// Panics if buffer lengths are insufficient or unaligned. Prefer `try_matvec_q8_0` in fallible contexts.
+#[track_caller]
 pub fn matvec_q8_0(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usize) {
-    debug_assert_eq!(d % Q8_0_BLOCK_SIZE, 0);
-    let blocks_per_row = d / Q8_0_BLOCK_SIZE;
-    let row_bytes = blocks_per_row * Q8_0_BYTES;
-
-    // Use Rayon chunk parallelization for larger matrices
-    if n >= 64 {
-        out.par_chunks_mut(PARALLEL_CHUNK_SIZE)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| {
-                let start_row = chunk_idx * PARALLEL_CHUNK_SIZE;
-                for (r, out_val) in out_chunk.iter_mut().enumerate() {
-                    let i = start_row + r;
-                    let row_start = i * row_bytes;
-                    *out_val = compute_single_row_q8_0(&weights[row_start..row_start + row_bytes], x, blocks_per_row);
-                }
-            });
-    } else {
-        for i in 0..n {
-            let row_start = i * row_bytes;
-            out[i] = compute_single_row_q8_0(&weights[row_start..row_start + row_bytes], x, blocks_per_row);
-        }
+    if let Err(e) = try_matvec_q8_0(out, weights, x, n, d) {
+        panic!("{}", e);
     }
 }
 
 #[inline]
-fn compute_single_row_q8_0(row_weights: &[u8], x: &[f32], blocks_per_row: usize) -> f32 {
+fn compute_single_row_q8_0(
+    row_weights: &[u8],
+    x: &[f32],
+    blocks_per_row: usize,
+    use_avx2: bool,
+) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        if use_avx2 {
             unsafe {
                 return compute_single_row_q8_0_avx2(row_weights, x, blocks_per_row);
             }
         }
     }
 
+    let _ = use_avx2;
     compute_single_row_q8_0_scalar(row_weights, x, blocks_per_row)
 }
 
@@ -80,12 +85,13 @@ fn compute_single_row_q8_0_scalar(row_weights: &[u8], x: &[f32], blocks_per_row:
     let mut row_sum = 0.0f32;
     for b in 0..blocks_per_row {
         let block_offset = b * Q8_0_BYTES;
-        let d = f16::from_le_bytes([row_weights[block_offset], row_weights[block_offset + 1]]).to_f32();
-        let qs = &row_weights[block_offset + 2..block_offset + 34];
+        let d =
+            f16::from_le_bytes([row_weights[block_offset], row_weights[block_offset + 1]]).to_f32();
+        let qs = &row_weights[block_offset + 2..block_offset + Q8_0_BYTES];
         let x_sub = &x[b * Q8_0_BLOCK_SIZE..(b + 1) * Q8_0_BLOCK_SIZE];
 
         let mut block_acc = 0.0f32;
-        for j in 0..32 {
+        for j in 0..Q8_0_BLOCK_SIZE {
             block_acc += (qs[j] as i8 as f32) * x_sub[j];
         }
         row_sum += block_acc * d;
@@ -96,14 +102,19 @@ fn compute_single_row_q8_0_scalar(row_weights: &[u8], x: &[f32], blocks_per_row:
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 #[inline]
-unsafe fn compute_single_row_q8_0_avx2(row_weights: &[u8], x: &[f32], blocks_per_row: usize) -> f32 {
-    assert!(row_weights.len() >= blocks_per_row * Q8_0_BYTES);
-    assert!(x.len() >= blocks_per_row * Q8_0_BLOCK_SIZE);
+/// # Safety
+/// Caller must ensure AVX2 and FMA CPU features are enabled and row buffer lengths match `blocks_per_row * Q8_0_BYTES`.
+unsafe fn compute_single_row_q8_0_avx2(
+    row_weights: &[u8],
+    x: &[f32],
+    blocks_per_row: usize,
+) -> f32 {
     let mut total_acc = 0.0f32;
 
     for b in 0..blocks_per_row {
         let block_offset = b * Q8_0_BYTES;
-        let d = f16::from_le_bytes([row_weights[block_offset], row_weights[block_offset + 1]]).to_f32();
+        let d =
+            f16::from_le_bytes([row_weights[block_offset], row_weights[block_offset + 1]]).to_f32();
         let qs_ptr = row_weights.as_ptr().add(block_offset + 2) as *const i8;
         let x_ptr = x.as_ptr().add(b * Q8_0_BLOCK_SIZE);
 
@@ -123,16 +134,8 @@ unsafe fn compute_single_row_q8_0_avx2(row_weights: &[u8], x: &[f32], blocks_per
             block_acc_v = _mm256_fmadd_ps(q_f32, x_v, block_acc_v);
         }
 
-        // Horizontal sum
-        let lo = _mm256_castps256_ps128(block_acc_v);
-        let hi = _mm256_extractf128_ps(block_acc_v, 1);
-        let sum128 = _mm_add_ps(lo, hi);
-        let shuf = _mm_movehl_ps(sum128, sum128);
-        let sum64 = _mm_add_ps(sum128, shuf);
-        let shuf2 = _mm_shuffle_ps(sum64, sum64, 1);
-        let sum32 = _mm_add_ss(sum64, shuf2);
-
-        let block_sum = _mm_cvtss_f32(sum32);
+        // Horizontal sum using shared helper
+        let block_sum = mivi_core::simd::hsum256_ps(block_acc_v);
         total_acc += block_sum * d;
     }
 

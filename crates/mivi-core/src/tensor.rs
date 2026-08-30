@@ -38,13 +38,38 @@ impl TensorShape {
         &self.dims
     }
 
+    /// Returns the dimension size at the given axis index or error if out of bounds.
+    #[inline]
+    pub fn dim(&self, index: usize) -> Result<usize> {
+        self.dims
+            .get(index)
+            .copied()
+            .ok_or(TensorError::DimOutOfBounds {
+                dim: index,
+                rank: self.dims.len(),
+            })
+    }
+
+    /// Try calculating total number of elements with checked overflow arithmetic.
+    #[inline]
+    pub fn try_num_elements(&self) -> Result<usize> {
+        if self.dims.is_empty() {
+            Ok(0)
+        } else {
+            self.dims
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(TensorError::ElementCountMismatch {
+                    expected: usize::MAX,
+                    actual: 0,
+                })
+        }
+    }
+
     #[inline]
     pub fn num_elements(&self) -> usize {
-        if self.dims.is_empty() {
-            0
-        } else {
-            self.dims.iter().product()
-        }
+        self.try_num_elements()
+            .expect("Tensor shape overflow: dimensions too large")
     }
 }
 
@@ -88,5 +113,28 @@ impl Tensor {
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
         &mut self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tensor_shape_num_elements() {
+        let shape = TensorShape::new(vec![2, 3, 4]);
+        assert_eq!(shape.num_elements(), 24);
+        assert_eq!(shape.rank(), 3);
+        assert_eq!(shape.dims(), &[2, 3, 4]);
+
+        let empty = TensorShape::new(vec![]);
+        assert_eq!(empty.num_elements(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Tensor shape overflow")]
+    fn test_tensor_shape_overflow() {
+        let shape = TensorShape::new(vec![usize::MAX, 2]);
+        let _ = shape.num_elements();
     }
 }

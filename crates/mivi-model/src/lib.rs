@@ -1,15 +1,26 @@
 //! Model loading, tensor forward pass, and sampling for mivi-v4.
 
 pub mod config;
+pub mod ffn;
 pub mod gguf;
+pub mod loader;
 pub mod lora;
 pub mod model;
 pub mod sampler;
 pub mod ssm;
 pub mod transformer;
+pub mod weights;
 
-pub use config::{BlockType, ModelConfig};
+pub use config::{
+    BlockType, GenerationConfig, ModelConfig, DEFAULT_MAX_LORA_RANK, DEFAULT_N_EXPERTS,
+    DEFAULT_RMS_NORM_EPS, DEFAULT_ROPE_BASE, DEFAULT_SSM_A_VAL, RECENT_TOKENS_WINDOW,
+};
+pub use ffn::{ffn_swiglu_forward, linear_forward, FfnSwigluParams, LinearParams};
 pub use gguf::{GgufError, GgufFile, GgufValue, TensorInfo};
+pub use loader::safe_f32_slice;
 pub use lora::{ActiveAdapters, LoraAdapter, LoraWeightPair};
 pub use model::{Model, ModelError, Result};
 pub use sampler::{Sampler, SamplerConfig};
+pub use ssm::{ssm_forward, SsmParams};
+pub use transformer::{attention_forward, AttentionParams};
+pub use weights::{LayerWeights, ModelWeights, QuantizedTensor};

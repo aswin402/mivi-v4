@@ -1,5 +1,14 @@
-//! Precomputed Rotary Position Embedding (RoPE) frequency cache.
-//! Eliminates per-token `powf`, `sin`, and `cos` runtime computation.
+use thiserror::Error;
+
+#[derive(Error, Debug, PartialEq)]
+pub enum RopeError {
+    #[error("RoPE position {pos} out of bounds (max {max})")]
+    PosOutOfBounds { pos: usize, max: usize },
+    #[error("RoPE buffer too small: required {required}, got {actual}")]
+    BufferTooSmall { required: usize, actual: usize },
+}
+
+pub type Result<T> = std::result::Result<T, RopeError>;
 
 #[derive(Debug, Clone)]
 pub struct RopeCache {
@@ -43,7 +52,57 @@ impl RopeCache {
         }
     }
 
+    /// Safely apply RoPE returning an error if position or buffer size is out of bounds.
+    #[inline]
+    pub fn try_apply(
+        &self,
+        q: &mut [f32],
+        k: &mut [f32],
+        pos: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+    ) -> Result<()> {
+        if pos >= self.max_seq_len {
+            return Err(RopeError::PosOutOfBounds {
+                pos,
+                max: self.max_seq_len,
+            });
+        }
+        let half_dim = self.half_dim;
+        let head_dim = self.head_dim;
+        let offset = pos * half_dim;
+        if offset + half_dim > self.cos_table.len() {
+            return Err(RopeError::PosOutOfBounds {
+                pos,
+                max: self.max_seq_len,
+            });
+        }
+        let cos = &self.cos_table[offset..offset + half_dim];
+        let sin = &self.sin_table[offset..offset + half_dim];
+
+        let cfg_q = RotateConfig {
+            n_heads: n_q_heads,
+            head_dim,
+            half_dim,
+            cos,
+            sin,
+        };
+        let cfg_k = RotateConfig {
+            n_heads: n_kv_heads,
+            head_dim,
+            half_dim,
+            cos,
+            sin,
+        };
+        try_rotate_heads(q, &cfg_q)?;
+        try_rotate_heads(k, &cfg_k)?;
+        Ok(())
+    }
+
     /// Apply RoPE to query and key vectors in-place using precomputed lookup tables.
+    ///
+    /// # Panics
+    /// Panics if position is out of bounds or buffers are too small. Prefer `try_apply`.
     #[inline]
     pub fn apply(
         &self,
@@ -53,39 +112,43 @@ impl RopeCache {
         n_q_heads: usize,
         n_kv_heads: usize,
     ) {
-        assert!(pos < self.max_seq_len, "Position exceeds precomputed RoPE cache size");
-        let half_dim = self.half_dim;
-        let head_dim = self.head_dim;
-        let offset = pos * half_dim;
-        let cos = &self.cos_table[offset..offset + half_dim];
-        let sin = &self.sin_table[offset..offset + half_dim];
-
-        // Rotate Query heads
-        for h in 0..n_q_heads {
-            let head = &mut q[h * head_dim..(h + 1) * head_dim];
-            for i in 0..half_dim {
-                let q0 = head[2 * i];
-                let q1 = head[2 * i + 1];
-                let c = cos[i];
-                let s = sin[i];
-                head[2 * i] = q0 * c - q1 * s;
-                head[2 * i + 1] = q0 * s + q1 * c;
-            }
-        }
-
-        // Rotate Key heads
-        for h in 0..n_kv_heads {
-            let head = &mut k[h * head_dim..(h + 1) * head_dim];
-            for i in 0..half_dim {
-                let k0 = head[2 * i];
-                let k1 = head[2 * i + 1];
-                let c = cos[i];
-                let s = sin[i];
-                head[2 * i] = k0 * c - k1 * s;
-                head[2 * i + 1] = k0 * s + k1 * c;
-            }
+        if let Err(e) = self.try_apply(q, k, pos, n_q_heads, n_kv_heads) {
+            panic!("{}", e);
         }
     }
+}
+
+/// Parameter descriptor for head rotation in RoPE.
+#[derive(Debug, Clone, Copy)]
+pub struct RotateConfig<'a> {
+    pub n_heads: usize,
+    pub head_dim: usize,
+    pub half_dim: usize,
+    pub cos: &'a [f32],
+    pub sin: &'a [f32],
+}
+
+#[inline]
+fn try_rotate_heads(vec: &mut [f32], cfg: &RotateConfig) -> Result<()> {
+    let req_len = cfg.n_heads * cfg.head_dim;
+    if vec.len() < req_len {
+        return Err(RopeError::BufferTooSmall {
+            required: req_len,
+            actual: vec.len(),
+        });
+    }
+    for h in 0..cfg.n_heads {
+        let head = &mut vec[h * cfg.head_dim..(h + 1) * cfg.head_dim];
+        for i in 0..cfg.half_dim {
+            let v0 = head[2 * i];
+            let v1 = head[2 * i + 1];
+            let c = cfg.cos[i];
+            let s = cfg.sin[i];
+            head[2 * i] = v0 * c - v1 * s;
+            head[2 * i + 1] = v0 * s + v1 * c;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -114,5 +177,28 @@ mod tests {
             assert!((q1[i] - q2[i]).abs() < 1e-5);
             assert!((k1[i] - k2[i]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn test_rope_try_apply_errors() {
+        let cache = RopeCache::new(64, 16, 10000.0);
+        let mut q = vec![1.0f32; 64];
+        let mut k = vec![1.0f32; 64];
+
+        // Pos >= max_seq_len
+        assert_eq!(
+            cache.try_apply(&mut q, &mut k, 20, 1, 1),
+            Err(RopeError::PosOutOfBounds { pos: 20, max: 16 })
+        );
+
+        // Buffer too small
+        let mut short_q = vec![1.0f32; 32];
+        assert_eq!(
+            cache.try_apply(&mut short_q, &mut k, 0, 1, 1),
+            Err(RopeError::BufferTooSmall {
+                required: 64,
+                actual: 32
+            })
+        );
     }
 }

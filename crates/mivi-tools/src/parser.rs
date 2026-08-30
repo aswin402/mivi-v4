@@ -4,12 +4,14 @@ use crate::schema::ToolCall;
 use regex::Regex;
 use std::sync::LazyLock;
 
+// Compile-time verified regex patterns for agent markup extraction
 static TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<tool_call>([\s\S]*?)</tool_call>").expect("Invalid tool call regex pattern")
+    Regex::new(r"<tool_call>([\s\S]*?)</tool_call>")
+        .expect("Valid regex literal for tool call parser")
 });
 
 static THINKING_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<think>([\s\S]*?)</think>").expect("Invalid thinking regex pattern")
+    Regex::new(r"<think>([\s\S]*?)</think>").expect("Valid regex literal for thinking parser")
 });
 
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
@@ -22,37 +24,25 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
                 Ok(tc) => {
                     if let (Some(name), Some(args)) = (tc.get("name"), tc.get("arguments")) {
                         if let Some(name_str) = name.as_str() {
-                            tool_calls.push(ToolCall {
-                                name: name_str.to_string(),
-                                arguments: args.clone(),
-                            });
+                            tool_calls.push(ToolCall::new(name_str, args.clone()));
                         } else {
-                            tool_calls.push(ToolCall {
-                                name: "__parse_error".to_string(),
-                                arguments: serde_json::json!({
-                                    "error": "Tool call 'name' field must be a string",
-                                    "raw": raw_str
-                                }),
-                            });
+                            tool_calls.push(ToolCall::parse_error(
+                                "Tool call 'name' field must be a string",
+                                raw_str,
+                            ));
                         }
                     } else {
-                        tool_calls.push(ToolCall {
-                            name: "__parse_error".to_string(),
-                            arguments: serde_json::json!({
-                                "error": "Tool call JSON must contain 'name' and 'arguments' fields",
-                                "raw": raw_str
-                            }),
-                        });
+                        tool_calls.push(ToolCall::parse_error(
+                            "Tool call JSON must contain 'name' and 'arguments' fields",
+                            raw_str,
+                        ));
                     }
                 }
                 Err(e) => {
-                    tool_calls.push(ToolCall {
-                        name: "__parse_error".to_string(),
-                        arguments: serde_json::json!({
-                            "error": format!("Invalid JSON in <tool_call>: {}", e),
-                            "raw": raw_str
-                        }),
-                    });
+                    tool_calls.push(ToolCall::parse_error(
+                        &format!("Invalid JSON in <tool_call>: {}", e),
+                        raw_str,
+                    ));
                 }
             }
         }

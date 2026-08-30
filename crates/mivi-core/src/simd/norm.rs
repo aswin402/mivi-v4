@@ -1,24 +1,23 @@
-//! Vectorized SIMD math kernels (RMSNorm, Softmax, Dot Product, SiLU) with AVX2 & NEON acceleration.
+//! SIMD-accelerated LayerNorm & RMSNorm kernels (AVX2 / ARM NEON / Fallback).
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-#[cfg(target_arch = "x86_64")]
-static HAS_AVX2_FMA: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
-});
-
-/// Vectorized RMS Normalization: out = x * weight / sqrt(mean(x^2) + eps)
-#[inline]
+/// High performance SIMD Root Mean Square Normalization (RMSNorm).
+///
+/// Computes: `out[i] = (x[i] / sqrt(mean(x^2) + eps)) * weight[i]`
 pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
-    assert!(out.len() >= x.len(), "Output buffer too small for norm: {} < {}", out.len(), x.len());
-    assert!(weight.len() >= x.len(), "Weight vector too small for norm: {} < {}", weight.len(), x.len());
-
     let len = x.len();
+    if len == 0 {
+        return;
+    }
+    assert_eq!(out.len(), len, "rms_norm_simd: out length mismatch");
+    assert_eq!(weight.len(), len, "rms_norm_simd: weight length mismatch");
 
     #[cfg(target_arch = "x86_64")]
     {
-        if *HAS_AVX2_FMA {
+        if *super::HAS_AVX2_FMA {
+            // SAFETY: Verified HAS_AVX2_FMA feature detection at runtime and checked buffer lengths above.
             unsafe {
                 let mut sum_sq_vec = _mm256_setzero_ps();
                 let chunks = len / 8;
@@ -28,18 +27,11 @@ pub fn rms_norm_simd(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
                     sum_sq_vec = _mm256_fmadd_ps(xv, xv, sum_sq_vec);
                 }
 
-                // Horizontal sum
-                let lo = _mm256_castps256_ps128(sum_sq_vec);
-                let hi = _mm256_extractf128_ps(sum_sq_vec, 1);
-                let sum128 = _mm_add_ps(lo, hi);
-                let shuf = _mm_movehl_ps(sum128, sum128);
-                let sum64 = _mm_add_ps(sum128, shuf);
-                let shuf2 = _mm_shuffle_ps(sum64, sum64, 1);
-                let sum32 = _mm_add_ss(sum64, shuf2);
-                let mut sum_sq = _mm_cvtss_f32(sum32);
+                // Horizontal sum using shared avx2 helper
+                let mut sum_sq = super::avx2::hsum256_ps(sum_sq_vec);
 
-                for i in (chunks * 8)..len {
-                    sum_sq += x[i] * x[i];
+                for &val in x.iter().take(len).skip(chunks * 8) {
+                    sum_sq += val * val;
                 }
 
                 let scale = 1.0 / (sum_sq / (len as f32) + eps).sqrt();

@@ -32,75 +32,116 @@ pub struct ChunkDelta {
     pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
-/// Create an SSE Event containing a content delta chunk.
-pub fn create_content_chunk_event(
+pub const OPENAI_CHUNK_OBJECT: &str = "chat.completion.chunk";
+pub const OPENAI_COMPLETION_OBJECT: &str = "chat.completion";
+pub const SSE_DONE_MARKER: &str = "[DONE]";
+pub const ROLE_ASSISTANT: &str = "assistant";
+pub const FINISH_REASON_STOP: &str = "stop";
+
+/// Base helper to construct an SSE ChatCompletionChunk Event.
+pub fn create_chunk_event(
     id: &str,
     model: &str,
-    content: &str,
+    delta: ChunkDelta,
+    finish_reason: Option<&str>,
 ) -> Event {
     let chunk = ChatCompletionChunk {
         id: id.to_string(),
-        object: "chat.completion.chunk".to_string(),
+        object: OPENAI_CHUNK_OBJECT.to_string(),
         created: chrono::Utc::now().timestamp() as u64,
         model: model.to_string(),
         choices: vec![ChunkChoice {
             index: 0,
-            delta: ChunkDelta {
-                role: None,
-                content: Some(content.to_string()),
-                thinking: None,
-                tool_calls: None,
-            },
-            finish_reason: None,
+            delta,
+            finish_reason: finish_reason.map(|s| s.to_string()),
         }],
     };
 
-    Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())
+    let data = match serde_json::to_string(&chunk) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize SSE chunk: {}", e);
+            "{}".to_string()
+        }
+    };
+
+    Event::default().data(data)
+}
+
+/// Create an SSE Event containing an error chunk wrapped in XML error tags.
+#[inline]
+pub fn create_error_chunk_event(id: &str, model: &str, error: &str) -> Event {
+    let msg = format!("<error>{}</error>", error);
+    create_content_chunk_event(id, model, &msg)
+}
+
+/// Create an SSE Event containing a content delta chunk.
+#[inline]
+pub fn create_content_chunk_event(id: &str, model: &str, content: &str) -> Event {
+    create_chunk_event(
+        id,
+        model,
+        ChunkDelta {
+            content: Some(content.to_string()),
+            ..Default::default()
+        },
+        None,
+    )
 }
 
 /// Create an SSE Event containing a thinking delta chunk.
-pub fn create_thinking_chunk_event(
-    id: &str,
-    model: &str,
-    thinking: &str,
-) -> Event {
-    let chunk = ChatCompletionChunk {
-        id: id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created: chrono::Utc::now().timestamp() as u64,
-        model: model.to_string(),
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: ChunkDelta {
-                role: None,
-                content: None,
-                thinking: Some(thinking.to_string()),
-                tool_calls: None,
-            },
-            finish_reason: None,
-        }],
-    };
-
-    Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())
+#[inline]
+pub fn create_thinking_chunk_event(id: &str, model: &str, thinking: &str) -> Event {
+    create_chunk_event(
+        id,
+        model,
+        ChunkDelta {
+            thinking: Some(thinking.to_string()),
+            ..Default::default()
+        },
+        None,
+    )
 }
 
 /// Create the final SSE Event with finish_reason.
-pub fn create_done_chunk_event(
+#[inline]
+pub fn create_done_chunk_event(id: &str, model: &str, finish_reason: &str) -> Event {
+    create_chunk_event(id, model, ChunkDelta::default(), Some(finish_reason))
+}
+
+/// Create standard SSE [DONE] termination event.
+#[inline]
+pub fn create_done_event() -> Event {
+    Event::default().data(SSE_DONE_MARKER)
+}
+
+/// Helper to send standard sequence: thinking event -> content chunks -> stop chunk -> done event.
+pub async fn send_sse_sequence<F, Fut>(
+    tx: &tokio::sync::mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
     id: &str,
     model: &str,
-    finish_reason: &str,
-) -> Event {
-    let chunk = ChatCompletionChunk {
-        id: id.to_string(),
-        object: "chat.completion.chunk".to_string(),
-        created: chrono::Utc::now().timestamp() as u64,
-        model: model.to_string(),
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: ChunkDelta::default(),
-            finish_reason: Some(finish_reason.to_string()),
-        }],
-    };
-
-    Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())
+    thinking_msg: Option<&str>,
+    body: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Some(msg) = thinking_msg {
+        if tx
+            .send(Ok(create_thinking_chunk_event(id, model, msg)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    body().await;
+    if tx
+        .send(Ok(create_done_chunk_event(id, model, FINISH_REASON_STOP)))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = tx.send(Ok(create_done_event())).await;
 }

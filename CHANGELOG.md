@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.1.1] - 2026-08-30
+
+### Enterprise Security, Panic Elimination, SIMD Dispatch, RegexSet Router & Robustness Hardening
+
+#### 🛡️ Security & Safety Hardening
+- **GQA Head Divisibility Validation**: Added `!self.n_heads.is_multiple_of(self.n_kv_heads)` check inside `ModelConfig::validate()`, rejecting misconfigured model configurations at load time.
+- **Fallible `GgmlType::block_size()`**: Changed `block_size()` to return `Option<usize>` and added `block_size_checked()` returning `Result<usize, QuantError>`, preventing panics on unsupported or unknown quantization types.
+- **Prompt Injection Defense**: Sanitized user task prompts via XML escaping (`mivi_agent::escape_xml_content`) before interpolating into agent system templates.
+- **Localhost-Restricted CORS**: Replaced permissive CORS with strict origin validation restricted to `localhost` and `127.0.0.1`.
+- **Constant-Time API Key Comparison**: Integrated `subtle::ConstantTimeEq` for timing-attack-safe Bearer token verification.
+
+#### 🛑 Panic Elimination & Fallible APIs
+- **Safe Fallible LoRA**: Implemented `LoraWeightPair::try_apply()` returning typed errors on shape mismatches without crashing the runtime.
+- **Checked Quantized MatVec**: Added `validate_matvec_args()` and fallible `try_matvec_f16()`, `try_matvec_q8_0()`, `try_matvec_q4_k_m()` with full input/output bounds checks.
+- **Checked RoPE Cache**: Added `RopeCache::try_apply()` and `try_rotate_heads()` returning `Result<(), RopeError>` for safe rotary position embedding application.
+- **Model Dimension Invariant Checks**: Enforced `final_norm` dimension matching against model dimension with `ModelError::DimMismatch`.
+- **Engine Actor Graceful Recovery**: Gracefully closed communication channels and logged errors if runtime spawning fails.
+
+#### ⚡ Performance & Routing Optimizations
+- **Single-Pass `RegexSet` Classifier**: Replaced sequential regex scans with `RegexSet` in `IntentClassifier` for fast, single-pass intent routing.
+- **SIMD Function Pointer Dispatch**: Optimized `matvec_f32()` to dispatch via a pre-resolved `LazyLock<MatvecFn>` pointer, bypassing runtime branching.
+- **Zero-Allocation Error Responses**: Optimized `AppError::into_response()` to consume `self` by value, eliminating heap string clones.
+- **Vocab Buffer Reuse**: Preallocated string buffers during vocabulary extraction in GGUF loader.
+
+#### 🧹 Deduplication & Architecture Polish
+- **Layer & Weight Resolvers**: Centralized GGUF block naming patterns into `layer_tensor_name()` and `layer_module_name()`.
+- **Deduplicated QKV Projections**: Extracted unified linear projection closure in `compute_qkv()`.
+- **SSE Error Helper**: Standardized SSE stream error payloads with `create_error_chunk_event()`.
+- **Named Constants**: Centralized stop token constants (`DEFAULT_STOP_TOKEN_IM_END`, `DEFAULT_STOP_TOKEN_ENDOFTEXT`) and GGUF metadata keys.
+
+#### 🧪 Verification & Hygiene
+- **44 comprehensive workspace unit and integration tests passing**.
+- **0 Clippy warnings** with `-D warnings` on all targets.
+- **100% `cargo fmt` formatting compliance**.
+
+---
+
 ## [v0.0.4] - 2026-08-29
 
 ### Engine Actor Concurrency, Stateful PRNG, BPE Merge Ranks, API Key Auth & Enterprise Hardening

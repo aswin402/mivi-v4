@@ -16,49 +16,69 @@ pub struct LoraWeightPair {
 }
 
 impl LoraWeightPair {
-    pub fn new(rank: usize, alpha: f32, in_dim: usize, out_dim: usize) -> Self {
-        assert!(rank > 0, "LoRA rank must be greater than 0");
-        Self {
+    /// Safely create a new LoRA weight pair, returning None if rank == 0.
+    pub fn try_new(rank: usize, alpha: f32, in_dim: usize, out_dim: usize) -> Option<Self> {
+        if rank == 0 {
+            return None;
+        }
+        Some(Self {
             rank,
             alpha,
             a: vec![0.0f32; rank * in_dim],
             b: vec![0.0f32; out_dim * rank],
             in_dim,
             out_dim,
-        }
+        })
     }
 
-    /// Compute LoRA delta: delta = (alpha / rank) * B * (A * x)
-    /// down_buf: temporary scratch buffer of size `rank`
-    /// out_buf: output accumulation buffer of size `out_dim`
-    #[inline]
-    pub fn apply(&self, x: &[f32], down_buf: &mut [f32], out_buf: &mut [f32], scale_factor: f32) {
-        if self.rank == 0 {
-            return;
-        }
-        debug_assert_eq!(x.len(), self.in_dim);
-        debug_assert!(down_buf.len() >= self.rank);
-        debug_assert_eq!(out_buf.len(), self.out_dim);
+    /// Construct a new LoRA weight pair, panicking if rank == 0. Prefer `try_new`.
+    #[track_caller]
+    pub fn new(rank: usize, alpha: f32, in_dim: usize, out_dim: usize) -> Self {
+        Self::try_new(rank, alpha, in_dim, out_dim).expect("LoRA rank must be greater than 0")
+    }
 
-        // 1. A * x -> down_buf [rank]
-        for r in 0..self.rank {
-            let row = &self.a[r * self.in_dim..(r + 1) * self.in_dim];
-            let mut sum = 0.0f32;
-            for j in 0..self.in_dim {
-                sum += row[j] * x[j];
-            }
-            down_buf[r] = sum;
+    /// Safely apply LoRA delta without panicking on buffer size mismatch.
+    pub fn try_apply(
+        &self,
+        x: &[f32],
+        down_buf: &mut [f32],
+        out_buf: &mut [f32],
+        scale_factor: f32,
+    ) -> Result<(), &'static str> {
+        if self.rank == 0 {
+            return Ok(());
         }
+        if x.len() < self.in_dim {
+            return Err("LoRA input buffer too small");
+        }
+        if down_buf.len() < self.rank {
+            return Err("LoRA down buffer too small");
+        }
+        if out_buf.len() < self.out_dim {
+            return Err("LoRA out buffer too small");
+        }
+
+        // 1. A * x -> down_buf [rank] (SIMD accelerated)
+        mivi_core::simd::matvec_f32(down_buf, &self.a, x, self.rank, self.in_dim);
 
         // 2. B * down_buf -> out_buf [out_dim] with scaling (alpha / rank) * scale_factor
         let eff_scale = (self.alpha / (self.rank as f32)) * scale_factor;
-        for i in 0..self.out_dim {
+        for (i, out_val) in out_buf.iter_mut().enumerate().take(self.out_dim) {
             let row = &self.b[i * self.rank..(i + 1) * self.rank];
-            let mut sum = 0.0f32;
-            for r in 0..self.rank {
-                sum += row[r] * down_buf[r];
-            }
-            out_buf[i] += sum * eff_scale;
+            let sum = mivi_core::math::dot_product(row, &down_buf[..self.rank]);
+            *out_val += sum * eff_scale;
+        }
+        Ok(())
+    }
+
+    /// Compute LoRA delta: delta = (alpha / rank) * B * (A * x)
+    ///
+    /// # Panics
+    /// Panics if buffers do not meet minimum dimension requirements. Prefer `try_apply` in fallible contexts.
+    #[inline]
+    pub fn apply(&self, x: &[f32], down_buf: &mut [f32], out_buf: &mut [f32], scale_factor: f32) {
+        if let Err(e) = self.try_apply(x, down_buf, out_buf, scale_factor) {
+            panic!("{}", e);
         }
     }
 }
@@ -144,10 +164,10 @@ mod tests {
         let mut pair = LoraWeightPair::new(rank, alpha, in_dim, out_dim);
         // A matrix = [[1, 0, 0, 0], [0, 1, 0, 0]]
         pair.a[0] = 1.0;
-        pair.a[1 * in_dim + 1] = 1.0;
+        pair.a[in_dim + 1] = 1.0;
         // B matrix = [[1, 0], [0, 1], [0, 0], [0, 0]]
         pair.b[0] = 1.0;
-        pair.b[1 * rank + 1] = 1.0;
+        pair.b[rank + 1] = 1.0;
 
         let x = vec![2.0, 3.0, 0.0, 0.0];
         let mut down = vec![0.0; rank];

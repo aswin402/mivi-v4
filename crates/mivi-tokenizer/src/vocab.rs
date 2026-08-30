@@ -25,7 +25,22 @@ impl Vocab {
 
     pub fn add_special_token(&mut self, token: String, id: u32) {
         self.special_tokens.insert(token.clone(), id);
-        self.token_to_id.insert(token, id);
+        self.token_to_id.insert(token.clone(), id);
+        let id_idx = id as usize;
+        if id_idx >= self.id_to_token.len() {
+            self.id_to_token.resize(id_idx + 1, String::new());
+        }
+        self.id_to_token[id_idx] = token;
+    }
+
+    #[inline]
+    pub fn is_special(&self, token: &str) -> bool {
+        self.special_tokens.contains_key(token)
+    }
+
+    #[inline]
+    pub fn is_special_id(&self, id: u32) -> bool {
+        self.special_tokens.values().any(|&v| v == id)
     }
 
     #[inline]

@@ -23,6 +23,18 @@ impl std::fmt::Display for Role {
     }
 }
 
+impl std::str::FromStr for Role {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "system" => Ok(Self::System),
+            "assistant" => Ok(Self::Assistant),
+            "tool" => Ok(Self::Tool),
+            _ => Ok(Self::User),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -30,54 +42,79 @@ pub struct ChatMessage {
     pub name: Option<String>,
 }
 
+pub use mivi_core::DEFAULT_SYSTEM_PROMPT;
+
+pub const CHATML_MSG_SIZE_ESTIMATE: usize = 128;
+pub const CHATML_OVERHEAD_ESTIMATE: usize = 256;
+
 /// Formats OpenAI-style messages into ChatML string for model prompting.
 pub fn format_chatml(
     messages: &[ChatMessage],
     tools_json: Option<&str>,
     enable_thinking: bool,
 ) -> String {
-    let mut out = String::new();
+    use std::fmt::Write;
+
+    let estimated_cap = messages.len() * CHATML_MSG_SIZE_ESTIMATE + CHATML_OVERHEAD_ESTIMATE;
+    let mut out = String::with_capacity(estimated_cap);
 
     // Check if system message exists
     let has_system = messages.iter().any(|m| m.role == Role::System);
 
     if !has_system && (tools_json.is_some() || enable_thinking) {
-        out.push_str(&format!("{}system\n", BOS_TOKEN));
-        out.push_str("You are Mivi-v4, a fast, reliable, tool-using AI agent.");
-        if let Some(tools) = tools_json {
-            out.push_str(&format!("\n{}\n{}\n{}\n", TOOLS_DEF_START, tools, TOOLS_DEF_END));
-            out.push_str("To invoke a tool, output:\n<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>\n");
-        }
-        if enable_thinking {
-            out.push_str("\nThink concisely inside <think>...</think> before taking actions or answering.\n");
-        }
-        out.push_str(&format!("{}\n", EOS_TOKEN));
+        writeln!(out, "{}system", BOS_TOKEN).unwrap();
+        out.push_str(DEFAULT_SYSTEM_PROMPT);
+        append_tool_and_thinking_instructions(&mut out, tools_json, enable_thinking);
+        writeln!(out, "{}", EOS_TOKEN).unwrap();
     }
 
     for msg in messages {
-        out.push_str(&format!("{}{}\n", BOS_TOKEN, msg.role));
-        if msg.role == Role::System {
-            if let Some(content) = &msg.content {
-                out.push_str(content);
-            }
-            if let Some(tools) = tools_json {
-                out.push_str(&format!("\n{}\n{}\n{}\n", TOOLS_DEF_START, tools, TOOLS_DEF_END));
-                out.push_str("To invoke a tool, output:\n<tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call>\n");
-            }
-            if enable_thinking {
-                out.push_str("\nThink concisely inside <think>...</think> before taking actions or answering.\n");
-            }
+        if let Some(name) = &msg.name {
+            writeln!(out, "{}{}:{name}", BOS_TOKEN, msg.role).unwrap();
         } else {
-            if let Some(content) = &msg.content {
-                out.push_str(content);
-            }
+            writeln!(out, "{}{}", BOS_TOKEN, msg.role).unwrap();
         }
-        out.push_str(&format!("{}\n", EOS_TOKEN));
+
+        if let Some(content) = &msg.content {
+            out.push_str(content);
+        }
+
+        if msg.role == Role::System {
+            append_tool_and_thinking_instructions(&mut out, tools_json, enable_thinking);
+        }
+
+        writeln!(out, "{}", EOS_TOKEN).unwrap();
     }
 
     // Append assistant prompt header
-    out.push_str(&format!("{}assistant\n", BOS_TOKEN));
+    writeln!(out, "{}assistant", BOS_TOKEN).unwrap();
     out
+}
+
+fn append_tool_and_thinking_instructions(
+    out: &mut String,
+    tools_json: Option<&str>,
+    enable_thinking: bool,
+) {
+    use std::fmt::Write;
+
+    if let Some(tools) = tools_json {
+        writeln!(out, "\n{}\n{}\n{}", TOOLS_DEF_START, tools, TOOLS_DEF_END).unwrap();
+        writeln!(
+            out,
+            "To invoke a tool, output:\n{}{{\"name\":\"tool_name\",\"arguments\":{{...}}}}{}",
+            TOOL_CALL_START, TOOL_CALL_END
+        )
+        .unwrap();
+    }
+    if enable_thinking {
+        writeln!(
+            out,
+            "\nThink concisely inside {}...{} before taking actions or answering.",
+            THINK_START, THINK_END
+        )
+        .unwrap();
+    }
 }
 
 #[cfg(test)]

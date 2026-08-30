@@ -3,6 +3,11 @@
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
+/// Matrix-vector multiplication for dense F32 weights with ARM64 NEON.
+///
+/// # Safety
+/// Caller must ensure that the target CPU supports NEON (standard on aarch64),
+/// and that slices `out`, `w`, and `x` have valid bounds ($out.len() \ge n$, $w.len() \ge n \times d$, $x.len() \ge d$).
 #[inline]
 pub unsafe fn matvec_f32_neon(out: &mut [f32], w: &[f32], x: &[f32], n: usize, d: usize) {
     #[cfg(target_arch = "aarch64")]

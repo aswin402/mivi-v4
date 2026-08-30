@@ -9,11 +9,14 @@ description = "Command-line interface, chat repl, server orchestrator, diagnosti
 [dependencies]
 mivi-core.workspace = true
 mivi-model.workspace = true
+mivi-quant.workspace = true
+mivi-tools.workspace = true
 mivi-tokenizer.workspace = true
 mivi-server.workspace = true
 mivi-agent.workspace = true
 clap.workspace = true
 tokio.workspace = true
+axum.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

@@ -1,0 +1,306 @@
+//! GGUF model loader and tensor weight resolution for mivi-v4.
+
+use crate::config::{BlockType, ModelConfig, DEFAULT_HEAD_DIM, DEFAULT_SSM_A_VAL};
+use crate::gguf::{GgufFile, GgufValue};
+use crate::model::{ModelError, Result};
+use crate::weights::{
+    AttentionLayerWeights, FfnLayerWeights, LayerWeights, ModelWeights, QuantizedTensor,
+    SsmLayerWeights,
+};
+
+/// Convert raw aligned byte buffer into f32 slice.
+#[inline]
+pub fn safe_f32_slice(raw: &[u8]) -> Result<&[f32]> {
+    let ptr = raw.as_ptr();
+    if !(ptr as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+        return Err(ModelError::MalformedTensorAlignment(
+            "GGUF tensor buffer is not 4-byte aligned".to_string(),
+        ));
+    }
+    // SAFETY: Pointer is validated to be 4-byte aligned, raw slice length is checked,
+    // and the resulting &[f32] lifetime is strictly bound to the input &[u8] slice.
+    Ok(unsafe { std::slice::from_raw_parts(ptr as *const f32, raw.len() / mivi_quant::F32_BYTES) })
+}
+
+macro_rules! read_gguf_meta {
+    ($gguf:expr, $key:expr, $accessor:ident, $target:expr) => {
+        if let Some(v) = $gguf.metadata.get($key).and_then(|v| v.$accessor()) {
+            $target = v;
+        }
+    };
+}
+
+pub const GGUF_KEY_GENERAL_NAME: &str = "general.name";
+pub const GGUF_KEY_CONTEXT_LENGTH: &str = "lfm.context_length";
+pub const GGUF_KEY_EMBEDDING_LENGTH: &str = "lfm.embedding_length";
+pub const GGUF_KEY_FEED_FORWARD_LENGTH: &str = "lfm.feed_forward_length";
+pub const GGUF_KEY_BLOCK_COUNT: &str = "lfm.block_count";
+pub const GGUF_KEY_ATTENTION_HEAD_COUNT: &str = "lfm.attention.head_count";
+pub const GGUF_KEY_ATTENTION_HEAD_COUNT_KV: &str = "lfm.attention.head_count_kv";
+pub const GGUF_KEY_ROPE_FREQ_BASE: &str = "lfm.rope.freq_base";
+pub const GGUF_KEY_TOKENIZER_TOKENS: &str = "tokenizer.ggml.tokens";
+
+/// Extract model hyperparameters from GGUF metadata.
+pub fn extract_model_config(gguf: &GgufFile) -> Result<ModelConfig> {
+    let mut config = ModelConfig::default();
+    if let Some(s) = gguf
+        .metadata
+        .get(GGUF_KEY_GENERAL_NAME)
+        .and_then(|v| v.as_str())
+    {
+        config.name = s.to_string();
+    }
+    read_gguf_meta!(gguf, GGUF_KEY_CONTEXT_LENGTH, as_usize, config.max_seq_len);
+    read_gguf_meta!(gguf, GGUF_KEY_EMBEDDING_LENGTH, as_usize, config.dim);
+    read_gguf_meta!(
+        gguf,
+        GGUF_KEY_FEED_FORWARD_LENGTH,
+        as_usize,
+        config.hidden_dim
+    );
+    read_gguf_meta!(gguf, GGUF_KEY_BLOCK_COUNT, as_usize, config.n_layers);
+    read_gguf_meta!(
+        gguf,
+        GGUF_KEY_ATTENTION_HEAD_COUNT,
+        as_usize,
+        config.n_heads
+    );
+    read_gguf_meta!(
+        gguf,
+        GGUF_KEY_ATTENTION_HEAD_COUNT_KV,
+        as_usize,
+        config.n_kv_heads
+    );
+    read_gguf_meta!(gguf, GGUF_KEY_ROPE_FREQ_BASE, as_f32, config.rope_base);
+
+    config.head_dim = if config.n_heads > 0 {
+        config.dim / config.n_heads
+    } else {
+        DEFAULT_HEAD_DIM
+    };
+    config.kv_dim = config.n_kv_heads * config.head_dim;
+
+    let mut block_types = Vec::with_capacity(config.n_layers);
+    for i in 0..config.n_layers {
+        let ssm_key = format!("blk.{}.ssm_in.weight", i);
+        if gguf.tensors.contains_key(&ssm_key) {
+            block_types.push(BlockType::SSM);
+        } else {
+            block_types.push(BlockType::Attention);
+        }
+    }
+    config.block_types = block_types;
+    config.validate().map_err(ModelError::InvalidConfig)?;
+    Ok(config)
+}
+
+/// Extract vocabulary string list from GGUF metadata tokens.
+pub fn extract_vocab(gguf: &GgufFile, default_size: usize) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if let Some(GgufValue::Array(arr)) = gguf.metadata.get(GGUF_KEY_TOKENIZER_TOKENS) {
+        tokens.reserve(arr.len());
+        for val in arr {
+            if let GgufValue::String(s) = val {
+                tokens.push(s.clone());
+            }
+        }
+    }
+    if tokens.is_empty() {
+        tokens.reserve(default_size);
+        let mut buf = String::with_capacity(16);
+        use std::fmt::Write;
+        for i in 0..default_size {
+            buf.clear();
+            let _ = write!(&mut buf, "<tok_{}>", i);
+            tokens.push(buf.clone());
+        }
+    }
+    tokens
+}
+
+#[inline]
+fn get_tensor_entry<'a>(
+    gguf: &'a GgufFile,
+    name: &str,
+) -> Result<(&'a crate::gguf::TensorInfo, &'a [u8])> {
+    gguf.get_tensor_data(name)
+        .map_err(|_| ModelError::MissingWeight(name.to_string()))
+}
+
+/// Resolve a quantized tensor by name from GGUF file.
+pub fn resolve_tensor(gguf: &GgufFile, name: &str) -> Result<QuantizedTensor> {
+    let (info, data) = get_tensor_entry(gguf, name)?;
+    Ok(QuantizedTensor {
+        quant_type: info.ggml_type,
+        offset: gguf.data_offset + info.offset as usize,
+        len: data.len(),
+        rows: if info.dims.len() > 1 {
+            info.dims[1]
+        } else {
+            info.dims[0]
+        },
+        cols: info.dims[0],
+    })
+}
+
+/// Resolve an unquantized f32 tensor vector by name.
+pub fn resolve_f32_vec(gguf: &GgufFile, name: &str) -> Result<Box<[f32]>> {
+    let (_, raw) = get_tensor_entry(gguf, name)?;
+    Ok(safe_f32_slice(raw)?.to_vec().into_boxed_slice())
+}
+
+#[inline]
+fn layer_tensor_name(layer_idx: usize, tensor: &str) -> String {
+    format!("blk.{}.{}.weight", layer_idx, tensor)
+}
+
+#[inline]
+fn layer_module_name(layer_idx: usize, module: &str) -> String {
+    format!("blk.{}.{}", layer_idx, module)
+}
+
+/// Resolve feed-forward network weights for a given layer index.
+pub fn resolve_ffn_weights(gguf: &GgufFile, layer_idx: usize) -> Result<FfnLayerWeights> {
+    let ffn_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "ffn_norm"))?;
+    let w_gate = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ffn_gate"))?;
+    let w_up = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ffn_up"))?;
+    let w_down = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ffn_down"))?;
+
+    Ok(FfnLayerWeights {
+        ffn_norm,
+        w_gate,
+        w_up,
+        w_down,
+        ffn_gate_name: layer_module_name(layer_idx, "ffn_gate"),
+        ffn_up_name: layer_module_name(layer_idx, "ffn_up"),
+        ffn_down_name: layer_module_name(layer_idx, "ffn_down"),
+    })
+}
+
+/// Resolve grouped-query attention weights for a given layer index.
+pub fn resolve_attention_layer(gguf: &GgufFile, layer_idx: usize) -> Result<AttentionLayerWeights> {
+    let attn_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "attn_norm"))?;
+    let wq = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_q"))?;
+    let wk = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_k"))?;
+    let wv = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_v"))?;
+    let wo = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_output"))?;
+    let ffn = resolve_ffn_weights(gguf, layer_idx)?;
+
+    Ok(AttentionLayerWeights {
+        attn_norm,
+        wq,
+        wk,
+        wv,
+        wo,
+        ffn,
+        q_name: layer_module_name(layer_idx, "attn_q"),
+        k_name: layer_module_name(layer_idx, "attn_k"),
+        v_name: layer_module_name(layer_idx, "attn_v"),
+        o_name: layer_module_name(layer_idx, "attn_output"),
+    })
+}
+
+/// Resolve state space model (SSM) layer weights for a given layer index.
+pub fn resolve_ssm_layer(
+    gguf: &GgufFile,
+    layer_idx: usize,
+    config: &ModelConfig,
+) -> Result<SsmLayerWeights> {
+    let ssm_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "ssm_norm"))?;
+    let in_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_in"))?;
+    let out_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_out"))?;
+
+    let a_name = layer_tensor_name(layer_idx, "ssm_a");
+    let ssm_a = match gguf.get_tensor_data(&a_name) {
+        Ok((_, raw)) => safe_f32_slice(raw)?.to_vec().into_boxed_slice(),
+        Err(_) => {
+            tracing::debug!("Using default SSM A weights for layer {}", layer_idx);
+            vec![DEFAULT_SSM_A_VAL; config.ssm_state_dim].into_boxed_slice()
+        }
+    };
+
+    let conv_name = layer_tensor_name(layer_idx, "ssm_conv");
+    let ssm_conv = match gguf.get_tensor_data(&conv_name) {
+        Ok((_, raw)) => safe_f32_slice(raw)?.to_vec().into_boxed_slice(),
+        Err(_) => {
+            tracing::debug!(
+                "SSM conv weights missing for layer {}, using empty buffer",
+                layer_idx
+            );
+            Box::new([])
+        }
+    };
+
+    let ffn = resolve_ffn_weights(gguf, layer_idx)?;
+
+    Ok(SsmLayerWeights {
+        ssm_norm,
+        in_proj,
+        ssm_a,
+        ssm_conv,
+        out_proj,
+        ffn,
+        in_name: layer_module_name(layer_idx, "ssm_in"),
+        out_name: layer_module_name(layer_idx, "ssm_out"),
+    })
+}
+
+/// Resolve all model weights (embeddings, layers, norms, head) from GGUF.
+pub fn resolve_model_weights(gguf: &GgufFile, config: &ModelConfig) -> Result<ModelWeights> {
+    let (emb_info, emb_data) = gguf
+        .get_tensor_data("token_embd.weight")
+        .or_else(|_| gguf.get_tensor_data("model.embed_tokens.weight"))
+        .map_err(|_| ModelError::MissingWeight("token_embd.weight".into()))?;
+
+    let token_embd = QuantizedTensor {
+        quant_type: emb_info.ggml_type,
+        offset: gguf.data_offset + emb_info.offset as usize,
+        len: emb_data.len(),
+        rows: config.vocab_size,
+        cols: config.dim,
+    };
+
+    let mut layers = Vec::with_capacity(config.n_layers);
+    for layer_idx in 0..config.n_layers {
+        match config.block_types[layer_idx] {
+            BlockType::Attention => {
+                layers.push(LayerWeights::Attention(resolve_attention_layer(
+                    gguf, layer_idx,
+                )?));
+            }
+            BlockType::SSM => {
+                layers.push(LayerWeights::Ssm(resolve_ssm_layer(
+                    gguf, layer_idx, config,
+                )?));
+            }
+        }
+    }
+
+    let output_norm = if let Ok((_, raw)) = gguf.get_tensor_data("output_norm.weight") {
+        Some(safe_f32_slice(raw)?.to_vec().into_boxed_slice())
+    } else {
+        None
+    };
+
+    let output_proj = if let Ok((info, data)) = gguf
+        .get_tensor_data("output.weight")
+        .or_else(|_| gguf.get_tensor_data("lm_head.weight"))
+    {
+        Some(QuantizedTensor {
+            quant_type: info.ggml_type,
+            offset: gguf.data_offset + info.offset as usize,
+            len: data.len(),
+            rows: config.vocab_size,
+            cols: config.dim,
+        })
+    } else {
+        None
+    };
+
+    Ok(ModelWeights {
+        token_embd,
+        layers,
+        output_norm,
+        output_proj,
+    })
+}

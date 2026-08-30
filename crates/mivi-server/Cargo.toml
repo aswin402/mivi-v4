@@ -7,6 +7,7 @@ license.workspace = true
 description = "OpenAI-compatible HTTP server with SSE streaming, grammar-constrained decoding, and Mivi API endpoints"
 
 [dependencies]
+mivi-core.workspace = true
 mivi-model.workspace = true
 mivi-tokenizer.workspace = true
 mivi-tools.workspace = true
@@ -21,3 +22,5 @@ tokio-stream.workspace = true
 futures.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+tracing.workspace = true
+subtle.workspace = true

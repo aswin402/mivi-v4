@@ -1,13 +1,23 @@
-//! Optional API Key Authentication Middleware for Mivi server routes.
-
-use crate::types::{OpenAiErrorDetail, OpenAiErrorResponse};
+use crate::types::AppError;
 use axum::{
     extract::Request,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
+
+use subtle::ConstantTimeEq;
+
+pub const AUTH_MISSING_HEADER: &str = "Missing Authorization header with Bearer token.";
+pub const AUTH_INVALID_KEY: &str = "Invalid API key provided.";
+
+#[inline]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
 
 pub async fn require_api_key(
     axum::extract::State(expected_key): axum::extract::State<Option<String>>,
@@ -24,30 +34,28 @@ pub async fn require_api_key(
             Some(h) if h.starts_with("Bearer ") => &h[7..],
             Some(h) if h.starts_with("bearer ") => &h[7..],
             _ => {
-                let resp = OpenAiErrorResponse {
-                    error: OpenAiErrorDetail {
-                        message: "Missing Authorization header with Bearer token.".to_string(),
-                        r#type: "invalid_request_error".to_string(),
-                        param: None,
-                        code: Some("invalid_api_key".to_string()),
-                    },
-                };
-                return Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response());
+                return Err(AppError::Unauthorized(AUTH_MISSING_HEADER.to_string()).into_response());
             }
         };
 
-        if token != expected {
-            let resp = OpenAiErrorResponse {
-                error: OpenAiErrorDetail {
-                    message: "Invalid API key provided.".to_string(),
-                    r#type: "invalid_request_error".to_string(),
-                    param: None,
-                    code: Some("invalid_api_key".to_string()),
-                },
-            };
-            return Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response());
+        if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+            return Err(AppError::Unauthorized(AUTH_INVALID_KEY.to_string()).into_response());
         }
     }
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"secret-key", b"secret-key"));
+        assert!(!constant_time_eq(b"secret-key", b"secret-kex"));
+        assert!(!constant_time_eq(b"secret-key", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secret-key"));
+        assert!(constant_time_eq(b"", b""));
+    }
 }

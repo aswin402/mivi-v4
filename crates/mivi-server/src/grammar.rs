@@ -16,6 +16,7 @@ pub struct JsonConstraintState {
     pub escape: bool,
     pub brace_depth: usize,
     pub bracket_depth: usize,
+    pub started: bool,
     pub completed: bool,
     pub has_error: bool,
 }
@@ -49,7 +50,10 @@ impl JsonConstraintState {
 
             if !self.in_string {
                 match ch {
-                    '{' => self.brace_depth += 1,
+                    '{' => {
+                        self.brace_depth += 1;
+                        self.started = true;
+                    }
                     '}' => {
                         if self.brace_depth > 0 {
                             self.brace_depth -= 1;
@@ -58,7 +62,10 @@ impl JsonConstraintState {
                             return false;
                         }
                     }
-                    '[' => self.bracket_depth += 1,
+                    '[' => {
+                        self.bracket_depth += 1;
+                        self.started = true;
+                    }
                     ']' => {
                         if self.bracket_depth > 0 {
                             self.bracket_depth -= 1;
@@ -70,7 +77,7 @@ impl JsonConstraintState {
                     _ => {}
                 }
 
-                if self.brace_depth == 0 && self.bracket_depth == 0 && !chunk.trim().is_empty() {
+                if self.started && self.brace_depth == 0 && self.bracket_depth == 0 {
                     self.completed = true;
                 }
             }
@@ -87,6 +94,7 @@ impl JsonConstraintState {
     #[inline]
     pub fn is_complete(&self) -> bool {
         !self.has_error
+            && self.started
             && self.completed
             && self.brace_depth == 0
             && self.bracket_depth == 0

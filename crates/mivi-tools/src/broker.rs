@@ -34,20 +34,13 @@ impl ToolBroker {
             let call_name = call.name.clone();
             match tokio::task::spawn_blocking(move || handler(args)).await {
                 Ok(result) => result,
-                Err(e) => ToolResult {
-                    name: call_name,
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Tool execution task failed: {}", e)),
-                },
+                Err(e) => ToolResult::err(call_name, format!("Tool execution task failed: {}", e)),
             }
         } else {
-            ToolResult {
-                name: call.name.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Tool '{}' not registered in broker", call.name)),
-            }
+            ToolResult::err(
+                call.name.clone(),
+                format!("Tool '{}' not registered in broker", call.name),
+            )
         }
     }
 }

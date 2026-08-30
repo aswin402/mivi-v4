@@ -32,6 +32,26 @@ pub struct MessageDto {
     pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
+impl From<&MessageDto> for mivi_tokenizer::ChatMessage {
+    fn from(m: &MessageDto) -> Self {
+        let role = m.role.parse().unwrap_or_else(|_| {
+            tracing::warn!("Unrecognized role '{}', defaulting to User", m.role);
+            mivi_tokenizer::Role::User
+        });
+        Self {
+            role,
+            content: m.content.clone(),
+            name: m.name.clone(),
+        }
+    }
+}
+
+impl From<MessageDto> for mivi_tokenizer::ChatMessage {
+    fn from(m: MessageDto) -> Self {
+        (&m).into()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
@@ -69,7 +89,7 @@ pub struct AgentRunRequest {
 }
 
 fn default_max_steps() -> usize {
-    10
+    crate::config::ServerConfig::default().default_max_agent_steps
 }
 
 /// Telemetry status response for /v1/mivi/status.
@@ -115,42 +135,42 @@ pub enum AppError {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let (status, err_type, code, msg) = match &self {
+        let (status, err_type, code, msg) = match self {
             AppError::Unauthorized(m) => (
                 axum::http::StatusCode::UNAUTHORIZED,
                 "invalid_request_error",
                 Some("invalid_api_key"),
-                m.clone(),
+                m,
             ),
             AppError::InvalidRequest(m) => (
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 Some("invalid_request"),
-                m.clone(),
+                m,
             ),
             AppError::InferenceError(m) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
                 Some("inference_error"),
-                m.clone(),
+                m,
             ),
             AppError::Internal(m) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
-                Some("internal_error"),
-                m.clone(),
+                Some("internal_server_error"),
+                m,
             ),
         };
 
-        let payload = OpenAiErrorResponse {
+        let body = axum::Json(OpenAiErrorResponse {
             error: OpenAiErrorDetail {
                 message: msg,
                 r#type: err_type.to_string(),
                 param: None,
-                code: code.map(String::from),
+                code: code.map(ToString::to_string),
             },
-        };
+        });
 
-        (status, axum::Json(payload)).into_response()
+        (status, body).into_response()
     }
 }

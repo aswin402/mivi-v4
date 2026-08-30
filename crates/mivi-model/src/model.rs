@@ -1,16 +1,18 @@
-//! Complete MiviModel forward pass, dynamic LoRA adapters, and generation engine.
-
-use crate::config::{BlockType, ModelConfig};
+use crate::config::{
+    GenerationConfig, ModelConfig, DEFAULT_MAX_LORA_RANK, DEFAULT_N_EXPERTS, DEFAULT_RMS_NORM_EPS,
+    RECENT_TOKENS_WINDOW,
+};
 use crate::gguf::{GgufFile, GgufValue};
+use crate::loader::{extract_model_config, extract_vocab, resolve_model_weights};
 use crate::lora::ActiveAdapters;
-use crate::sampler::{Sampler, SamplerConfig};
-use crate::ssm::{ssm_forward, SsmWeights};
-use crate::transformer::{attention_forward, AttentionWeights};
+use crate::sampler::Sampler;
+use crate::ssm::ssm_forward;
+use crate::transformer::attention_forward;
+use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
-use mivi_core::math::rms_norm;
 use mivi_kv::KvCache;
-use mivi_quant::quantized_matvec;
-use mivi_tokenizer::Tokenizer;
+use mivi_tokenizer::{Tokenizer, BOS_TOKEN_ID, EOS_TOKEN_ID};
+use std::collections::VecDeque;
 use std::path::Path;
 use thiserror::Error;
 
@@ -26,10 +28,16 @@ pub enum ModelError {
     KvCache(#[from] mivi_kv::KvError),
     #[error("Missing model weight: {0}")]
     MissingWeight(String),
+    #[error("Invalid model configuration: {0}")]
+    InvalidConfig(String),
+    #[error("Malformed tensor alignment: {0}")]
+    MalformedTensorAlignment(String),
     #[error("Invalid token ID: {0}")]
     InvalidToken(u32),
     #[error("Context overflow: current pos {pos} >= max_seq_len {max}")]
     ContextOverflow { pos: usize, max: usize },
+    #[error("Dimension mismatch: {0}")]
+    DimMismatch(String),
 }
 
 pub type Result<T> = std::result::Result<T, ModelError>;
@@ -37,6 +45,7 @@ pub type Result<T> = std::result::Result<T, ModelError>;
 pub struct Model {
     pub config: ModelConfig,
     pub gguf: GgufFile,
+    pub weights: ModelWeights,
     pub state: RunState,
     pub kv_cache: KvCache,
     pub tokenizer: Tokenizer,
@@ -45,83 +54,12 @@ pub struct Model {
     pub rope_cache: mivi_core::RopeCache,
 }
 
-#[inline]
-fn safe_f32_slice(raw: &[u8]) -> &[f32] {
-    let ptr = raw.as_ptr();
-    assert_eq!(
-        ptr as usize % std::mem::align_of::<f32>(),
-        0,
-        "GGUF tensor buffer is not 4-byte aligned"
-    );
-    unsafe { std::slice::from_raw_parts(ptr as *const f32, raw.len() / 4) }
-}
-
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
-
-        // Extract metadata dynamically from GGUF
-        let mut config = ModelConfig::default();
-        if let Some(s) = gguf.metadata.get("general.name").and_then(|v| v.as_str()) {
-            config.name = s.to_string();
-        }
-        if let Some(v) = gguf.metadata.get("lfm.context_length").and_then(|v| v.as_usize()) {
-            config.max_seq_len = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.embedding_length").and_then(|v| v.as_usize()) {
-            config.dim = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.feed_forward_length").and_then(|v| v.as_usize()) {
-            config.hidden_dim = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.block_count").and_then(|v| v.as_usize()) {
-            config.n_layers = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.attention.head_count").and_then(|v| v.as_usize()) {
-            config.n_heads = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.attention.head_count_kv").and_then(|v| v.as_usize()) {
-            config.n_kv_heads = v;
-        }
-        if let Some(v) = gguf.metadata.get("lfm.rope.freq_base").and_then(|v| v.as_f32()) {
-            config.rope_base = v;
-        }
-
-        config.head_dim = if config.n_heads > 0 {
-            config.dim / config.n_heads
-        } else {
-            64
-        };
-        config.kv_dim = config.n_kv_heads * config.head_dim;
-
-        // Discover block types per layer
-        let mut block_types = Vec::with_capacity(config.n_layers);
-        for i in 0..config.n_layers {
-            let ssm_key = format!("blk.{}.ssm_in.weight", i);
-            if gguf.tensors.contains_key(&ssm_key) {
-                block_types.push(BlockType::SSM);
-            } else {
-                block_types.push(BlockType::Attention);
-            }
-        }
-        config.block_types = block_types;
-
-        // Load vocabulary from GGUF metadata
-        let mut tokens = Vec::new();
-        if let Some(GgufValue::Array(arr)) = gguf.metadata.get("tokenizer.ggml.tokens") {
-            for val in arr {
-                if let GgufValue::String(s) = val {
-                    tokens.push(s.clone());
-                }
-            }
-        }
-        if tokens.is_empty() {
-            for i in 0..config.vocab_size {
-                tokens.push(format!("<tok_{}>", i));
-            }
-        } else {
-            config.vocab_size = tokens.len();
-        }
+        let mut config = extract_model_config(&gguf)?;
+        let tokens = extract_vocab(&gguf, config.vocab_size);
+        config.vocab_size = tokens.len();
 
         let arena_cfg = ArenaConfig {
             dim: config.dim,
@@ -134,26 +72,26 @@ impl Model {
             vocab_size: config.vocab_size,
             max_seq_len: config.max_seq_len,
             ssm_state_dim: config.ssm_state_dim,
-            max_lora_rank: 64,
-            n_experts: 6,
+            ssm_conv_kernel: config.ssm_conv_kernel,
+            max_lora_rank: DEFAULT_MAX_LORA_RANK,
+            n_experts: DEFAULT_N_EXPERTS,
         };
 
         let state = RunState::new(&arena_cfg);
         let kv_cache = KvCache::new(config.n_layers, config.max_seq_len, config.kv_dim);
+        let weights = resolve_model_weights(&gguf, &config)?;
 
         let vocab = mivi_tokenizer::Vocab::new(tokens);
         let tokenizer = Tokenizer::new(vocab, std::collections::HashMap::new());
-        let sampler = Sampler::new(SamplerConfig::default());
+        let sampler = Sampler::new(GenerationConfig::default());
         let active_adapters = ActiveAdapters::new();
-        let rope_cache = mivi_core::RopeCache::new(
-            config.head_dim,
-            config.max_seq_len,
-            config.rope_base,
-        );
+        let rope_cache =
+            mivi_core::RopeCache::new(config.head_dim, config.max_seq_len, config.rope_base);
 
         Ok(Self {
             config,
             gguf,
+            weights,
             state,
             kv_cache,
             tokenizer,
@@ -163,7 +101,7 @@ impl Model {
         })
     }
 
-    /// Returns slice of unnormalized logits over vocabulary.
+    /// Returns slice of unnormalized logits over vocabulary with ZERO heap allocations.
     pub fn forward(&mut self, token_id: u32, pos: usize) -> Result<&[f32]> {
         if (token_id as usize) >= self.config.vocab_size {
             return Err(ModelError::InvalidToken(token_id));
@@ -177,196 +115,116 @@ impl Model {
 
         let dim = self.config.dim;
 
-        // 1. Embedding lookup: token_embd.weight
-        let (emb_info, emb_data) = self
-            .gguf
-            .get_tensor_data("token_embd.weight")
-            .or_else(|_| self.gguf.get_tensor_data("model.embed_tokens.weight"))
-            .map_err(|_| ModelError::MissingWeight("token_embd.weight".into()))?;
-
-        // Dequantize / copy token embedding to state.x
-        let row_bytes_len =
-            (dim * emb_info.ggml_type.type_size()) / emb_info.ggml_type.block_size();
-        let row_offset = (token_id as usize) * row_bytes_len;
-        if row_offset + row_bytes_len > emb_data.len() {
+        // 1. Embedding lookup: token_embd
+        let emb = &self.weights.token_embd;
+        let type_size = emb.quant_type.type_size().unwrap_or(mivi_quant::F32_BYTES);
+        let block_size = emb.quant_type.block_size().unwrap_or(1);
+        let row_bytes_len = (dim * type_size) / block_size;
+        let row_offset = emb.offset + (token_id as usize) * row_bytes_len;
+        if row_offset + row_bytes_len > self.gguf.mmap.len() {
             return Err(ModelError::InvalidToken(token_id));
         }
-        let row_bytes = &emb_data[row_offset..row_offset + row_bytes_len];
-        let _ = mivi_quant::dequantize_slice(emb_info.ggml_type, row_bytes, &mut self.state.x);
+        let row_bytes = &self.gguf.mmap[row_offset..row_offset + row_bytes_len];
+        mivi_quant::dequantize_slice(emb.quant_type, row_bytes, &mut self.state.x)?;
 
         // 2. Iterate through layers
-        for layer_idx in 0..self.config.n_layers {
-            let block_type = self.config.block_types[layer_idx];
-
-            match block_type {
-                BlockType::Attention => {
-                    let norm_name = format!("blk.{}.attn_norm.weight", layer_idx);
-                    let q_name = format!("blk.{}.attn_q.weight", layer_idx);
-                    let k_name = format!("blk.{}.attn_k.weight", layer_idx);
-                    let v_name = format!("blk.{}.attn_v.weight", layer_idx);
-                    let o_name = format!("blk.{}.attn_output.weight", layer_idx);
-
-                    let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
-                    let ffn_gate_name = format!("blk.{}.ffn_gate.weight", layer_idx);
-                    let ffn_up_name = format!("blk.{}.ffn_up.weight", layer_idx);
-                    let ffn_down_name = format!("blk.{}.ffn_down.weight", layer_idx);
-
-                    if let (
-                        Ok((_, attn_norm_raw)),
-                        Ok((q_info, q_raw)),
-                        Ok((k_info, k_raw)),
-                        Ok((v_info, v_raw)),
-                        Ok((o_info, o_raw)),
-                        Ok((_, ffn_norm_raw)),
-                        Ok((gate_info, gate_raw)),
-                        Ok((up_info, up_raw)),
-                        Ok((down_info, down_raw)),
-                    ) = (
-                        self.gguf.get_tensor_data(&norm_name),
-                        self.gguf.get_tensor_data(&q_name),
-                        self.gguf.get_tensor_data(&k_name),
-                        self.gguf.get_tensor_data(&v_name),
-                        self.gguf.get_tensor_data(&o_name),
-                        self.gguf.get_tensor_data(&ffn_norm_name),
-                        self.gguf.get_tensor_data(&ffn_gate_name),
-                        self.gguf.get_tensor_data(&ffn_up_name),
-                        self.gguf.get_tensor_data(&ffn_down_name),
-                    ) {
-                        let attn_norm = safe_f32_slice(attn_norm_raw);
-                        let ffn_norm = safe_f32_slice(ffn_norm_raw);
-
-                        let w = AttentionWeights {
-                            attn_norm,
-                            q_weight: (q_info.ggml_type, q_raw),
-                            k_weight: (k_info.ggml_type, k_raw),
-                            v_weight: (v_info.ggml_type, v_raw),
-                            o_weight: (o_info.ggml_type, o_raw),
-                            ffn_norm,
-                            ffn_gate: (gate_info.ggml_type, gate_raw),
-                            ffn_up: (up_info.ggml_type, up_raw),
-                            ffn_down: (down_info.ggml_type, down_raw),
-                        };
-
-                        attention_forward(
-                            layer_idx,
-                            pos,
-                            &mut self.state,
-                            &mut self.kv_cache,
-                            &w,
-                            &self.config,
-                            &self.active_adapters,
-                            &self.rope_cache,
-                        )?;
-                    }
+        for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
+            match layer {
+                LayerWeights::Attention(w) => {
+                    let params = crate::transformer::AttentionParams {
+                        layer: layer_idx,
+                        pos,
+                        weights: w,
+                        mmap: &self.gguf.mmap,
+                        config: &self.config,
+                        adapters: &self.active_adapters,
+                        rope: &self.rope_cache,
+                    };
+                    attention_forward(&mut self.state, &mut self.kv_cache, &params)?;
                 }
-                BlockType::SSM => {
-                    let norm_name = format!("blk.{}.ssm_norm.weight", layer_idx);
-                    let in_proj_name = format!("blk.{}.ssm_in.weight", layer_idx);
-                    let out_proj_name = format!("blk.{}.ssm_out.weight", layer_idx);
-                    let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
-                    let ffn_gate_name = format!("blk.{}.ffn_gate.weight", layer_idx);
-                    let ffn_up_name = format!("blk.{}.ffn_up.weight", layer_idx);
-                    let ffn_down_name = format!("blk.{}.ffn_down.weight", layer_idx);
-
-                    let a_name = format!("blk.{}.ssm_a.weight", layer_idx);
-                    let conv_name = format!("blk.{}.ssm_conv.weight", layer_idx);
-
-                    if let (
-                        Ok((_, ssm_norm_raw)),
-                        Ok((in_info, in_raw)),
-                        Ok((out_info, out_raw)),
-                        Ok((_, ffn_norm_raw)),
-                        Ok((gate_info, gate_raw)),
-                        Ok((up_info, up_raw)),
-                        Ok((down_info, down_raw)),
-                    ) = (
-                        self.gguf.get_tensor_data(&norm_name),
-                        self.gguf.get_tensor_data(&in_proj_name),
-                        self.gguf.get_tensor_data(&out_proj_name),
-                        self.gguf.get_tensor_data(&ffn_norm_name),
-                        self.gguf.get_tensor_data(&ffn_gate_name),
-                        self.gguf.get_tensor_data(&ffn_up_name),
-                        self.gguf.get_tensor_data(&ffn_down_name),
-                    ) {
-                        let ssm_norm = safe_f32_slice(ssm_norm_raw);
-                        let ffn_norm = safe_f32_slice(ffn_norm_raw);
-
-                        let default_ssm_a = vec![0.95f32; self.config.ssm_state_dim];
-                        let default_conv_weight = vec![0.25f32; self.config.ssm_conv_kernel];
-
-                        let ssm_a: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&a_name) {
-                            safe_f32_slice(raw)
-                        } else {
-                            &default_ssm_a
-                        };
-
-                        let conv_weight: &[f32] = if let Ok((_, raw)) = self.gguf.get_tensor_data(&conv_name) {
-                            safe_f32_slice(raw)
-                        } else {
-                            &default_conv_weight
-                        };
-
-                        let w = SsmWeights {
-                            ssm_norm,
-                            in_proj: (in_info.ggml_type, in_raw),
-                            conv_weight,
-                            ssm_a,
-                            ssm_b: (in_info.ggml_type, in_raw),
-                            ssm_c: (out_info.ggml_type, out_raw),
-                            out_proj: (out_info.ggml_type, out_raw),
-                            ffn_norm,
-                            ffn_gate: (gate_info.ggml_type, gate_raw),
-                            ffn_up: (up_info.ggml_type, up_raw),
-                            ffn_down: (down_info.ggml_type, down_raw),
-                        };
-
-                        ssm_forward(layer_idx, &mut self.state, &w, &self.config, &self.active_adapters)?;
-                    }
+                LayerWeights::Ssm(w) => {
+                    let params = crate::ssm::SsmParams {
+                        layer: layer_idx,
+                        weights: w,
+                        mmap: &self.gguf.mmap,
+                        config: &self.config,
+                        adapters: &self.active_adapters,
+                    };
+                    ssm_forward(&mut self.state, &params)?;
                 }
             }
         }
 
-        // 3. Final RMSNorm
-        if let Ok((_, norm_raw)) = self.gguf.get_tensor_data("output_norm.weight") {
-            let final_norm = safe_f32_slice(norm_raw);
-            rms_norm(&mut self.state.xb, &self.state.x, final_norm, 1e-5);
+        // 3. Final RMSNorm (SIMD accelerated)
+        if let Some(ref final_norm) = self.weights.output_norm {
+            if final_norm.len() != dim {
+                return Err(ModelError::DimMismatch(format!(
+                    "output_norm length mismatch: expected {}, got {}",
+                    dim,
+                    final_norm.len()
+                )));
+            }
+            mivi_core::simd::rms_norm_simd(
+                &mut self.state.xb,
+                &self.state.x,
+                final_norm,
+                DEFAULT_RMS_NORM_EPS,
+            );
         } else {
             self.state.xb.copy_from_slice(&self.state.x);
         }
 
-        // 4. Output projection to vocabulary logits (output.weight / lm_head.weight)
-        if let Ok((head_info, head_raw)) = self.gguf.get_tensor_data("output.weight") {
-            quantized_matvec(
+        // 4. Output projection to vocabulary logits
+        if let Some(ref head) = self.weights.output_proj {
+            let out_params = crate::ffn::LinearParams {
+                weight: head,
+                input: &self.state.xb,
+                rows: self.config.vocab_size,
+                cols: dim,
+                mmap: &self.gguf.mmap,
+                adapters: &self.active_adapters,
+                module_name: "output",
+            };
+            crate::ffn::linear_forward(
                 &mut self.state.logits,
-                head_info.ggml_type,
-                head_raw,
-                &self.state.xb,
-                self.config.vocab_size,
-                dim,
-            )?;
-            self.active_adapters.apply_module(
-                "output",
-                &self.state.xb,
+                &out_params,
                 &mut self.state.lora_down,
-                &mut self.state.logits,
-            );
+            )?;
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(nan_idx) = self.state.logits.iter().position(|v| v.is_nan()) {
+                tracing::warn!(
+                    "NaN detected in logits at index {} during forward pass",
+                    nan_idx
+                );
+            }
         }
 
         Ok(&self.state.logits)
     }
 
-    /// Prefill prompt tokens and generate up to `max_tokens`.
-    pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
+    /// Prefill prompt tokens and generate tokens incrementally via a streaming callback.
+    pub fn generate_streaming<F>(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        mut on_token: F,
+    ) -> Result<String>
+    where
+        F: FnMut(u32, &str) -> bool,
+    {
         self.state.reset();
         self.kv_cache.reset();
 
         let token_ids = self.tokenizer.encode(prompt);
         let mut generated_ids = Vec::new();
-        let mut recent_tokens = Vec::new();
+        let mut recent_tokens = VecDeque::with_capacity(RECENT_TOKENS_WINDOW + 1);
 
         let eos_token_id = match self.gguf.metadata.get("tokenizer.ggml.eos_token_id") {
             Some(GgufValue::U32(id)) => *id,
-            _ => 2,
+            _ => EOS_TOKEN_ID,
         };
 
         let mut pos = 0;
@@ -376,11 +234,7 @@ impl Model {
             pos += 1;
         }
 
-        let mut current_token = if token_ids.is_empty() {
-            1
-        } else {
-            *token_ids.last().unwrap()
-        };
+        let mut current_token = token_ids.last().copied().unwrap_or(BOS_TOKEN_ID);
 
         // Generation loop
         for _ in 0..max_tokens {
@@ -390,24 +244,38 @@ impl Model {
             }
 
             let _ = self.forward(current_token, pos)?;
-            self.state.logits_scratch.copy_from_slice(&self.state.logits);
-            let next_token = self.sampler.sample(&mut self.state.logits_scratch, &recent_tokens);
+            self.state
+                .logits_scratch
+                .copy_from_slice(&self.state.logits);
+            let recent_slice = recent_tokens.make_contiguous();
+            let next_token = self
+                .sampler
+                .sample(&mut self.state.logits_scratch, recent_slice);
 
             if next_token == eos_token_id {
                 break;
             }
 
             generated_ids.push(next_token);
-            recent_tokens.push(next_token);
-            if recent_tokens.len() > 64 {
-                recent_tokens.remove(0);
+            recent_tokens.push_back(next_token);
+            if recent_tokens.len() > RECENT_TOKENS_WINDOW {
+                recent_tokens.pop_front();
             }
 
-            // Check for EOS token strings
-            if let Some(tok_str) = self.tokenizer.decode_token(next_token) {
-                if tok_str == "<|im_end|>" || tok_str == "<|endoftext|>" {
-                    break;
-                }
+            // Decode token string
+            let tok_str = self.tokenizer.decode_token(next_token).unwrap_or_default();
+            if self
+                .sampler
+                .config
+                .stop_tokens
+                .iter()
+                .any(|st| st == tok_str)
+            {
+                break;
+            }
+
+            if !on_token(next_token, tok_str) {
+                break;
             }
 
             current_token = next_token;
@@ -415,5 +283,10 @@ impl Model {
         }
 
         Ok(self.tokenizer.decode(&generated_ids))
+    }
+
+    /// Prefill prompt tokens and generate full string up to `max_tokens`.
+    pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
+        self.generate_streaming(prompt, max_tokens, |_, _| true)
     }
 }

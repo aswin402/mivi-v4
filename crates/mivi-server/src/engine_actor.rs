@@ -20,15 +20,42 @@ pub enum EngineCommand {
     },
 }
 
+use crate::config::ServerConfig;
+
 #[derive(Clone)]
 pub struct EngineHandle {
     tx: mpsc::Sender<EngineCommand>,
     has_model: bool,
+    stream_buffer_capacity: usize,
 }
+
+pub const DEFAULT_STREAM_BUFFER_CAPACITY: usize = 64;
+pub const ENGINE_ACTOR_THREAD_NAME: &str = "mivi-engine-actor";
+pub const ENGINE_READY_MSG: &str = "Mivi-v4 inference engine ready.";
+pub const MOCK_COMPLETION_TOKENS: usize = 6;
+pub const MOCK_STREAM_CHUNKS: &[&str] = &["Mivi-v4 ", "inference ", "ready."];
+pub const ERR_ENGINE_CHANNEL_DISCONNECTED: &str = "Engine actor channel disconnected";
+pub const ERR_ENGINE_DROPPED_RESPONSE: &str = "Engine actor dropped response";
 
 impl EngineHandle {
     pub fn new(tx: mpsc::Sender<EngineCommand>, has_model: bool) -> Self {
-        Self { tx, has_model }
+        Self {
+            tx,
+            has_model,
+            stream_buffer_capacity: DEFAULT_STREAM_BUFFER_CAPACITY,
+        }
+    }
+
+    pub fn with_capacity(
+        tx: mpsc::Sender<EngineCommand>,
+        has_model: bool,
+        stream_buffer_capacity: usize,
+    ) -> Self {
+        Self {
+            tx,
+            has_model,
+            stream_buffer_capacity,
+        }
     }
 
     #[inline]
@@ -36,8 +63,17 @@ impl EngineHandle {
         self.has_model
     }
 
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     /// Submit a non-streaming completion job to the engine actor.
-    pub async fn generate(&self, prompt: &str, max_tokens: usize) -> Result<(String, usize, usize), String> {
+    pub async fn generate(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> Result<(String, usize, usize), String> {
         let (responder, rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::Generate {
@@ -46,9 +82,10 @@ impl EngineHandle {
                 responder,
             })
             .await
-            .map_err(|_| "Engine actor channel disconnected".to_string())?;
+            .map_err(|_| ERR_ENGINE_CHANNEL_DISCONNECTED.to_string())?;
 
-        rx.await.map_err(|_| "Engine actor dropped response".to_string())?
+        rx.await
+            .map_err(|_| ERR_ENGINE_DROPPED_RESPONSE.to_string())?
     }
 
     /// Submit a streaming generation job to the engine actor.
@@ -57,7 +94,7 @@ impl EngineHandle {
         prompt: &str,
         max_tokens: usize,
     ) -> Result<mpsc::Receiver<Result<String, String>>, String> {
-        let (responder, rx) = mpsc::channel(64);
+        let (responder, rx) = mpsc::channel(self.stream_buffer_capacity);
         self.tx
             .send(EngineCommand::GenerateStream {
                 prompt: prompt.to_string(),
@@ -65,7 +102,7 @@ impl EngineHandle {
                 responder,
             })
             .await
-            .map_err(|_| "Engine actor channel disconnected".to_string())?;
+            .map_err(|_| ERR_ENGINE_CHANNEL_DISCONNECTED.to_string())?;
 
         Ok(rx)
     }
@@ -82,8 +119,12 @@ impl EngineHandle {
             .await
             .is_ok()
         {
-            rx.await.unwrap_or_default()
+            rx.await.unwrap_or_else(|_| {
+                tracing::warn!("Engine actor encode responder channel dropped");
+                Vec::new()
+            })
         } else {
+            tracing::warn!("Failed to send encode command to engine actor");
             Vec::new()
         }
     }
@@ -92,18 +133,35 @@ impl EngineHandle {
 pub struct EngineActor;
 
 impl EngineActor {
-    /// Spawn the engine actor on a dedicated OS compute thread.
-    pub fn spawn(mut model: Option<mivi_model::Model>) -> EngineHandle {
+    /// Spawn the engine actor on a dedicated OS compute thread with default config.
+    #[track_caller]
+    pub fn spawn(model: Option<mivi_model::Model>) -> EngineHandle {
+        Self::spawn_with_config(model, &ServerConfig::default())
+    }
+
+    /// Try spawning the engine actor with a custom ServerConfig, returning an IO error on thread creation failure.
+    pub fn try_spawn_with_config(
+        mut model: Option<mivi_model::Model>,
+        config: &ServerConfig,
+    ) -> std::io::Result<EngineHandle> {
         let has_model = model.is_some();
-        let (tx, mut rx) = mpsc::channel::<EngineCommand>(64);
+        let stream_buffer_capacity = config.channel_capacity;
+        let (tx, mut rx) = mpsc::channel::<EngineCommand>(config.channel_capacity);
 
         std::thread::Builder::new()
-            .name("mivi-engine-actor".to_string())
+            .name(ENGINE_ACTOR_THREAD_NAME.to_string())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("Failed to create engine actor runtime");
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("Failed to create engine actor runtime: {}", e);
+                        drop(rx);
+                        return;
+                    }
+                };
 
                 rt.block_on(async move {
                     while let Some(cmd) = rx.recv().await {
@@ -113,66 +171,95 @@ impl EngineActor {
                                 max_tokens,
                                 responder,
                             } => {
-                                if let Some(ref mut m) = model {
-                                    let p_tok = m.tokenizer.encode(&prompt).len();
-                                    match m.generate(&prompt, max_tokens) {
-                                        Ok(out) => {
-                                            let c_tok = m.tokenizer.encode(&out).len();
-                                            let _ = responder.send(Ok((out, p_tok, c_tok)));
-                                        }
-                                        Err(e) => {
-                                            let _ = responder.send(Err(e.to_string()));
-                                        }
-                                    }
-                                } else {
-                                    let p_tok = prompt.split_whitespace().count().max(1);
-                                    let _ = responder.send(Ok((
-                                        "Mivi-v4 inference engine ready.".to_string(),
-                                        p_tok,
-                                        6,
-                                    )));
-                                }
+                                handle_generate(&mut model, prompt, max_tokens, responder);
                             }
                             EngineCommand::GenerateStream {
                                 prompt,
                                 max_tokens,
                                 responder,
                             } => {
-                                if let Some(ref mut m) = model {
-                                    match m.generate(&prompt, max_tokens) {
-                                        Ok(out) => {
-                                            for word in out.split_inclusive(' ') {
-                                                if responder.send(Ok(word.to_string())).await.is_err() {
-                                                    break; // Client disconnected
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let _ = responder.send(Err(e.to_string())).await;
-                                        }
-                                    }
-                                } else {
-                                    for chunk in &["Mivi-v4 ", "inference ", "ready."] {
-                                        if responder.send(Ok(chunk.to_string())).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
+                                handle_generate_stream(&mut model, prompt, max_tokens, responder);
                             }
                             EngineCommand::Encode { text, responder } => {
-                                if let Some(ref m) = model {
-                                    let _ = responder.send(m.tokenizer.encode(&text));
-                                } else {
-                                    let count = text.split_whitespace().count();
-                                    let _ = responder.send(vec![0; count]);
-                                }
+                                handle_encode(&model, text, responder);
                             }
                         }
                     }
                 });
-            })
-            .expect("Failed to spawn engine actor thread");
+            })?;
 
-        EngineHandle::new(tx, has_model)
+        Ok(EngineHandle::with_capacity(
+            tx,
+            has_model,
+            stream_buffer_capacity,
+        ))
+    }
+
+    /// Spawn the engine actor with a custom ServerConfig. Panics on OS thread spawn failure.
+    #[track_caller]
+    pub fn spawn_with_config(
+        model: Option<mivi_model::Model>,
+        config: &ServerConfig,
+    ) -> EngineHandle {
+        Self::try_spawn_with_config(model, config).expect("Failed to spawn engine actor")
+    }
+}
+
+fn handle_generate(
+    model: &mut Option<mivi_model::Model>,
+    prompt: String,
+    max_tokens: usize,
+    responder: oneshot::Sender<std::result::Result<(String, usize, usize), String>>,
+) {
+    if let Some(ref mut m) = model {
+        let p_tok = m.tokenizer.encode(&prompt).len();
+        match m.generate(&prompt, max_tokens) {
+            Ok(out) => {
+                let c_tok = m.tokenizer.encode(&out).len();
+                let _ = responder.send(Ok((out, p_tok, c_tok)));
+            }
+            Err(e) => {
+                let _ = responder.send(Err(e.to_string()));
+            }
+        }
+    } else {
+        let p_tok = prompt.split_whitespace().count().max(1);
+        let _ = responder.send(Ok((
+            ENGINE_READY_MSG.to_string(),
+            p_tok,
+            MOCK_COMPLETION_TOKENS,
+        )));
+    }
+}
+
+fn handle_generate_stream(
+    model: &mut Option<mivi_model::Model>,
+    prompt: String,
+    max_tokens: usize,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+) {
+    if let Some(ref mut m) = model {
+        let _ = m.generate_streaming(&prompt, max_tokens, |_, text| {
+            responder.try_send(Ok(text.to_string())).is_ok()
+        });
+    } else {
+        for &chunk in MOCK_STREAM_CHUNKS {
+            if responder.try_send(Ok(chunk.to_string())).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+fn handle_encode(
+    model: &Option<mivi_model::Model>,
+    text: String,
+    responder: oneshot::Sender<Vec<u32>>,
+) {
+    if let Some(ref m) = model {
+        let _ = responder.send(m.tokenizer.encode(&text));
+    } else {
+        let count = text.split_whitespace().count();
+        let _ = responder.send(vec![0; count]);
     }
 }

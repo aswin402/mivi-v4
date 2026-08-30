@@ -10,6 +10,8 @@ use std::path::Path;
 use thiserror::Error;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in LE
+const GGUF_MIN_HEADER_SIZE: usize = 16;
+const GGUF_DEFAULT_ALIGNMENT: usize = 32;
 const MAX_STRING_LEN: usize = 1024 * 1024; // 1 MB limit for individual strings
 const MAX_METADATA_COUNT: usize = 100_000;
 const MAX_TENSOR_COUNT: usize = 50_000;
@@ -105,8 +107,10 @@ impl GgufFile {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
 
-        if mmap.len() < 16 {
-            return Err(GgufError::MalformedFile("File too small to contain valid GGUF header".into()));
+        if mmap.len() < GGUF_MIN_HEADER_SIZE {
+            return Err(GgufError::MalformedFile(
+                "File too small to contain valid GGUF header".into(),
+            ));
         }
 
         let mut cursor = Cursor::new(&mmap[..]);
@@ -150,9 +154,13 @@ impl GgufFile {
         for _ in 0..tensor_count {
             let name = read_gguf_string(&mut cursor)?;
             let n_dims = cursor.read_u32::<LittleEndian>()?;
-            let mut dims = Vec::with_capacity(n_dims as usize);
+            let mut dims = Vec::with_capacity((n_dims as usize).min(8));
             for _ in 0..n_dims {
-                dims.push(cursor.read_u64::<LittleEndian>()? as usize);
+                let dim_u64 = cursor.read_u64::<LittleEndian>()?;
+                let dim = usize::try_from(dim_u64).map_err(|_| {
+                    GgufError::MalformedFile("Dimension size exceeds pointer width".to_string())
+                })?;
+                dims.push(dim);
             }
             let raw_type = cursor.read_u32::<LittleEndian>()?;
             let ggml_type = GgmlType::from_u32(raw_type)
@@ -175,7 +183,7 @@ impl GgufFile {
         let current_pos = cursor.position() as usize;
         let alignment = match metadata.get("general.alignment") {
             Some(GgufValue::U32(v)) => *v as usize,
-            _ => 32,
+            _ => GGUF_DEFAULT_ALIGNMENT,
         };
         let data_offset = (current_pos + alignment - 1) & !(alignment - 1);
 
@@ -198,23 +206,35 @@ impl GgufFile {
         let start = self
             .data_offset
             .checked_add(info.offset as usize)
-            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor start offset".into()))?;
+            .ok_or_else(|| {
+                GgufError::MalformedFile("Integer overflow in tensor start offset".into())
+            })?;
 
         let num_elements = info
             .dims
             .iter()
             .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor dimensions".into()))?;
+            .ok_or_else(|| {
+                GgufError::MalformedFile("Integer overflow in tensor dimensions".into())
+            })?;
 
-        let type_size = info.ggml_type.type_size();
-        let block_size = info.ggml_type.block_size();
-        if block_size == 0 {
-            return Err(GgufError::MalformedFile("Block size cannot be zero".into()));
-        }
+        let type_size = info.ggml_type.type_size().ok_or_else(|| {
+            GgufError::MalformedFile(format!(
+                "Unsupported GGML quantization type {:?} for tensor '{}'",
+                info.ggml_type, name
+            ))
+        })?;
+        let block_size = info.ggml_type.block_size().ok_or_else(|| {
+            GgufError::MalformedFile(format!(
+                "Unsupported GGML quantization block size for type {:?} in tensor '{}'",
+                info.ggml_type, name
+            ))
+        })?;
 
-        let bytes_len = (num_elements.checked_mul(type_size))
-            .ok_or_else(|| GgufError::MalformedFile("Integer overflow in tensor byte length".into()))?
-            / block_size;
+        let blocks = num_elements.div_ceil(block_size);
+        let bytes_len = blocks.checked_mul(type_size).ok_or_else(|| {
+            GgufError::MalformedFile("Integer overflow in tensor byte length".into())
+        })?;
 
         let end = start
             .checked_add(bytes_len)
@@ -265,14 +285,18 @@ fn read_value_by_type<R: Read + Seek>(r: &mut R, val_type: u32) -> Result<GgufVa
         8 => Ok(GgufValue::String(read_gguf_string(r)?)),
         9 => {
             let elem_type = r.read_u32::<LittleEndian>()?;
-            let len = r.read_u64::<LittleEndian>()? as usize;
+            let len_u64 = r.read_u64::<LittleEndian>()?;
+            let len = usize::try_from(len_u64).map_err(|_| {
+                GgufError::MalformedFile("Array length exceeds pointer width".to_string())
+            })?;
             if len > MAX_ARRAY_LEN {
                 return Err(GgufError::MalformedFile(format!(
                     "Array length {} exceeds limit {}",
                     len, MAX_ARRAY_LEN
                 )));
             }
-            let mut arr = Vec::with_capacity(len);
+            const MAX_PREALLOC: usize = 4096;
+            let mut arr = Vec::with_capacity(len.min(MAX_PREALLOC));
             for _ in 0..len {
                 arr.push(read_value_by_type(r, elem_type)?);
             }

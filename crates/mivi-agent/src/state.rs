@@ -23,6 +23,9 @@ pub struct AgentState {
     pub memory: Vec<String>,
 }
 
+pub const DEFAULT_MAX_AGENT_STEPS: usize = 10;
+pub const DEFAULT_MAX_MEMORY_ITEMS: usize = 100;
+
 impl AgentState {
     pub fn new(task: &str, max_steps: usize) -> Self {
         Self {
@@ -33,5 +36,11 @@ impl AgentState {
             plan: Vec::new(),
             memory: Vec::new(),
         }
+    }
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self::new("", DEFAULT_MAX_AGENT_STEPS)
     }
 }

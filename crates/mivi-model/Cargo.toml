@@ -15,3 +15,4 @@ thiserror.workspace = true
 memmap2.workspace = true
 byteorder.workspace = true
 serde.workspace = true
+tracing.workspace = true

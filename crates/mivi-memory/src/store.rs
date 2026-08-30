@@ -18,9 +18,27 @@ pub struct MemoryStore {
     root_dir: PathBuf,
 }
 
+pub const STORAGE_DIR_NAME: &str = ".mivi";
+pub const MEMORY_SUBDIR_NAME: &str = "memory";
+pub const FALLBACK_RECORD_TYPE: &str = "record";
+pub const FALLBACK_RECORD_ID: &str = "unknown_id";
+
+#[inline]
+fn sanitize_identifier(s: &str, fallback: &str) -> String {
+    let clean: String = s
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if clean.is_empty() {
+        fallback.to_string()
+    } else {
+        clean
+    }
+}
+
 impl MemoryStore {
     pub fn new(base_dir: &Path) -> Self {
-        let root_dir = base_dir.join(".mivi").join("memory");
+        let root_dir = base_dir.join(STORAGE_DIR_NAME).join(MEMORY_SUBDIR_NAME);
         Self { root_dir }
     }
 
@@ -31,25 +49,8 @@ impl MemoryStore {
 
     pub fn save_record(&self, record: &MemoryRecord) -> Result<PathBuf> {
         self.init()?;
-        // Sanitize type and id: strip any slashes, backslashes, or dots
-        let mut clean_type: String = record
-            .r#type
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-            .collect();
-        if clean_type.is_empty() {
-            clean_type = "record".to_string();
-        }
-
-        let mut clean_id: String = record
-            .id
-            .to_string()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-            .collect();
-        if clean_id.is_empty() {
-            clean_id = uuid::Uuid::new_v4().to_string();
-        }
+        let clean_type = sanitize_identifier(&record.r#type.to_string(), FALLBACK_RECORD_TYPE);
+        let clean_id = sanitize_identifier(&record.id.to_string(), FALLBACK_RECORD_ID);
 
         let filename = format!("{}_{}.md", clean_type, clean_id);
         let path = self.root_dir.join(filename);
@@ -59,5 +60,35 @@ impl MemoryStore {
         std::fs::write(&path, full_content)?;
 
         Ok(path)
+    }
+
+    pub fn load_record(&self, path: &Path) -> Result<MemoryRecord> {
+        let raw = std::fs::read_to_string(path)?;
+        let normalized = raw.replace("\r\n", "\n");
+        let trimmed = normalized.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("---") {
+            let rest = rest.strip_prefix('\n').unwrap_or(rest);
+            if let Some((yaml_str, body)) = rest.split_once("\n---") {
+                let body = body.strip_prefix('\n').unwrap_or(body);
+                let mut record: MemoryRecord = serde_yaml::from_str(yaml_str)?;
+                record.content = body.trim_start().to_string();
+                return Ok(record);
+            }
+        }
+        let record: MemoryRecord = serde_yaml::from_str(&raw)?;
+        Ok(record)
+    }
+
+    pub fn list_records(&self) -> Result<Vec<PathBuf>> {
+        self.init()?;
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&self.root_dir)? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("md") {
+                paths.push(p);
+            }
+        }
+        Ok(paths)
     }
 }

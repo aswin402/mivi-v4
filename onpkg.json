@@ -1,6 +1,6 @@
 {
   "name": "mivi-v4",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CPU-first, low-memory, agent-native SLM engine in Rust",
   "runtime": "native",
   "package_manager": "cargo",

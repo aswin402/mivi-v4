@@ -16,6 +16,9 @@ pub enum TokenizerError {
 
 pub type Result<T> = std::result::Result<T, TokenizerError>;
 
+pub const BYTE_FALLBACK_PREFIX: &str = "<0x";
+pub const BYTE_FALLBACK_TOKEN_LEN: usize = 6;
+
 static PRE_TOKENIZE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     // Standard Rust-compatible GPT-2 / GPT-4 / LLaMA pre-tokenization regex pattern
     regex::Regex::new(
@@ -99,60 +102,75 @@ impl Tokenizer {
             if let Some(id) = self.vocab.get_id(&format!("<0x{:02X}>", piece[0])) {
                 return vec![id];
             }
-            return vec![0];
+            return vec![crate::special::UNK_TOKEN_ID];
         }
 
-        // parts stores: (byte_start_index, rank_of_pair_starting_here)
-        let mut parts: Vec<(usize, usize)> = Vec::with_capacity(piece.len() + 1);
-        let mut min_rank = (usize::MAX, usize::MAX);
-
-        for i in 0..piece.len() - 1 {
-            let rank = self.merge_ranks.get(&piece[i..i + 2]).copied().unwrap_or(usize::MAX);
-            if rank < min_rank.0 {
-                min_rank = (rank, i);
-            }
-            parts.push((i, rank));
+        #[derive(Clone, Copy)]
+        struct Part {
+            start: usize,
+            len: usize,
+            next: isize,
         }
-        parts.push((piece.len() - 1, usize::MAX));
-        parts.push((piece.len(), usize::MAX)); // Sentinel
 
-        let get_rank = |parts: &[(usize, usize)], idx: usize| -> usize {
-            if idx + 2 < parts.len() {
-                let start = parts[idx].0;
-                let end = parts[idx + 2].0;
-                self.merge_ranks.get(&piece[start..end]).copied().unwrap_or(usize::MAX)
+        let n = piece.len();
+        let mut parts: Vec<Part> = (0..n)
+            .map(|i| Part {
+                start: i,
+                len: 1,
+                next: if i + 1 < n { i as isize + 1 } else { -1 },
+            })
+            .collect();
+
+        let get_pair_rank = |p_idx: usize, parts: &[Part]| -> usize {
+            let next_idx = parts[p_idx].next;
+            if next_idx >= 0 {
+                let start = parts[p_idx].start;
+                let next_u = next_idx as usize;
+                let end = parts[next_u].start + parts[next_u].len;
+                self.merge_ranks
+                    .get(&piece[start..end])
+                    .copied()
+                    .unwrap_or(usize::MAX)
             } else {
                 usize::MAX
             }
         };
 
-        // Greedy iterative merge loop: merge lowest rank pair
-        while min_rank.0 != usize::MAX {
-            let i = min_rank.1;
+        // Greedy iterative merge loop using index linked list to avoid O(N) array shifts
+        loop {
+            let mut min_rank = usize::MAX;
+            let mut best_i = None;
+            let mut curr = 0isize;
 
-            // Remove the swallowed right part
-            parts.remove(i + 1);
-
-            // Update rank with next element
-            parts[i].1 = get_rank(&parts, i);
-            // Update rank with previous element if exists
-            if i > 0 {
-                parts[i - 1].1 = get_rank(&parts, i - 1);
+            while curr >= 0 {
+                let i = curr as usize;
+                let rank = get_pair_rank(i, &parts);
+                if rank < min_rank {
+                    min_rank = rank;
+                    best_i = Some(i);
+                }
+                curr = parts[i].next;
             }
 
-            min_rank = (usize::MAX, usize::MAX);
-            for (idx, &(_, rank)) in parts[..parts.len() - 1].iter().enumerate() {
-                if rank < min_rank.0 {
-                    min_rank = (rank, idx);
-                }
+            if min_rank == usize::MAX {
+                break;
+            }
+
+            if let Some(i) = best_i {
+                let j = parts[i].next as usize;
+                // Merge j into i
+                parts[i].len += parts[j].len;
+                parts[i].next = parts[j].next;
             }
         }
 
         // Convert merged byte chunks to token IDs
-        let mut out = Vec::with_capacity(parts.len() - 1);
-        for i in 0..parts.len() - 1 {
-            let start = parts[i].0;
-            let end = parts[i + 1].0;
+        let mut out = Vec::new();
+        let mut curr = 0isize;
+        while curr >= 0 {
+            let i = curr as usize;
+            let start = parts[i].start;
+            let end = start + parts[i].len;
             let chunk_slice = &piece[start..end];
 
             if let Some(&id) = self.byte_ranks.get(chunk_slice) {
@@ -161,17 +179,13 @@ impl Tokenizer {
                 if let Some(id) = self.vocab.get_id(s) {
                     out.push(id);
                 } else {
-                    for &b in chunk_slice {
-                        let hex = format!("<0x{:02X}>", b);
-                        out.push(self.vocab.get_id(&hex).unwrap_or(0));
-                    }
+                    encode_byte_fallback(chunk_slice, &self.vocab, &mut out);
                 }
             } else {
-                for &b in chunk_slice {
-                    let hex = format!("<0x{:02X}>", b);
-                    out.push(self.vocab.get_id(&hex).unwrap_or(0));
-                }
+                encode_byte_fallback(chunk_slice, &self.vocab, &mut out);
             }
+
+            curr = parts[i].next;
         }
 
         out
@@ -183,8 +197,13 @@ impl Tokenizer {
         for &id in ids {
             if let Some(token_str) = self.vocab.get_token(id) {
                 // Check if byte fallback token like <0x0A> or <0xE2>
-                if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
-                    if let Ok(byte_val) = u8::from_str_radix(&token_str[3..5], 16) {
+                if token_str.starts_with(BYTE_FALLBACK_PREFIX)
+                    && token_str.ends_with('>')
+                    && token_str.len() == BYTE_FALLBACK_TOKEN_LEN
+                {
+                    let hex_start = BYTE_FALLBACK_PREFIX.len();
+                    let hex_end = hex_start + 2;
+                    if let Ok(byte_val) = u8::from_str_radix(&token_str[hex_start..hex_end], 16) {
                         raw_bytes.push(byte_val);
                         continue;
                     }
@@ -198,6 +217,14 @@ impl Tokenizer {
     /// Decode single token ID
     pub fn decode_token(&self, id: u32) -> Option<&str> {
         self.vocab.get_token(id)
+    }
+}
+
+#[inline]
+fn encode_byte_fallback(chunk_slice: &[u8], vocab: &Vocab, out: &mut Vec<u32>) {
+    for &b in chunk_slice {
+        let hex = format!("<0x{:02X}>", b);
+        out.push(vocab.get_id(&hex).unwrap_or(crate::special::UNK_TOKEN_ID));
     }
 }
 
@@ -242,5 +269,13 @@ mod tests {
 
         let decoded = tokenizer.decode(&[1, 2, 3]);
         assert_eq!(decoded, "€");
+    }
+
+    #[test]
+    fn test_bpe_empty_string() {
+        let vocab = Vocab::new(vec!["<unk>".to_string()]);
+        let tokenizer = Tokenizer::new(vocab, HashMap::new());
+        assert!(tokenizer.encode("").is_empty());
+        assert_eq!(tokenizer.decode(&[]), "");
     }
 }

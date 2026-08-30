@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "mivi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "mivi-tools",
@@ -736,15 +736,18 @@ dependencies = [
 
 [[package]]
 name = "mivi-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "mivi-agent",
  "mivi-core",
  "mivi-model",
+ "mivi-quant",
  "mivi-server",
  "mivi-tokenizer",
+ "mivi-tools",
  "thiserror",
  "tokio",
  "tracing",
@@ -752,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-context"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mivi-core",
  "mivi-tokenizer",
@@ -764,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rayon",
  "thiserror",
@@ -772,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-kv"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "half",
  "mivi-core",
@@ -783,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-memory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -794,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -804,11 +807,12 @@ dependencies = [
  "mivi-tokenizer",
  "serde",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "mivi-quant"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "byteorder",
  "half",
@@ -820,7 +824,39 @@ dependencies = [
 
 [[package]]
 name = "mivi-router"
-version = "0.1.0"
+version = "0.1.1"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mivi-server"
+version = "0.1.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "futures",
+ "mivi-agent",
+ "mivi-core",
+ "mivi-model",
+ "mivi-tokenizer",
+ "mivi-tools",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "mivi-tokenizer"
+version = "0.1.1"
 dependencies = [
  "mivi-core",
  "regex",
@@ -831,39 +867,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mivi-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "futures",
- "mivi-agent",
- "mivi-model",
- "mivi-tokenizer",
- "mivi-tools",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tower-http",
- "uuid",
-]
-
-[[package]]
-name = "mivi-tokenizer"
-version = "0.1.0"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "mivi-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "serde",
@@ -1183,6 +1188,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1318,6 +1329,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",

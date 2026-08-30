@@ -95,14 +95,14 @@ class ReferenceEngine:
         self.kv_k: Dict[Tuple[int, int], List[float]] = {}
         self.kv_v: Dict[Tuple[int, int], List[float]] = {}
         self.ssm_states: Dict[int, List[float]] = {
-            i: [0.0] * config.ssm_state_dim for i in range(config.n_layers)
+            i: [0.0] * min(config.ssm_state_dim, config.dim) for i in range(config.n_layers)
         }
 
     def reset(self):
         self.kv_k.clear()
         self.kv_v.clear()
         for i in range(self.config.n_layers):
-            self.ssm_states[i] = [0.0] * self.config.ssm_state_dim
+            self.ssm_states[i] = [0.0] * min(self.config.ssm_state_dim, self.config.dim)
 
     def forward_token(self, token_id: int, pos: int) -> Dict[str, Any]:
         dim = self.config.dim
@@ -184,11 +184,12 @@ class ReferenceEngine:
                 in_proj = matvec(self.weights[f"blk.{l}.ssm_in.weight"], xb)
 
                 # SSM Recurrence
+                effective_dim = min(self.config.ssm_state_dim, dim)
                 s_state = self.ssm_states[l]
-                for i in range(min(self.config.ssm_state_dim, dim)):
+                for i in range(effective_dim):
                     s_state[i] = 0.95 * s_state[i] + in_proj[i]
 
-                out_proj = matvec(self.weights[f"blk.{l}.ssm_out.weight"], in_proj)
+                out_proj = matvec(self.weights[f"blk.{l}.ssm_out.weight"], s_state[:dim])
                 out_act = [silu(v) for v in out_proj]
                 x = [xi + oi for xi, oi in zip(x, out_act)]
 

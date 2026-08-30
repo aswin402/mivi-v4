@@ -129,7 +129,8 @@ async fn test_agent_max_steps_exhaustion() {
     let state = AgentState::new("Infinite loop task", 2);
     let mut agent = AgentLoop::new(state, &broker);
 
-    let call_step = r#"<tool_call>{"name": "calculator", "arguments": {"expression": "1 + 1"}}</tool_call>"#;
+    let call_step =
+        r#"<tool_call>{"name": "calculator", "arguments": {"expression": "1 + 1"}}</tool_call>"#;
     let _ = agent.step(call_step).await;
     let _ = agent.step(call_step).await;
     let res = agent.step(call_step).await;
@@ -144,7 +145,8 @@ async fn test_agent_stagnation_guard() {
     let state = AgentState::new("Stagnant task", 10);
     let mut agent = AgentLoop::new(state, &broker);
 
-    let same_call = r#"<tool_call>{"name": "calculator", "arguments": {"expression": "2 + 2"}}</tool_call>"#;
+    let same_call =
+        r#"<tool_call>{"name": "calculator", "arguments": {"expression": "2 + 2"}}</tool_call>"#;
     let _ = agent.step(same_call).await;
     let _ = agent.step(same_call).await;
     let res = agent.step(same_call).await;
@@ -169,13 +171,7 @@ async fn test_agent_tool_failure_propagation() {
 async fn test_http_server_endpoints() {
     let broker = ToolBroker::new();
     let engine = mivi_server::EngineActor::spawn(None);
-    let state = Arc::new(AppState {
-        model_name: "mivi-v4-test".to_string(),
-        start_time: std::time::Instant::now(),
-        broker,
-        engine,
-        api_key: None,
-    });
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
     let app = create_router(state);
 
     // 1. GET /health
@@ -304,23 +300,60 @@ async fn test_http_server_endpoints() {
 }
 
 #[tokio::test]
+async fn test_http_server_error_responses() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn(None);
+    let state = Arc::new(AppState::new(
+        "mivi-v4-test",
+        broker,
+        engine,
+        Some("my-secret-key".to_string()),
+    ));
+    let app = create_router(state);
+
+    // 1. Unauthorized when missing API key
+    let req = Request::builder()
+        .uri("/health")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Bad request with empty messages array (with auth header)
+    let chat_req = serde_json::json!({
+        "model": "mivi-v4-test",
+        "messages": []
+    });
+
+    let req = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Authorization", "Bearer my-secret-key")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&chat_req).unwrap()))
+        .unwrap();
+
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_http_server_with_real_model() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_path = manifest_dir.join("models/mivi-tiny-test.gguf");
     if !model_path.exists() {
+        eprintln!(
+            "Skipping test_http_server_with_real_model: models/mivi-tiny-test.gguf not found"
+        );
         return;
     }
 
     let model = mivi_model::Model::load(&model_path).expect("Failed to load test model");
     let broker = ToolBroker::new();
     let engine = mivi_server::EngineActor::spawn(Some(model));
-    let state = Arc::new(AppState {
-        model_name: "mivi-tiny-test".to_string(),
-        start_time: std::time::Instant::now(),
-        broker,
-        engine,
-        api_key: None,
-    });
+    let state = Arc::new(AppState::new("mivi-tiny-test", broker, engine, None));
     let app = create_router(state);
 
     let chat_req = ChatCompletionRequest {

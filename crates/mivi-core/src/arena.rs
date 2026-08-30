@@ -15,6 +15,7 @@ pub struct ArenaConfig {
     pub vocab_size: usize,
     pub max_seq_len: usize,
     pub ssm_state_dim: usize,
+    pub ssm_conv_kernel: usize,
     pub max_lora_rank: usize,
     pub n_experts: usize,
 }
@@ -49,11 +50,11 @@ pub struct RunState {
 
     // SSM state (recurrent state per SSM block)
     pub ssm_states: Box<[f32]>,
+    // SSM depthwise 1D convolution state buffer: [n_layers, dim, ssm_conv_kernel]
+    pub conv_states: Box<[f32]>,
 
-    // LoRA intermediate buffers
+    // LoRA intermediate buffer
     pub lora_down: Box<[f32]>,
-    pub lora_up: Box<[f32]>,
-    pub expert_gate_logits: Box<[f32]>,
 }
 
 impl RunState {
@@ -73,9 +74,9 @@ impl RunState {
             logits: vec![0.0f32; cfg.vocab_size].into_boxed_slice(),
             logits_scratch: vec![0.0f32; cfg.vocab_size].into_boxed_slice(),
             ssm_states: vec![0.0f32; cfg.n_layers * cfg.ssm_state_dim].into_boxed_slice(),
+            conv_states: vec![0.0f32; cfg.n_layers * cfg.dim * cfg.ssm_conv_kernel]
+                .into_boxed_slice(),
             lora_down: vec![0.0f32; cfg.max_lora_rank].into_boxed_slice(),
-            lora_up: vec![0.0f32; cfg.dim].into_boxed_slice(),
-            expert_gate_logits: vec![0.0f32; cfg.n_experts].into_boxed_slice(),
         }
     }
 
@@ -94,8 +95,7 @@ impl RunState {
         self.logits.fill(0.0);
         self.logits_scratch.fill(0.0);
         self.ssm_states.fill(0.0);
+        self.conv_states.fill(0.0);
         self.lora_down.fill(0.0);
-        self.lora_up.fill(0.0);
-        self.expert_gate_logits.fill(0.0);
     }
 }

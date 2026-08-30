@@ -7,9 +7,6 @@ license.workspace = true
 description = "Two-level routing, intent classification, dynamic tool discovery, and expert adapter selection"
 
 [dependencies]
-mivi-core.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 regex.workspace = true

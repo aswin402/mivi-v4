@@ -1,78 +1,84 @@
-//! Grouped-Query Attention (GQA) transformer block forward pass.
+//! Grouped Query Attention (GQA) Transformer layer implementation with RoPE.
 
-use crate::config::ModelConfig;
+use crate::config::{ModelConfig, DEFAULT_RMS_NORM_EPS};
+use crate::ffn::{ffn_swiglu_forward, linear_forward, FfnSwigluParams, LinearParams};
+use crate::lora::ActiveAdapters;
+use crate::model::Result;
+use crate::weights::AttentionLayerWeights;
 use mivi_core::arena::RunState;
-use mivi_core::math::{dot_product, rms_norm, softmax, swiglu, vec_add};
+use mivi_core::math::{dot_product, softmax, vec_add};
+use mivi_core::simd::rms_norm_simd;
 use mivi_kv::KvCache;
-use mivi_quant::{quantized_matvec, GgmlType};
 
-pub struct AttentionWeights<'a> {
-    pub attn_norm: &'a [f32],
-    pub q_weight: (GgmlType, &'a [u8]),
-    pub k_weight: (GgmlType, &'a [u8]),
-    pub v_weight: (GgmlType, &'a [u8]),
-    pub o_weight: (GgmlType, &'a [u8]),
-
-    pub ffn_norm: &'a [f32],
-    pub ffn_gate: (GgmlType, &'a [u8]),
-    pub ffn_up: (GgmlType, &'a [u8]),
-    pub ffn_down: (GgmlType, &'a [u8]),
+/// Parameter descriptor for GQA Attention forward pass.
+pub struct AttentionParams<'a> {
+    pub layer: usize,
+    pub pos: usize,
+    pub weights: &'a AttentionLayerWeights,
+    pub mmap: &'a [u8],
+    pub config: &'a ModelConfig,
+    pub adapters: &'a ActiveAdapters,
+    pub rope: &'a mivi_core::RopeCache,
 }
 
-/// Forward pass through a single GQA Transformer layer for a single token.
-pub fn attention_forward(
-    layer: usize,
-    pos: usize,
-    state: &mut RunState,
-    kv: &mut KvCache,
-    w: &AttentionWeights,
-    cfg: &ModelConfig,
-    adapters: &crate::lora::ActiveAdapters,
-    rope: &mivi_core::RopeCache,
-) -> crate::model::Result<()> {
+/// Compute Q, K, V projections, apply RoPE, and store in KV cache.
+#[inline]
+fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams) -> Result<()> {
+    let cfg = params.config;
+    let w = params.weights;
     let dim = cfg.dim;
     let kv_dim = cfg.kv_dim;
+    let mmap = params.mmap;
+    let adapters = params.adapters;
+
+    let mut project =
+        |out: &mut [f32], weight: &crate::weights::QuantizedTensor, rows: usize, name: &str| {
+            let p = LinearParams {
+                weight,
+                input: &state.xb,
+                rows,
+                cols: dim,
+                mmap,
+                adapters,
+                module_name: name,
+            };
+            linear_forward(out, &p, &mut state.lora_down)
+        };
+
+    project(&mut state.q, &w.wq, dim, &w.q_name)?;
+    project(&mut state.k, &w.wk, kv_dim, &w.k_name)?;
+    project(&mut state.v, &w.wv, kv_dim, &w.v_name)?;
+
+    // Apply RoPE using zero-allocation precomputed lookup table
+    params.rope.apply(
+        &mut state.q,
+        &mut state.k,
+        params.pos,
+        cfg.n_heads,
+        cfg.n_kv_heads,
+    );
+
+    // Store K, V in KV cache
+    kv.store(params.layer, params.pos, &state.k, &state.v)?;
+    Ok(())
+}
+
+/// Compute multi-head Grouped Query Attention (GQA) over cached keys and values.
+#[inline]
+fn compute_gqa_attention(
+    state: &mut RunState,
+    kv: &KvCache,
+    layer: usize,
+    pos: usize,
+    cfg: &ModelConfig,
+) -> Result<()> {
+    // Validate layer and pos bounds once upfront
+    let _ = kv.get_k(layer, pos)?;
+    let _ = kv.get_v(layer, pos)?;
+
     let head_dim = cfg.head_dim;
     let n_heads = cfg.n_heads;
-    let n_kv_heads = cfg.n_kv_heads;
-    let hidden_dim = cfg.hidden_dim;
-    let heads_per_kv = n_heads / n_kv_heads;
-
-    // 1. Attention Pre-Norm: xb = rms_norm(x, attn_norm)
-    rms_norm(&mut state.xb, &state.x, w.attn_norm, 1e-5);
-
-    // 2. Q, K, V projections
-    quantized_matvec(&mut state.q, w.q_weight.0, w.q_weight.1, &state.xb, dim, dim)?;
-    adapters.apply_module(
-        &format!("blk.{}.attn_q", layer),
-        &state.xb,
-        &mut state.lora_down,
-        &mut state.q,
-    );
-
-    quantized_matvec(&mut state.k, w.k_weight.0, w.k_weight.1, &state.xb, kv_dim, dim)?;
-    adapters.apply_module(
-        &format!("blk.{}.attn_k", layer),
-        &state.xb,
-        &mut state.lora_down,
-        &mut state.k,
-    );
-
-    quantized_matvec(&mut state.v, w.v_weight.0, w.v_weight.1, &state.xb, kv_dim, dim)?;
-    adapters.apply_module(
-        &format!("blk.{}.attn_v", layer),
-        &state.xb,
-        &mut state.lora_down,
-        &mut state.v,
-    );
-
-    // 3. Apply RoPE using zero-allocation precomputed lookup table
-    rope.apply(&mut state.q, &mut state.k, pos, n_heads, n_kv_heads);
-
-    // 4. Store K, V in KV cache
-    kv.store(layer, pos, &state.k, &state.v)?;
-
-    // 5. Multi-head Attention with GQA
+    let heads_per_kv = n_heads / cfg.n_kv_heads.max(1);
     let scale = 1.0 / (head_dim as f32).sqrt();
     let seq_len = pos + 1;
 
@@ -81,102 +87,78 @@ pub fn attention_forward(
         let q_head = &state.q[h * head_dim..(h + 1) * head_dim];
         let att_scores = &mut state.att[h * cfg.max_seq_len..h * cfg.max_seq_len + seq_len];
 
-        // Compute dot products with past keys in cache
-        for t in 0..seq_len {
-            let k_cached = kv.get_k(layer, t)?;
+        // Compute dot products with past keys in cache (unchecked inner loop)
+        for (t, att_val) in att_scores.iter_mut().enumerate().take(seq_len) {
+            // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
+            let k_cached = unsafe { kv.get_k_unchecked(layer, t) };
             let k_head = &k_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
-            att_scores[t] = dot_product(q_head, k_head) * scale;
+            *att_val = dot_product(q_head, k_head) * scale;
         }
 
         // Softmax over attention scores
         softmax(att_scores);
 
-        // Weighted sum of cached values
+        // Weighted sum of cached values (unchecked inner loop)
         let out_head = &mut state.attn_out[h * head_dim..(h + 1) * head_dim];
         out_head.fill(0.0);
 
-        for t in 0..seq_len {
-            let weight = att_scores[t];
-            let v_cached = kv.get_v(layer, t)?;
+        for (t, &weight) in att_scores.iter().enumerate().take(seq_len) {
+            // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
+            let v_cached = unsafe { kv.get_v_unchecked(layer, t) };
             let v_head = &v_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
             for i in 0..head_dim {
                 out_head[i] += weight * v_head[i];
             }
         }
     }
+    Ok(())
+}
 
-    // 6. Output projection: xb = W_o * attn_out
-    quantized_matvec(
-        &mut state.xb,
-        w.o_weight.0,
-        w.o_weight.1,
-        &state.attn_out,
-        dim,
-        dim,
-    )?;
-    adapters.apply_module(
-        &format!("blk.{}.attn_output", layer),
-        &state.attn_out,
-        &mut state.lora_down,
-        &mut state.xb,
-    );
+/// Forward pass through a single GQA Transformer layer for a single token.
+pub fn attention_forward(
+    state: &mut RunState,
+    kv: &mut KvCache,
+    params: &AttentionParams,
+) -> Result<()> {
+    let cfg = params.config;
+    let w = params.weights;
+    let dim = cfg.dim;
+    let hidden_dim = cfg.hidden_dim;
+    let mmap = params.mmap;
+    let adapters = params.adapters;
+
+    // 1. Attention Pre-Norm (SIMD accelerated)
+    rms_norm_simd(&mut state.xb, &state.x, &w.attn_norm, DEFAULT_RMS_NORM_EPS);
+
+    // 2-4. Q, K, V projections + RoPE + Cache store
+    compute_qkv(state, kv, params)?;
+
+    // 5. Multi-head Attention with GQA
+    compute_gqa_attention(state, kv, params.layer, params.pos, cfg)?;
+
+    // 6. Output projection: xb = W_o * attn_out + LoRA
+    let out_params = LinearParams {
+        weight: &w.wo,
+        input: &state.attn_out,
+        rows: dim,
+        cols: dim,
+        mmap,
+        adapters,
+        module_name: &w.o_name,
+    };
+    linear_forward(&mut state.xb, &out_params, &mut state.lora_down)?;
 
     // 7. Residual connection: x = x + xb
     vec_add(&mut state.x, &state.xb);
 
-    // 8. FFN Pre-Norm: xb = rms_norm(x, ffn_norm)
-    rms_norm(&mut state.xb, &state.x, w.ffn_norm, 1e-5);
-
-    // 9. SwiGLU FFN: hb = gate(xb), hb2 = up(xb)
-    quantized_matvec(
-        &mut state.hb,
-        w.ffn_gate.0,
-        w.ffn_gate.1,
-        &state.xb,
-        hidden_dim,
-        dim,
-    )?;
-    adapters.apply_module(
-        &format!("blk.{}.ffn_gate", layer),
-        &state.xb,
-        &mut state.lora_down,
-        &mut state.hb,
-    );
-
-    quantized_matvec(
-        &mut state.hb2,
-        w.ffn_up.0,
-        w.ffn_up.1,
-        &state.xb,
-        hidden_dim,
-        dim,
-    )?;
-    adapters.apply_module(
-        &format!("blk.{}.ffn_up", layer),
-        &state.xb,
-        &mut state.lora_down,
-        &mut state.hb2,
-    );
-
-    swiglu(&mut state.hb, &state.hb2);
-
-    // 10. Down projection: xb = W_down * hb
-    quantized_matvec(
-        &mut state.xb,
-        w.ffn_down.0,
-        w.ffn_down.1,
-        &state.hb,
+    // 8-11. Shared FFN SwiGLU forward
+    let ffn_params = FfnSwigluParams {
+        weights: &w.ffn,
         dim,
         hidden_dim,
-    )?;
-    adapters.apply_module(
-        &format!("blk.{}.ffn_down", layer),
-        &state.hb,
-        &mut state.lora_down,
-        &mut state.xb,
-    );
-
-    // 11. Residual connection: x = x + xb
-    vec_add(&mut state.x, &state.xb);
-    Ok(())
+        mmap,
+        adapters,
+        eps: DEFAULT_RMS_NORM_EPS,
+    };
+    ffn_swiglu_forward(state, &ffn_params)
 }
