@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use mivi_server::{create_router, AppState};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,11 +30,13 @@ pub async fn run_serve(port: u16, host: String, model: Option<PathBuf>) -> Resul
 
     let state = Arc::new(AppState::new(model_name.clone(), broker, engine, api_key));
 
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let ip: std::net::IpAddr = host
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid host address '{}': {}", host, e))?;
-    let addr = SocketAddr::new(ip, port);
+
+    let (listener, actual_addr) =
+        mivi_server::bind_with_fallback(ip, port, state.config.max_port_attempts).await?;
 
     println!(
         r#"
@@ -51,10 +52,9 @@ pub async fn run_serve(port: u16, host: String, model: Option<PathBuf>) -> Resul
  Listening on: http://{}
  OpenAI-compatible API ready.
 "#,
-        model_name, addr
+        model_name, actual_addr
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

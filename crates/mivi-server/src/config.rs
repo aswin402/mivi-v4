@@ -9,6 +9,7 @@ pub struct ServerConfig {
     pub default_max_agent_steps: usize,
     pub channel_capacity: usize,
     pub agent_gen_tokens: usize,
+    pub max_port_attempts: u16,
 }
 
 pub const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024; // 2MB
@@ -18,6 +19,7 @@ pub const DEFAULT_MAX_TOKENS: usize = 256;
 pub const DEFAULT_MAX_AGENT_STEPS: usize = 10;
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 pub const DEFAULT_AGENT_GEN_TOKENS: usize = 512;
+pub const DEFAULT_MAX_PORT_ATTEMPTS: u16 = 20;
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -29,6 +31,7 @@ impl Default for ServerConfig {
             default_max_agent_steps: DEFAULT_MAX_AGENT_STEPS,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             agent_gen_tokens: DEFAULT_AGENT_GEN_TOKENS,
+            max_port_attempts: DEFAULT_MAX_PORT_ATTEMPTS,
         }
     }
 }

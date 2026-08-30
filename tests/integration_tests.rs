@@ -387,3 +387,24 @@ async fn test_http_server_with_real_model() {
     assert_eq!(json["model"], "mivi-tiny-test");
     assert!(json["choices"][0]["message"]["content"].is_string());
 }
+
+#[tokio::test]
+async fn test_server_port_fallback_integration() {
+    use std::net::{IpAddr, Ipv4Addr};
+    let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+    // Bind port 0 to get an assigned occupied port
+    let initial_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_port = initial_listener.local_addr().unwrap().port();
+
+    // Call bind_with_fallback on the occupied port
+    let (fallback_listener, fallback_addr) = mivi_server::bind_with_fallback(ip, occupied_port, 10)
+        .await
+        .unwrap();
+
+    assert_ne!(fallback_addr.port(), occupied_port);
+    assert!(fallback_addr.port() > occupied_port);
+
+    drop(initial_listener);
+    drop(fallback_listener);
+}
