@@ -1,0 +1,7 @@
+# Cargo configuration for low-memory, low-spec hardware
+[build]
+jobs = 3
+
+[profile.dev]
+# Faster debug builds with reduced debug symbols
+debug = 1
