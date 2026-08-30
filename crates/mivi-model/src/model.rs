@@ -3,7 +3,7 @@ use crate::config::{
     RECENT_TOKENS_WINDOW,
 };
 use crate::gguf::{GgufFile, GgufValue};
-use crate::loader::{extract_model_config, extract_vocab, resolve_model_weights};
+use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve_model_weights};
 use crate::lora::ActiveAdapters;
 use crate::sampler::Sampler;
 use crate::ssm::ssm_forward;
@@ -11,7 +11,7 @@ use crate::transformer::attention_forward;
 use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
 use mivi_kv::KvCache;
-use mivi_tokenizer::{Tokenizer, BOS_TOKEN_ID, EOS_TOKEN_ID};
+use mivi_tokenizer::{Tokenizer, EOS_TOKEN_ID};
 use std::collections::VecDeque;
 use std::path::Path;
 use thiserror::Error;
@@ -82,8 +82,17 @@ impl Model {
         let weights = resolve_model_weights(&gguf, &config)?;
 
         let vocab = mivi_tokenizer::Vocab::new(tokens);
-        let tokenizer = Tokenizer::new(vocab, std::collections::HashMap::new());
-        let sampler = Sampler::new(GenerationConfig::default());
+        let merges = extract_merges(&gguf);
+        let mut gen_config = GenerationConfig::default();
+        if let Some(GgufValue::U32(eos_id)) = gguf.metadata.get("tokenizer.ggml.eos_token_id") {
+            if let Some(eos_str) = vocab.get_token(*eos_id) {
+                if !gen_config.stop_tokens.contains(&eos_str.to_string()) {
+                    gen_config.stop_tokens.push(eos_str.to_string());
+                }
+            }
+        }
+        let tokenizer = Tokenizer::new(vocab, merges);
+        let sampler = Sampler::new(gen_config);
         let active_adapters = ActiveAdapters::new();
         let rope_cache =
             mivi_core::RopeCache::new(config.head_dim, config.max_seq_len, config.rope_base);
@@ -222,6 +231,10 @@ impl Model {
         self.kv_cache.reset();
 
         let token_ids = self.tokenizer.encode(prompt);
+        if token_ids.is_empty() {
+            return Ok(String::new());
+        }
+
         let mut generated_ids = Vec::new();
         let mut recent_tokens = VecDeque::with_capacity(RECENT_TOKENS_WINDOW + 1);
 
@@ -230,14 +243,11 @@ impl Model {
             _ => EOS_TOKEN_ID,
         };
 
-        let mut pos = 0;
         // Prefill prompt
-        for &tok in &token_ids {
-            let _ = self.forward(tok, pos)?;
-            pos += 1;
+        for (i, &tok) in token_ids.iter().enumerate() {
+            let _ = self.forward(tok, i)?;
         }
-
-        let mut current_token = token_ids.last().copied().unwrap_or(BOS_TOKEN_ID);
+        let mut pos = token_ids.len();
 
         // Generation loop
         for _ in 0..max_tokens {
@@ -246,7 +256,6 @@ impl Model {
                 break;
             }
 
-            let _ = self.forward(current_token, pos)?;
             self.state
                 .logits_scratch
                 .copy_from_slice(&self.state.logits);
@@ -257,12 +266,6 @@ impl Model {
 
             if next_token == eos_token_id {
                 break;
-            }
-
-            generated_ids.push(next_token);
-            recent_tokens.push_back(next_token);
-            if recent_tokens.len() > RECENT_TOKENS_WINDOW {
-                recent_tokens.pop_front();
             }
 
             // Decode token string
@@ -277,11 +280,17 @@ impl Model {
                 break;
             }
 
+            generated_ids.push(next_token);
+            recent_tokens.push_back(next_token);
+            if recent_tokens.len() > RECENT_TOKENS_WINDOW {
+                recent_tokens.pop_front();
+            }
+
             if !on_token(next_token, tok_str) {
                 break;
             }
 
-            current_token = next_token;
+            let _ = self.forward(next_token, pos)?;
             pos += 1;
         }
 

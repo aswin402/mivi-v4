@@ -62,7 +62,12 @@ pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
         print!("assistant> ");
         io::stdout().flush()?;
 
-        let output = m.generate(&prompt, max_tokens)?;
+        let output = m.generate_streaming(&prompt, max_tokens, |_id, token_str| {
+            print!("{}", token_str);
+            let _ = io::stdout().flush();
+            true
+        })?;
+        println!("\n");
 
         // Display thinking if present
         if let Some(think) = extract_thinking(&output) {
@@ -74,8 +79,6 @@ pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
         for tc in tool_calls {
             println!("\x1b[33m[tool_call: {}({})]\x1b[0m", tc.name, tc.arguments);
         }
-
-        println!("{}\n", output);
 
         conversation_history.push(mivi_tokenizer::ChatMessage {
             role: mivi_tokenizer::Role::Assistant,

@@ -428,5 +428,6 @@ fn test_lfm2_350m_model_load_and_forward() {
     let output = model
         .generate("Hello, world!", 5)
         .expect("Failed forward pass");
+    println!("Generated output: {:?}", output);
     assert!(!output.is_empty());
 }

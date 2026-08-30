@@ -143,6 +143,22 @@ pub fn extract_vocab(gguf: &GgufFile, default_size: usize) -> Vec<String> {
     tokens
 }
 
+/// Extract BPE merge table from GGUF metadata.
+pub fn extract_merges(gguf: &GgufFile) -> std::collections::HashMap<(String, String), u32> {
+    let mut merges = std::collections::HashMap::new();
+    if let Some(GgufValue::Array(arr)) = gguf.metadata.get("tokenizer.ggml.merges") {
+        merges.reserve(arr.len());
+        for (rank, val) in arr.iter().enumerate() {
+            if let GgufValue::String(s) = val {
+                if let Some((left, right)) = s.split_once(' ') {
+                    merges.insert((left.to_string(), right.to_string()), rank as u32);
+                }
+            }
+        }
+    }
+    merges
+}
+
 #[inline]
 fn get_tensor_entry<'a>(
     gguf: &'a GgufFile,

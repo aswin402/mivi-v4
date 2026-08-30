@@ -19,6 +19,38 @@ pub type Result<T> = std::result::Result<T, TokenizerError>;
 pub const BYTE_FALLBACK_PREFIX: &str = "<0x";
 pub const BYTE_FALLBACK_TOKEN_LEN: usize = 6;
 
+/// Standard GPT-2 / Hugging Face bytes-to-unicode bijection table.
+pub fn bytes_to_unicode() -> HashMap<u8, char> {
+    let mut bs: Vec<u8> = (b'!'..=b'~')
+        .chain(b'\xa1'..=b'\xac')
+        .chain(b'\xae'..=b'\xff')
+        .collect();
+    let mut cs: Vec<u32> = bs.iter().map(|&b| b as u32).collect();
+    let mut n = 0u32;
+    for b in 0..=255u8 {
+        if !bs.contains(&b) {
+            bs.push(b);
+            cs.push(256 + n);
+            n += 1;
+        }
+    }
+    bs.into_iter()
+        .zip(cs.into_iter().filter_map(char::from_u32))
+        .collect()
+}
+
+pub fn unicode_to_bytes() -> HashMap<char, u8> {
+    bytes_to_unicode()
+        .into_iter()
+        .map(|(b, c)| (c, b))
+        .collect()
+}
+
+static BYTE_TO_UNICODE: std::sync::LazyLock<HashMap<u8, char>> =
+    std::sync::LazyLock::new(bytes_to_unicode);
+static UNICODE_TO_BYTE: std::sync::LazyLock<HashMap<char, u8>> =
+    std::sync::LazyLock::new(unicode_to_bytes);
+
 static PRE_TOKENIZE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     // Standard Rust-compatible GPT-2 / GPT-4 / LLaMA pre-tokenization regex pattern
     regex::Regex::new(
@@ -31,36 +63,11 @@ static PRE_TOKENIZE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLo
 pub struct Tokenizer {
     vocab: Vocab,
     merges: HashMap<(String, String), u32>,
-    byte_ranks: HashMap<Vec<u8>, usize>,
-    merge_ranks: HashMap<Vec<u8>, usize>,
 }
 
 impl Tokenizer {
     pub fn new(vocab: Vocab, merges: HashMap<(String, String), u32>) -> Self {
-        let mut byte_ranks = HashMap::new();
-        for (i, token) in vocab.id_to_token.iter().enumerate() {
-            byte_ranks.insert(token.as_bytes().to_vec(), i);
-        }
-
-        let mut merge_ranks: HashMap<Vec<u8>, usize> = HashMap::new();
-        if merges.is_empty() {
-            for (i, token) in vocab.id_to_token.iter().enumerate() {
-                merge_ranks.insert(token.as_bytes().to_vec(), i);
-            }
-        } else {
-            for ((left, right), rank) in &merges {
-                let mut key = left.as_bytes().to_vec();
-                key.extend_from_slice(right.as_bytes());
-                merge_ranks.insert(key, *rank as usize);
-            }
-        }
-
-        Self {
-            vocab,
-            merges,
-            byte_ranks,
-            merge_ranks,
-        }
+        Self { vocab, merges }
     }
 
     pub fn vocab(&self) -> &Vocab {
@@ -81,7 +88,7 @@ impl Tokenizer {
 
         // Split text with pre-tokenization regex
         for m in PRE_TOKENIZE_REGEX.find_iter(text) {
-            let piece = m.as_str().as_bytes();
+            let piece = m.as_str();
             let piece_tokens = self.bpe_encode_piece(piece);
             tokens.extend(piece_tokens);
         }
@@ -89,109 +96,90 @@ impl Tokenizer {
         tokens
     }
 
-    /// Tiktoken / minbpe-style BPE merge loop for a single contiguous byte slice.
-    fn bpe_encode_piece(&self, piece: &[u8]) -> Vec<u32> {
+    /// BPE merge loop for a single pre-tokenized piece.
+    fn bpe_encode_piece(&self, piece: &str) -> Vec<u32> {
         if piece.is_empty() {
             return Vec::new();
         }
 
-        if piece.len() == 1 {
-            if let Some(&rank) = self.byte_ranks.get(piece) {
-                return vec![rank as u32];
-            }
-            if let Some(id) = self.vocab.get_id(&format!("<0x{:02X}>", piece[0])) {
-                return vec![id];
+        // 1. Direct vocabulary lookup for special tokens or exact tokens
+        if let Some(id) = self.vocab.get_id(piece) {
+            return vec![id];
+        }
+
+        // 2. Convert UTF-8 bytes to GPT-2 unicode symbols
+        let mut symbols: Vec<String> = piece
+            .as_bytes()
+            .iter()
+            .map(|&b| {
+                if let Some(&c) = BYTE_TO_UNICODE.get(&b) {
+                    c.to_string()
+                } else {
+                    (b as char).to_string()
+                }
+            })
+            .collect();
+
+        if symbols.len() <= 1 {
+            if let Some(s) = symbols.first() {
+                if let Some(id) = self.vocab.get_id(s) {
+                    return vec![id];
+                }
             }
             return vec![crate::special::UNK_TOKEN_ID];
         }
 
-        #[derive(Clone, Copy)]
-        struct Part {
-            start: usize,
-            len: usize,
-            next: isize,
-        }
-
-        let n = piece.len();
-        let mut parts: Vec<Part> = (0..n)
-            .map(|i| Part {
-                start: i,
-                len: 1,
-                next: if i + 1 < n { i as isize + 1 } else { -1 },
-            })
-            .collect();
-
-        let get_pair_rank = |p_idx: usize, parts: &[Part]| -> usize {
-            let next_idx = parts[p_idx].next;
-            if next_idx >= 0 {
-                let start = parts[p_idx].start;
-                let next_u = next_idx as usize;
-                let end = parts[next_u].start + parts[next_u].len;
-                self.merge_ranks
-                    .get(&piece[start..end])
-                    .copied()
-                    .unwrap_or(usize::MAX)
-            } else {
-                usize::MAX
-            }
-        };
-
-        // Greedy iterative merge loop using index linked list to avoid O(N) array shifts
+        // 3. Iterative BPE pair merging using lowest rank in self.merges
         loop {
-            let mut min_rank = usize::MAX;
-            let mut best_i = None;
-            let mut curr = 0isize;
-
-            while curr >= 0 {
-                let i = curr as usize;
-                let rank = get_pair_rank(i, &parts);
-                if rank < min_rank {
-                    min_rank = rank;
-                    best_i = Some(i);
-                }
-                curr = parts[i].next;
-            }
-
-            if min_rank == usize::MAX {
+            if symbols.len() < 2 {
                 break;
             }
 
-            if let Some(i) = best_i {
-                let j = parts[i].next as usize;
-                // Merge j into i
-                parts[i].len += parts[j].len;
-                parts[i].next = parts[j].next;
+            let mut best_pair = None;
+            let mut min_rank = u32::MAX;
+
+            for i in 0..symbols.len() - 1 {
+                let pair = (symbols[i].clone(), symbols[i + 1].clone());
+                if let Some(&rank) = self.merges.get(&pair) {
+                    if rank < min_rank {
+                        min_rank = rank;
+                        best_pair = Some((i, pair));
+                    }
+                }
             }
+
+            let Some((idx, _)) = best_pair else {
+                break;
+            };
+
+            // Merge symbols[idx] and symbols[idx+1]
+            let merged = format!("{}{}", symbols[idx], symbols[idx + 1]);
+            symbols[idx] = merged;
+            symbols.remove(idx + 1);
         }
 
-        // Convert merged byte chunks to token IDs
-        let mut out = Vec::new();
-        let mut curr = 0isize;
-        while curr >= 0 {
-            let i = curr as usize;
-            let start = parts[i].start;
-            let end = start + parts[i].len;
-            let chunk_slice = &piece[start..end];
-
-            if let Some(&id) = self.byte_ranks.get(chunk_slice) {
-                out.push(id as u32);
-            } else if let Ok(s) = std::str::from_utf8(chunk_slice) {
-                if let Some(id) = self.vocab.get_id(s) {
-                    out.push(id);
-                } else {
-                    encode_byte_fallback(chunk_slice, &self.vocab, &mut out);
-                }
+        // 4. Map merged symbols to vocabulary IDs
+        let mut out = Vec::with_capacity(symbols.len());
+        for sym in &symbols {
+            if let Some(id) = self.vocab.get_id(sym) {
+                out.push(id);
             } else {
-                encode_byte_fallback(chunk_slice, &self.vocab, &mut out);
+                // Fallback to byte tokens
+                for &b in sym.as_bytes() {
+                    let hex = format!("<0x{:02X}>", b);
+                    out.push(
+                        self.vocab
+                            .get_id(&hex)
+                            .unwrap_or(crate::special::UNK_TOKEN_ID),
+                    );
+                }
             }
-
-            curr = parts[i].next;
         }
 
         out
     }
 
-    /// Decode sequence of token IDs to text with lossless byte fallback accumulation.
+    /// Decode sequence of token IDs to clean UTF-8 text.
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut raw_bytes = Vec::new();
         for &id in ids {
@@ -208,7 +196,23 @@ impl Tokenizer {
                         continue;
                     }
                 }
-                raw_bytes.extend_from_slice(token_str.as_bytes());
+
+                // If special token (e.g. <|im_start|>, <|im_end|>), write literal bytes
+                if token_str.starts_with("<|") && token_str.ends_with("|>") {
+                    raw_bytes.extend_from_slice(token_str.as_bytes());
+                    continue;
+                }
+
+                // Map GPT-2 unicode characters back to raw bytes
+                for c in token_str.chars() {
+                    if let Some(&b) = UNICODE_TO_BYTE.get(&c) {
+                        raw_bytes.push(b);
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let encoded = c.encode_utf8(&mut buf);
+                        raw_bytes.extend_from_slice(encoded.as_bytes());
+                    }
+                }
             }
         }
         String::from_utf8_lossy(&raw_bytes).into_owned()
@@ -217,14 +221,6 @@ impl Tokenizer {
     /// Decode single token ID
     pub fn decode_token(&self, id: u32) -> Option<&str> {
         self.vocab.get_token(id)
-    }
-}
-
-#[inline]
-fn encode_byte_fallback(chunk_slice: &[u8], vocab: &Vocab, out: &mut Vec<u32>) {
-    for &b in chunk_slice {
-        let hex = format!("<0x{:02X}>", b);
-        out.push(vocab.get_id(&hex).unwrap_or(crate::special::UNK_TOKEN_ID));
     }
 }
 
