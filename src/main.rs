@@ -10,6 +10,11 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    // Initialize Rayon thread pool for low CPU resource usage (3 worker threads)
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(3)
+        .build_global();
+
     let cli = Cli::parse();
 
     match cli.command {

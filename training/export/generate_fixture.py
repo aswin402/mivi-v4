@@ -75,10 +75,11 @@ def main():
     weights["output.weight"] = generate_deterministic_matrix(vocab_size, dim, 0.25)
     weights["output_norm.weight"] = generate_deterministic_vector(dim, 1.0)
 
-    # Layer 0: SSM Block
+    # Layer 0: ShortConv SSM Block
     weights["blk.0.ssm_norm.weight"] = generate_deterministic_vector(dim, 1.0)
-    weights["blk.0.ssm_in.weight"] = generate_deterministic_matrix(dim, dim, 0.3)
-    weights["blk.0.ssm_out.weight"] = generate_deterministic_matrix(dim, dim, 0.4)
+    weights["blk.0.shortconv.in_proj.weight"] = generate_deterministic_matrix(3 * dim, dim, 0.3)
+    weights["blk.0.shortconv.conv.weight"] = generate_deterministic_vector(3 * dim, 0.25)
+    weights["blk.0.shortconv.out_proj.weight"] = generate_deterministic_matrix(dim, dim, 0.4)
     weights["blk.0.ffn_norm.weight"] = generate_deterministic_vector(dim, 1.0)
     weights["blk.0.ffn_gate.weight"] = generate_deterministic_matrix(hidden_dim, dim, 0.5)
     weights["blk.0.ffn_up.weight"] = generate_deterministic_matrix(hidden_dim, dim, 0.6)

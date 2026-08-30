@@ -713,6 +713,7 @@ dependencies = [
  "mivi-server",
  "mivi-tokenizer",
  "mivi-tools",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

@@ -179,19 +179,37 @@ class ReferenceEngine:
                 x = [xi + di for xi, di in zip(x, down)]
 
             elif btype == "ssm":
-                ssm_norm_w = self.weights[f"blk.{l}.ssm_norm.weight"]
+                ssm_norm_w = self.weights.get(f"blk.{l}.ssm_norm.weight") or self.weights[f"blk.{l}.attn_norm.weight"]
                 xb = rms_norm(x, ssm_norm_w)
-                in_proj = matvec(self.weights[f"blk.{l}.ssm_in.weight"], xb)
+                in_w = self.weights.get(f"blk.{l}.shortconv.in_proj.weight") or self.weights[f"blk.{l}.ssm_in.weight"]
+                in_proj = matvec(in_w, xb)
 
-                # SSM Recurrence
-                effective_dim = min(self.config.ssm_state_dim, dim)
-                s_state = self.ssm_states[l]
-                for i in range(effective_dim):
-                    s_state[i] = 0.95 * s_state[i] + in_proj[i]
+                # ShortConv: B, C, X
+                b_part = in_proj[:dim]
+                c_part = in_proj[dim:2*dim]
+                x_part = in_proj[2*dim:3*dim]
+                bx = [b_i * x_i for b_i, x_i in zip(b_part, x_part)]
 
-                out_proj = matvec(self.weights[f"blk.{l}.ssm_out.weight"], s_state[:dim])
-                out_act = [silu(v) for v in out_proj]
-                x = [xi + oi for xi, oi in zip(x, out_act)]
+                # Conv state & depthwise 1D
+                conv_w = self.weights.get(f"blk.{l}.shortconv.conv.weight") or self.weights.get(f"blk.{l}.ssm_conv.weight") or [0.25] * (dim * 3)
+                k_size = 3
+                conv_key = f"conv_{l}"
+                if conv_key not in self.ssm_states:
+                    self.ssm_states[conv_key] = [[0.0] * k_size for _ in range(dim)]
+                c_state = self.ssm_states[conv_key]
+                conv_out = [0.0] * dim
+                for d in range(dim):
+                    c_state[d].pop(0)
+                    c_state[d].append(bx[d])
+                    w_k = [conv_w[d * k_size + k] if len(conv_w) == dim * k_size else conv_w[k] if k < len(conv_w) else 0.25 for k in range(k_size)]
+                    conv_out[d] = sum(c_state[d][k] * w_k[k] for k in range(k_size))
+
+                # Gating with C
+                gated = [conv_out[d] * c_part[d] for d in range(dim)]
+
+                out_w = self.weights.get(f"blk.{l}.shortconv.out_proj.weight") or self.weights[f"blk.{l}.ssm_out.weight"]
+                out_proj = matvec(out_w, gated)
+                x = [xi + oi for xi, oi in zip(x, out_proj)]
 
                 # FFN
                 ffn_norm_w = self.weights[f"blk.{l}.ffn_norm.weight"]

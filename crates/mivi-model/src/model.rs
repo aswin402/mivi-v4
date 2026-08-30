@@ -269,13 +269,13 @@ impl Model {
             }
 
             // Decode token string
-            let tok_str = self.tokenizer.decode_token(next_token).unwrap_or_default();
+            let tok_str = self.tokenizer.decode_token(next_token);
             if self
                 .sampler
                 .config
                 .stop_tokens
                 .iter()
-                .any(|st| st == tok_str)
+                .any(|st| st == &tok_str)
             {
                 break;
             }
@@ -286,7 +286,7 @@ impl Model {
                 recent_tokens.pop_front();
             }
 
-            if !on_token(next_token, tok_str) {
+            if !on_token(next_token, &tok_str) {
                 break;
             }
 

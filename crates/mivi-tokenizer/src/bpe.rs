@@ -218,9 +218,9 @@ impl Tokenizer {
         String::from_utf8_lossy(&raw_bytes).into_owned()
     }
 
-    /// Decode single token ID
-    pub fn decode_token(&self, id: u32) -> Option<&str> {
-        self.vocab.get_token(id)
+    /// Decode single token ID to clean UTF-8 text string.
+    pub fn decode_token(&self, id: u32) -> String {
+        self.decode(&[id])
     }
 }
 

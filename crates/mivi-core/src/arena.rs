@@ -52,6 +52,8 @@ pub struct RunState {
     pub ssm_states: Box<[f32]>,
     // SSM depthwise 1D convolution state buffer: [n_layers, dim, ssm_conv_kernel]
     pub conv_states: Box<[f32]>,
+    // ShortConv expanded projection buffer (3 * dim)
+    pub shortconv_in: Box<[f32]>,
 
     // LoRA intermediate buffer
     pub lora_down: Box<[f32]>,
@@ -76,6 +78,7 @@ impl RunState {
             ssm_states: vec![0.0f32; cfg.n_layers * cfg.ssm_state_dim].into_boxed_slice(),
             conv_states: vec![0.0f32; cfg.n_layers * cfg.dim * cfg.ssm_conv_kernel]
                 .into_boxed_slice(),
+            shortconv_in: vec![0.0f32; 3 * cfg.dim].into_boxed_slice(),
             lora_down: vec![0.0f32; cfg.max_lora_rank].into_boxed_slice(),
         }
     }
@@ -96,6 +99,7 @@ impl RunState {
         self.logits_scratch.fill(0.0);
         self.ssm_states.fill(0.0);
         self.conv_states.fill(0.0);
+        self.shortconv_in.fill(0.0);
         self.lora_down.fill(0.0);
     }
 }

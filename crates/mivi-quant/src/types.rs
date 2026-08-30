@@ -135,10 +135,10 @@ impl GgmlType {
 }
 
 /// Chunk size for parallel rayon processing in quantized matrix-vector kernels.
-pub const PARALLEL_CHUNK_SIZE: usize = 16;
+pub const PARALLEL_CHUNK_SIZE: usize = 128;
 
 /// Minimum row count threshold to trigger multi-threaded Rayon execution.
-pub const RAYON_PARALLEL_THRESHOLD: usize = 64;
+pub const RAYON_PARALLEL_THRESHOLD: usize = 256;
 
 /// Validate input/output dimensions and buffer sizes for matrix-vector operations.
 pub fn validate_matvec_args(
