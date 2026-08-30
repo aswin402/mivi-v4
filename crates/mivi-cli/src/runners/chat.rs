@@ -9,6 +9,13 @@ use std::path::PathBuf;
 const DEFAULT_CHAT_MAX_TOKENS: usize = 512;
 
 pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
+    if !model.exists() {
+        anyhow::bail!(
+            "Model file not found at {:?}.\n\nTo test with the test model fixture, run:\n  just chat models/mivi-tiny-test.gguf\nOr generate the test fixture using:\n  python3 training/export/generate_fixture.py",
+            model
+        );
+    }
+
     println!("Loading Mivi model from {:?}...", model);
     let mut m = Model::load(&model)?;
     m.sampler.config.temperature = temp;

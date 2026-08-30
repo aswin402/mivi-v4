@@ -56,12 +56,12 @@ verify: fmt-check clippy test
 
 # Launch the OpenAI-compatible HTTP inference & Agent OS server
 # Usage: just serve [model_path] [port] [host]
-serve model="models/mivi-v4-q4_k_m.gguf" port="8080" host="127.0.0.1":
+serve model="models/mivi-tiny-test.gguf" port="8080" host="127.0.0.1":
     cargo run --release --jobs 3 -- serve --model {{model}} --host {{host}} --port {{port}}
 
 # Start interactive CLI terminal chat session with the model
 # Usage: just chat [model_path] [temp]
-chat model="models/mivi-v4-q4_k_m.gguf" temp="0.7":
+chat model="models/mivi-tiny-test.gguf" temp="0.7":
     cargo run --release --jobs 3 -- chat --model {{model}} --temp {{temp}}
 
 # Run hardware, SIMD, and system environment doctor diagnostics
@@ -70,12 +70,16 @@ doctor:
 
 # Inspect GGUF model metadata, hyper-parameters, and tensor layouts
 # Usage: just info <model_path>
-info model="models/mivi-v4-q4_k_m.gguf":
+info model="models/mivi-tiny-test.gguf":
     cargo run --release --jobs 3 -- info --model {{model}}
 
 # Benchmark SIMD matrix-vector compute kernels on this machine
 bench:
     cargo run --release --jobs 3 -- bench
+
+# Generate the synthetic test GGUF model fixture (models/mivi-tiny-test.gguf)
+generate-fixture:
+    python3 training/export/generate_fixture.py
 
 # ------------------------------------------------------------------------------
 # Maintenance & Cleanup

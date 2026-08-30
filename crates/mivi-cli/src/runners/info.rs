@@ -4,6 +4,12 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub fn run_info(model: PathBuf) -> Result<()> {
+    if !model.exists() {
+        anyhow::bail!(
+            "Model file not found at {:?}.\n\nTo inspect the test model fixture, run:\n  just info models/mivi-tiny-test.gguf\nOr generate the test fixture using:\n  python3 training/export/generate_fixture.py",
+            model
+        );
+    }
     println!("=== Mivi GGUF Inspection ===");
     let gguf = mivi_model::GgufFile::open(&model)?;
     println!("File: {:?}", model);
