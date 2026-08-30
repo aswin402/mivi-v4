@@ -32,6 +32,10 @@ pub enum Commands {
     Chat {
         #[arg(short, long)]
         model: PathBuf,
+        #[arg(short = 't', long, default_value = "0.7")]
+        temp: f32,
+        #[arg(short = 'n', long, default_value = "512")]
+        max_tokens: usize,
     },
     /// Inspect model GGUF metadata and tensor shapes
     Info {

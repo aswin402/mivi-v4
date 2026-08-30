@@ -8,9 +8,15 @@ use std::path::PathBuf;
 
 const DEFAULT_CHAT_MAX_TOKENS: usize = 512;
 
-pub fn run_chat(model: PathBuf) -> Result<()> {
+pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
     println!("Loading Mivi model from {:?}...", model);
     let mut m = Model::load(&model)?;
+    m.sampler.config.temperature = temp;
+    let max_tokens = if max_tokens > 0 {
+        max_tokens
+    } else {
+        DEFAULT_CHAT_MAX_TOKENS
+    };
     println!(
         "Model loaded successfully! ({} parameters, 32K context)",
         m.config.name
@@ -49,7 +55,7 @@ pub fn run_chat(model: PathBuf) -> Result<()> {
         print!("assistant> ");
         io::stdout().flush()?;
 
-        let output = m.generate(&prompt, DEFAULT_CHAT_MAX_TOKENS)?;
+        let output = m.generate(&prompt, max_tokens)?;
 
         // Display thinking if present
         if let Some(think) = extract_thinking(&output) {

@@ -16,8 +16,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve { port, host, model } => {
             mivi_cli::run_serve(port, host, model).await?;
         }
-        Commands::Chat { model } => {
-            mivi_cli::run_chat(model)?;
+        Commands::Chat {
+            model,
+            temp,
+            max_tokens,
+        } => {
+            mivi_cli::run_chat(model, temp, max_tokens)?;
         }
         Commands::Info { model } => {
             mivi_cli::run_info(model)?;

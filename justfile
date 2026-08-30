@@ -74,9 +74,8 @@ info model="models/mivi-v4-q4_k_m.gguf":
     cargo run --release --jobs 3 -- info --model {{model}}
 
 # Benchmark SIMD matrix-vector compute kernels on this machine
-# Usage: just bench [dimension] [iterations]
-bench dim="1024" iters="100":
-    cargo run --release --jobs 3 -- bench --dim {{dim}} --iters {{iters}}
+bench:
+    cargo run --release --jobs 3 -- bench
 
 # ------------------------------------------------------------------------------
 # Maintenance & Cleanup
