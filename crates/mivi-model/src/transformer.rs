@@ -49,6 +49,37 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
     project(&mut state.k, &w.wk, kv_dim, &w.k_name)?;
     project(&mut state.v, &w.wv, kv_dim, &w.v_name)?;
 
+    // Apply QK-Norm per head if weights are present
+    let head_dim = cfg.head_dim;
+    if let Some(ref q_norm_w) = w.q_norm {
+        let mut temp = [0.0f32; 128];
+        for h in 0..cfg.n_heads {
+            let offset = h * head_dim;
+            let head_slice = &mut state.q[offset..offset + head_dim];
+            rms_norm_simd(
+                &mut temp[..head_dim],
+                head_slice,
+                q_norm_w,
+                DEFAULT_RMS_NORM_EPS,
+            );
+            head_slice.copy_from_slice(&temp[..head_dim]);
+        }
+    }
+    if let Some(ref k_norm_w) = w.k_norm {
+        let mut temp = [0.0f32; 128];
+        for kv_h in 0..cfg.n_kv_heads {
+            let offset = kv_h * head_dim;
+            let head_slice = &mut state.k[offset..offset + head_dim];
+            rms_norm_simd(
+                &mut temp[..head_dim],
+                head_slice,
+                k_norm_w,
+                DEFAULT_RMS_NORM_EPS,
+            );
+            head_slice.copy_from_slice(&temp[..head_dim]);
+        }
+    }
+
     // Apply RoPE using zero-allocation precomputed lookup table
     params.rope.apply(
         &mut state.q,

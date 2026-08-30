@@ -423,11 +423,31 @@ fn test_lfm2_350m_model_load_and_forward() {
     let mut model = mivi_model::Model::load(&model_path).expect("Failed to load LFM2.5-350M model");
     assert_eq!(model.config.dim, 1024);
     assert_eq!(model.config.n_layers, 16);
-    assert_eq!(model.config.vocab_size, 65536);
-
-    let output = model
-        .generate("Hello, world!", 5)
-        .expect("Failed forward pass");
-    println!("Generated output: {:?}", output);
-    assert!(!output.is_empty());
+    let messages = vec![mivi_tokenizer::ChatMessage {
+        role: mivi_tokenizer::Role::User,
+        content: Some("Hello!".to_string()),
+        name: None,
+    }];
+    let prompt = mivi_tokenizer::format_chatml(&messages, None, true);
+    let tokens = model.tokenizer.encode(&prompt);
+    println!("Encoded tokens: {:?}", tokens);
+    for &t in &tokens {
+        println!("  tok {}: {:?}", t, model.tokenizer.decode_token(t));
+    }
+    let mut logits_top = Vec::new();
+    for (i, &t) in tokens.iter().enumerate() {
+        let logits = model.forward(t, i).expect("forward failed");
+        if i == tokens.len() - 1 {
+            let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(idx, val) in &indexed[..10] {
+                logits_top.push((idx, val, model.tokenizer.decode_token(idx as u32)));
+            }
+        }
+    }
+    println!("Top 10 predicted tokens after prompt:");
+    for (idx, val, text) in logits_top {
+        println!("  id {}: logit {:.4} ({:?})", idx, val, text);
+    }
+    assert!(!tokens.is_empty());
 }

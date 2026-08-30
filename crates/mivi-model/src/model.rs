@@ -264,7 +264,12 @@ impl Model {
                 .sampler
                 .sample(&mut self.state.logits_scratch, recent_slice);
 
-            if next_token == eos_token_id {
+            if next_token == eos_token_id
+                || next_token == 7 // <|im_end|>
+                || next_token == 6 // <|im_start|>
+                || next_token == 1
+            // <|endoftext|>
+            {
                 break;
             }
 
@@ -275,7 +280,7 @@ impl Model {
                 .config
                 .stop_tokens
                 .iter()
-                .any(|st| st == &tok_str)
+                .any(|st| st == &tok_str || tok_str.contains(st))
             {
                 break;
             }

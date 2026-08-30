@@ -56,6 +56,8 @@ pub struct FfnLayerWeights {
 #[derive(Debug, Clone)]
 pub struct AttentionLayerWeights {
     pub attn_norm: Box<[f32]>,
+    pub q_norm: Option<Box<[f32]>>,
+    pub k_norm: Option<Box<[f32]>>,
     pub wq: QuantizedTensor,
     pub wk: QuantizedTensor,
     pub wv: QuantizedTensor,

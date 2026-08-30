@@ -221,6 +221,8 @@ pub fn resolve_ffn_weights(gguf: &GgufFile, layer_idx: usize) -> Result<FfnLayer
 /// Resolve grouped-query attention weights for a given layer index.
 pub fn resolve_attention_layer(gguf: &GgufFile, layer_idx: usize) -> Result<AttentionLayerWeights> {
     let attn_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "attn_norm"))?;
+    let q_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "attn_q_norm")).ok();
+    let k_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "attn_k_norm")).ok();
     let wq = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_q"))?;
     let wk = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_k"))?;
     let wv = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "attn_v"))?;
@@ -229,6 +231,8 @@ pub fn resolve_attention_layer(gguf: &GgufFile, layer_idx: usize) -> Result<Atte
 
     Ok(AttentionLayerWeights {
         attn_norm,
+        q_norm,
+        k_norm,
         wq,
         wk,
         wv,
@@ -322,7 +326,11 @@ pub fn resolve_model_weights(gguf: &GgufFile, config: &ModelConfig) -> Result<Mo
         }
     }
 
-    let output_norm = if let Ok((_, raw)) = gguf.get_tensor_data("output_norm.weight") {
+    let output_norm = if let Ok((_, raw)) = gguf
+        .get_tensor_data("output_norm.weight")
+        .or_else(|_| gguf.get_tensor_data("token_embd_norm.weight"))
+        .or_else(|_| gguf.get_tensor_data("token_embd_norm"))
+    {
         Some(safe_f32_slice(raw)?.to_vec().into_boxed_slice())
     } else {
         None

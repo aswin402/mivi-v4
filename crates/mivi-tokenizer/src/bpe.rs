@@ -59,6 +59,11 @@ static PRE_TOKENIZE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLo
     .expect("Invalid pre-tokenizer regex pattern")
 });
 
+static SPECIAL_TOKENS_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"<\|[a-zA-Z0-9_\-\.]+\|>|<think>|</think>|<tools>|</tools>|<tool_call>|</tool_call>|<tool_result>|</tool_result>")
+        .expect("Invalid special token regex pattern")
+});
+
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     vocab: Vocab,
@@ -78,22 +83,42 @@ impl Tokenizer {
         &self.merges
     }
 
-    /// Encode input text into a sequence of BPE token IDs using standard regex pre-tokenization.
+    /// Encode input text into a sequence of BPE token IDs, preserving special tokens atomically.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         if text.is_empty() {
             return Vec::new();
         }
 
         let mut tokens = Vec::new();
+        let mut last_idx = 0;
 
-        // Split text with pre-tokenization regex
+        for mat in SPECIAL_TOKENS_REGEX.find_iter(text) {
+            let start = mat.start();
+            let end = mat.end();
+            let special_str = mat.as_str();
+
+            if let Some(special_id) = self.vocab.get_id(special_str) {
+                if start > last_idx {
+                    self.encode_regular_text(&text[last_idx..start], &mut tokens);
+                }
+                tokens.push(special_id);
+                last_idx = end;
+            }
+        }
+
+        if last_idx < text.len() {
+            self.encode_regular_text(&text[last_idx..], &mut tokens);
+        }
+
+        tokens
+    }
+
+    fn encode_regular_text(&self, text: &str, tokens: &mut Vec<u32>) {
         for m in PRE_TOKENIZE_REGEX.find_iter(text) {
             let piece = m.as_str();
             let piece_tokens = self.bpe_encode_piece(piece);
             tokens.extend(piece_tokens);
         }
-
-        tokens
     }
 
     /// BPE merge loop for a single pre-tokenized piece.
