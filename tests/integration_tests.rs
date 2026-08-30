@@ -408,3 +408,25 @@ async fn test_server_port_fallback_integration() {
     drop(initial_listener);
     drop(fallback_listener);
 }
+
+#[test]
+fn test_lfm2_350m_model_load_and_forward() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model_path = manifest_dir.join("models/mivi-v4-q4_k_m.gguf");
+    if !model_path.exists() {
+        eprintln!(
+            "Skipping test_lfm2_350m_model_load_and_forward: models/mivi-v4-q4_k_m.gguf not found"
+        );
+        return;
+    }
+
+    let mut model = mivi_model::Model::load(&model_path).expect("Failed to load LFM2.5-350M model");
+    assert_eq!(model.config.dim, 1024);
+    assert_eq!(model.config.n_layers, 16);
+    assert_eq!(model.config.vocab_size, 65536);
+
+    let output = model
+        .generate("Hello, world!", 5)
+        .expect("Failed forward pass");
+    assert!(!output.is_empty());
+}

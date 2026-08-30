@@ -2,6 +2,7 @@
 
 pub mod f16;
 pub mod q4_k_m;
+pub mod q6_k;
 pub mod q8_0;
 pub mod types;
 
@@ -9,6 +10,10 @@ pub use f16::{dequantize_bf16, dequantize_f16, matvec_f16, try_matvec_f16};
 pub use q4_k_m::{
     dequantize_q4_k_m, dequantize_q4_k_m_slice, matvec_q4_k_m, try_matvec_q4_k_m, Q4_K_BLOCK_SIZE,
     Q4_K_BYTES,
+};
+pub use q6_k::{
+    dequantize_q6_k, dequantize_q6_k_slice, matvec_q6_k, try_matvec_q6_k, Q6_K_BLOCK_SIZE,
+    Q6_K_BYTES,
 };
 pub use q8_0::{
     dequantize_q8_0, dequantize_q8_0_slice, matvec_q8_0, try_matvec_q8_0, Q8_0_BLOCK_SIZE,
@@ -31,6 +36,10 @@ pub fn dequantize_slice(ggml_type: GgmlType, bytes: &[u8], out: &mut [f32]) -> R
         }
         GgmlType::Q4_K => {
             dequantize_q4_k_m_slice(bytes, out);
+            Ok(())
+        }
+        GgmlType::Q6_K => {
+            dequantize_q6_k_slice(bytes, out);
             Ok(())
         }
         GgmlType::F16 => {
@@ -70,6 +79,10 @@ pub fn quantized_matvec(
     match ggml_type {
         GgmlType::Q4_K => {
             matvec_q4_k_m(out, weights, x, n, d);
+            Ok(())
+        }
+        GgmlType::Q6_K => {
+            matvec_q6_k(out, weights, x, n, d);
             Ok(())
         }
         GgmlType::Q8_0 => {

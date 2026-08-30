@@ -174,23 +174,26 @@ impl Model {
             self.state.xb.copy_from_slice(&self.state.x);
         }
 
-        // 4. Output projection to vocabulary logits
-        if let Some(ref head) = self.weights.output_proj {
-            let out_params = crate::ffn::LinearParams {
-                weight: head,
-                input: &self.state.xb,
-                rows: self.config.vocab_size,
-                cols: dim,
-                mmap: &self.gguf.mmap,
-                adapters: &self.active_adapters,
-                module_name: "output",
-            };
-            crate::ffn::linear_forward(
-                &mut self.state.logits,
-                &out_params,
-                &mut self.state.lora_down,
-            )?;
-        }
+        // 4. Output projection to vocabulary logits (falls back to tied token_embd)
+        let head = self
+            .weights
+            .output_proj
+            .as_ref()
+            .unwrap_or(&self.weights.token_embd);
+        let out_params = crate::ffn::LinearParams {
+            weight: head,
+            input: &self.state.xb,
+            rows: self.config.vocab_size,
+            cols: dim,
+            mmap: &self.gguf.mmap,
+            adapters: &self.active_adapters,
+            module_name: "output",
+        };
+        crate::ffn::linear_forward(
+            &mut self.state.logits,
+            &out_params,
+            &mut self.state.lora_down,
+        )?;
 
         #[cfg(debug_assertions)]
         {

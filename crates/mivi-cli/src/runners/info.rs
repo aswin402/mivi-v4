@@ -18,33 +18,31 @@ pub fn run_info(model: PathBuf) -> Result<()> {
     println!("Tensor count: {}", gguf.tensors.len());
 
     println!("\n--- Key Model Hyperparameters ---");
-    for (key, val) in &gguf.metadata {
-        if key.starts_with("general.") || key.starts_with("lfm.") || key.starts_with("tokenizer.") {
-            match val {
-                mivi_model::GgufValue::String(s) => println!("  {}: \"{}\"", key, s),
-                mivi_model::GgufValue::U32(v) => println!("  {}: {}", key, v),
-                mivi_model::GgufValue::U64(v) => println!("  {}: {}", key, v),
-                mivi_model::GgufValue::F32(v) => println!("  {}: {}", key, v),
-                mivi_model::GgufValue::Array(a) => {
-                    println!("  {}: [array of {} items]", key, a.len())
-                }
-                _ => println!("  {}: {:?}", key, val),
+    let mut meta_keys: Vec<_> = gguf.metadata.keys().collect();
+    meta_keys.sort();
+    for key in meta_keys {
+        let val = &gguf.metadata[key];
+        match val {
+            mivi_model::GgufValue::String(s) => println!("  {}: \"{}\"", key, s),
+            mivi_model::GgufValue::U32(v) => println!("  {}: {}", key, v),
+            mivi_model::GgufValue::U64(v) => println!("  {}: {}", key, v),
+            mivi_model::GgufValue::F32(v) => println!("  {}: {}", key, v),
+            mivi_model::GgufValue::Array(a) => {
+                println!("  {}: [array of {} items]", key, a.len())
             }
+            _ => println!("  {}: {:?}", key, val),
         }
     }
 
-    println!("\n--- Sample Quantized Tensors ---");
+    println!("\n--- All Quantized Tensors ---");
     let mut tensor_names: Vec<_> = gguf.tensors.keys().collect();
     tensor_names.sort();
-    for name in tensor_names.iter().take(12) {
+    for name in &tensor_names {
         let info = &gguf.tensors[*name];
         println!(
-            "  {:30} {:?} dims: {:?}",
+            "  {:35} {:?} dims: {:?}",
             info.name, info.ggml_type, info.dims
         );
-    }
-    if gguf.tensors.len() > 12 {
-        println!("  ... and {} more tensors", gguf.tensors.len() - 12);
     }
 
     Ok(())

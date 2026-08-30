@@ -50,28 +50,45 @@ pub fn extract_model_config(gguf: &GgufFile) -> Result<ModelConfig> {
     {
         config.name = s.to_string();
     }
-    read_gguf_meta!(gguf, GGUF_KEY_CONTEXT_LENGTH, as_usize, config.max_seq_len);
-    read_gguf_meta!(gguf, GGUF_KEY_EMBEDDING_LENGTH, as_usize, config.dim);
+    read_gguf_meta!(gguf, "lfm2.context_length", as_usize, config.max_seq_len);
+    read_gguf_meta!(gguf, "lfm.context_length", as_usize, config.max_seq_len);
+
+    read_gguf_meta!(gguf, "lfm2.embedding_length", as_usize, config.dim);
+    read_gguf_meta!(gguf, "lfm.embedding_length", as_usize, config.dim);
+
     read_gguf_meta!(
         gguf,
-        GGUF_KEY_FEED_FORWARD_LENGTH,
+        "lfm2.feed_forward_length",
         as_usize,
         config.hidden_dim
     );
-    read_gguf_meta!(gguf, GGUF_KEY_BLOCK_COUNT, as_usize, config.n_layers);
+    read_gguf_meta!(gguf, "lfm.feed_forward_length", as_usize, config.hidden_dim);
+
+    read_gguf_meta!(gguf, "lfm2.block_count", as_usize, config.n_layers);
+    read_gguf_meta!(gguf, "lfm.block_count", as_usize, config.n_layers);
+
+    read_gguf_meta!(gguf, "lfm2.attention.head_count", as_usize, config.n_heads);
+    read_gguf_meta!(gguf, "lfm.attention.head_count", as_usize, config.n_heads);
+
     read_gguf_meta!(
         gguf,
-        GGUF_KEY_ATTENTION_HEAD_COUNT,
-        as_usize,
-        config.n_heads
-    );
-    read_gguf_meta!(
-        gguf,
-        GGUF_KEY_ATTENTION_HEAD_COUNT_KV,
+        "lfm2.attention.head_count_kv",
         as_usize,
         config.n_kv_heads
     );
-    read_gguf_meta!(gguf, GGUF_KEY_ROPE_FREQ_BASE, as_f32, config.rope_base);
+    read_gguf_meta!(
+        gguf,
+        "lfm.attention.head_count_kv",
+        as_usize,
+        config.n_kv_heads
+    );
+
+    read_gguf_meta!(gguf, "lfm2.rope.freq_base", as_f32, config.rope_base);
+    read_gguf_meta!(gguf, "lfm.rope.freq_base", as_f32, config.rope_base);
+
+    if let Some(GgufValue::Array(tokens)) = gguf.metadata.get("tokenizer.ggml.tokens") {
+        config.vocab_size = tokens.len();
+    }
 
     config.head_dim = if config.n_heads > 0 {
         config.dim / config.n_heads
@@ -82,8 +99,16 @@ pub fn extract_model_config(gguf: &GgufFile) -> Result<ModelConfig> {
 
     let mut block_types = Vec::with_capacity(config.n_layers);
     for i in 0..config.n_layers {
-        let ssm_key = format!("blk.{}.ssm_in.weight", i);
-        if gguf.tensors.contains_key(&ssm_key) {
+        let is_ssm = gguf
+            .tensors
+            .contains_key(&format!("blk.{}.ssm_in.weight", i))
+            || gguf
+                .tensors
+                .contains_key(&format!("blk.{}.shortconv.in_proj.weight", i))
+            || gguf
+                .tensors
+                .contains_key(&format!("blk.{}.shortconv.conv.weight", i));
+        if is_ssm {
             block_types.push(BlockType::SSM);
         } else {
             block_types.push(BlockType::Attention);
@@ -206,9 +231,12 @@ pub fn resolve_ssm_layer(
     layer_idx: usize,
     config: &ModelConfig,
 ) -> Result<SsmLayerWeights> {
-    let ssm_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "ssm_norm"))?;
-    let in_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_in"))?;
-    let out_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_out"))?;
+    let ssm_norm = resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "ssm_norm"))
+        .or_else(|_| resolve_f32_vec(gguf, &layer_tensor_name(layer_idx, "attn_norm")))?;
+    let in_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_in"))
+        .or_else(|_| resolve_tensor(gguf, &layer_tensor_name(layer_idx, "shortconv.in_proj")))?;
+    let out_proj = resolve_tensor(gguf, &layer_tensor_name(layer_idx, "ssm_out"))
+        .or_else(|_| resolve_tensor(gguf, &layer_tensor_name(layer_idx, "shortconv.out_proj")))?;
 
     let a_name = layer_tensor_name(layer_idx, "ssm_a");
     let ssm_a = match gguf.get_tensor_data(&a_name) {
@@ -220,15 +248,17 @@ pub fn resolve_ssm_layer(
     };
 
     let conv_name = layer_tensor_name(layer_idx, "ssm_conv");
-    let ssm_conv = match gguf.get_tensor_data(&conv_name) {
-        Ok((_, raw)) => safe_f32_slice(raw)?.to_vec().into_boxed_slice(),
-        Err(_) => {
-            tracing::debug!(
-                "SSM conv weights missing for layer {}, using empty buffer",
-                layer_idx
-            );
-            Box::new([])
-        }
+    let conv_name_short = layer_tensor_name(layer_idx, "shortconv.conv");
+    let ssm_conv = if let Ok((_, raw)) = gguf.get_tensor_data(&conv_name) {
+        safe_f32_slice(raw)?.to_vec().into_boxed_slice()
+    } else if let Ok((_, raw)) = gguf.get_tensor_data(&conv_name_short) {
+        safe_f32_slice(raw)?.to_vec().into_boxed_slice()
+    } else {
+        tracing::debug!(
+            "SSM conv weights missing for layer {}, using empty buffer",
+            layer_idx
+        );
+        Box::new([])
     };
 
     let ffn = resolve_ffn_weights(gguf, layer_idx)?;
