@@ -365,6 +365,30 @@ impl Model {
             return Ok((String::new(), Vec::new()));
         }
 
+        let mut tokens_buf: Vec<u32>;
+        let prompt_tokens: &[u32] = if start_pos == 0 {
+            let add_bos = match self.gguf.metadata.get("tokenizer.ggml.add_bos_token") {
+                Some(GgufValue::Bool(b)) => *b,
+                _ => true,
+            };
+            let bos_id = self
+                .gguf
+                .metadata
+                .get("tokenizer.ggml.bos_token_id")
+                .and_then(|v| v.as_usize().map(|u| u as u32))
+                .unwrap_or(1);
+            if add_bos && prompt_tokens.first() != Some(&bos_id) {
+                tokens_buf = Vec::with_capacity(prompt_tokens.len() + 1);
+                tokens_buf.push(bos_id);
+                tokens_buf.extend_from_slice(prompt_tokens);
+                &tokens_buf
+            } else {
+                prompt_tokens
+            }
+        } else {
+            prompt_tokens
+        };
+
         let n_prompt = prompt_tokens.len();
         // Prefill new prompt tokens: skip logits computation for all except the last prompt token
         for (i, &tok) in prompt_tokens.iter().enumerate() {
