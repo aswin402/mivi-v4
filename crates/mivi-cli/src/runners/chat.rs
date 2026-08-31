@@ -116,28 +116,88 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
             name: None,
         });
 
-        let prompt = mivi_tokenizer::format_chatml(&conversation_history, None, thinking_enabled);
+        if thinking_enabled {
+            // 1. Generate step-by-step thinking trace
+            let mut think_history = Vec::with_capacity(conversation_history.len() + 1);
+            think_history.push(mivi_tokenizer::ChatMessage {
+                role: mivi_tokenizer::Role::System,
+                content: Some(
+                    "You are an analytical assistant. Think step by step through this question, breaking down the logic and reasoning carefully."
+                        .to_string(),
+                ),
+                name: None,
+            });
+            for msg in &conversation_history {
+                if msg.role != mivi_tokenizer::Role::System {
+                    think_history.push(msg.clone());
+                }
+            }
+            let think_prompt = mivi_tokenizer::format_chatml(&think_history, None, false);
 
-        print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
-        io::stdout().flush()?;
+            print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
+            io::stdout().flush()?;
 
-        let mut stream_filter = StreamFilter::new();
+            let mut think_stream = StreamFilter::with_thinking(true);
+            let think_max = (max_tokens / 2).max(128);
+            let _thoughts = m.generate_streaming(&think_prompt, think_max, |_id, token_str| {
+                think_stream.on_token(token_str);
+                true
+            })?;
+            let think_stats = think_stream.finish();
 
-        let output = m.generate_streaming(&prompt, max_tokens, |_id, token_str| {
-            stream_filter.on_token(token_str);
-            true
-        })?;
+            // 2. Generate final clear answer
+            let answer_prompt = mivi_tokenizer::format_chatml(&conversation_history, None, false);
 
-        println!();
-        let stats = stream_filter.finish();
-        print_telemetry_footer(&stats);
-        println!("{}", DIVIDER_LINE);
+            let mut answer_stream = StreamFilter::new();
+            let output = m.generate_streaming(&answer_prompt, max_tokens, |_id, token_str| {
+                answer_stream.on_token(token_str);
+                true
+            })?;
+            println!();
 
-        conversation_history.push(mivi_tokenizer::ChatMessage {
-            role: mivi_tokenizer::Role::Assistant,
-            content: Some(output),
-            name: None,
-        });
+            let mut ans_stats = answer_stream.finish();
+            ans_stats.total_tokens += think_stats.total_tokens;
+            ans_stats.thinking_tokens = think_stats.total_tokens;
+            ans_stats.thinking_duration_secs = think_stats.total_duration_secs;
+            ans_stats.total_duration_secs += think_stats.total_duration_secs;
+            ans_stats.tokens_per_sec = if ans_stats.total_duration_secs > 0.0 {
+                ans_stats.total_tokens as f64 / ans_stats.total_duration_secs
+            } else {
+                0.0
+            };
+            print_telemetry_footer(&ans_stats);
+            println!("{}", DIVIDER_LINE);
+
+            conversation_history.push(mivi_tokenizer::ChatMessage {
+                role: mivi_tokenizer::Role::Assistant,
+                content: Some(output),
+                name: None,
+            });
+        } else {
+            // Standard single-pass fast generation
+            let prompt = mivi_tokenizer::format_chatml(&conversation_history, None, false);
+
+            print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
+            io::stdout().flush()?;
+
+            let mut stream_filter = StreamFilter::new();
+
+            let output = m.generate_streaming(&prompt, max_tokens, |_id, token_str| {
+                stream_filter.on_token(token_str);
+                true
+            })?;
+
+            println!();
+            let stats = stream_filter.finish();
+            print_telemetry_footer(&stats);
+            println!("{}", DIVIDER_LINE);
+
+            conversation_history.push(mivi_tokenizer::ChatMessage {
+                role: mivi_tokenizer::Role::Assistant,
+                content: Some(output),
+                name: None,
+            });
+        }
     }
 
     Ok(())

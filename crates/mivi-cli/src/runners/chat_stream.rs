@@ -46,16 +46,37 @@ impl Default for StreamFilter {
 impl StreamFilter {
     /// Create a new stream filter starting at the current instant.
     pub fn new() -> Self {
-        Self {
-            state: StreamState::Normal,
-            buffer: String::new(),
-            gen_start: Instant::now(),
-            think_start: None,
-            total_tokens: 0,
-            think_tokens: 0,
-            think_duration: 0.0,
-            tool_buffer: String::new(),
-            tool_calls: Vec::new(),
+        Self::with_thinking(false)
+    }
+
+    /// Create a new stream filter with initial thinking state.
+    pub fn with_thinking(thinking: bool) -> Self {
+        if thinking {
+            print!("\n  \x1b[2;3m💭 Thinking...\x1b[0m\n  \x1b[2m│ \x1b[0;2;3m");
+            let _ = io::stdout().flush();
+            Self {
+                state: StreamState::InThinking,
+                buffer: String::new(),
+                gen_start: Instant::now(),
+                think_start: Some(Instant::now()),
+                total_tokens: 0,
+                think_tokens: 0,
+                think_duration: 0.0,
+                tool_buffer: String::new(),
+                tool_calls: Vec::new(),
+            }
+        } else {
+            Self {
+                state: StreamState::Normal,
+                buffer: String::new(),
+                gen_start: Instant::now(),
+                think_start: None,
+                total_tokens: 0,
+                think_tokens: 0,
+                think_duration: 0.0,
+                tool_buffer: String::new(),
+                tool_calls: Vec::new(),
+            }
         }
     }
 
@@ -234,8 +255,17 @@ impl StreamFilter {
         // Flush any remaining normal buffer
         if !self.buffer.is_empty() {
             if self.state == StreamState::InThinking {
-                print!("{}", self.buffer);
-                println!("\x1b[0m");
+                let formatted = self.buffer.replace('\n', "\n  \x1b[2m│ \x1b[0;2;3m");
+                print!("{}", formatted);
+                let dur = self
+                    .think_start
+                    .map(|s| s.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
+                self.think_duration = dur;
+                print!(
+                    "\x1b[0m\n  \x1b[2m└─ Thought for {:.1}s ({} tokens)\x1b[0m\n\n",
+                    dur, self.think_tokens
+                );
             } else if self.state == StreamState::InToolCall {
                 self.tool_buffer.push_str(&self.buffer);
                 let raw_tool = self.tool_buffer.trim().to_string();
@@ -244,6 +274,17 @@ impl StreamFilter {
             } else {
                 print!("{}", self.buffer);
             }
+            let _ = io::stdout().flush();
+        } else if self.state == StreamState::InThinking {
+            let dur = self
+                .think_start
+                .map(|s| s.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            self.think_duration = dur;
+            print!(
+                "\x1b[0m\n  \x1b[2m└─ Thought for {:.1}s ({} tokens)\x1b[0m\n\n",
+                dur, self.think_tokens
+            );
             let _ = io::stdout().flush();
         }
 
