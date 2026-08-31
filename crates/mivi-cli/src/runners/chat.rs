@@ -1,4 +1,4 @@
-//! Modern, minimal interactive chat REPL runner with thinking animation, telemetry & slash commands.
+//! Modern, minimal interactive chat REPL runner with incremental KV caching, thinking stream, telemetry & slash commands.
 
 use crate::runners::chat_stream::{print_telemetry_footer, StreamFilter};
 use anyhow::Result;
@@ -54,7 +54,10 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
     };
 
     let mut thinking_enabled = args.thinking;
-    let mut system_prompt = args.system;
+    let mut system_prompt = Some(
+        args.system
+            .unwrap_or_else(|| mivi_core::DEFAULT_SYSTEM_PROMPT.to_string()),
+    );
 
     print_chat_header(
         &m.config.name,
@@ -62,7 +65,7 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
         mivi_core::estimate_process_memory_mb(),
     );
 
-    let mut conversation_history = Vec::new();
+    let mut conversation_history: Vec<mivi_tokenizer::ChatMessage> = Vec::new();
     if let Some(ref sys_prompt) = system_prompt {
         conversation_history.push(mivi_tokenizer::ChatMessage {
             role: mivi_tokenizer::Role::System,
@@ -70,6 +73,9 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
             name: None,
         });
     }
+
+    // Tracks tokens that are currently in the model's KV cache
+    let mut cached_tokens: Vec<u32> = Vec::new();
 
     loop {
         print!("  \x1b[1;36muser\x1b[0m \x1b[36m›\x1b[0m ");
@@ -95,6 +101,7 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
                 &mut conversation_history,
                 &mut thinking_enabled,
                 &mut system_prompt,
+                &mut cached_tokens,
             );
             if handled {
                 continue;
@@ -116,88 +123,89 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
             name: None,
         });
 
-        if thinking_enabled {
-            // 1. Generate step-by-step thinking trace
-            let mut think_history = Vec::with_capacity(conversation_history.len() + 1);
-            think_history.push(mivi_tokenizer::ChatMessage {
-                role: mivi_tokenizer::Role::System,
-                content: Some(
-                    "You are an analytical assistant. Think step by step through this question, breaking down the logic and reasoning carefully."
-                        .to_string(),
-                ),
-                name: None,
-            });
-            for msg in &conversation_history {
-                if msg.role != mivi_tokenizer::Role::System {
-                    think_history.push(msg.clone());
+        // 1. Extract active conversational context (System + recent turns) for model prompting
+        const MAX_ACTIVE_HISTORY_TURNS: usize = 2;
+        let active_context =
+            get_active_chat_context(&conversation_history, MAX_ACTIVE_HISTORY_TURNS);
+
+        // 2. Format ChatML prompt string
+        let mut full_prompt =
+            mivi_tokenizer::format_chatml(&active_context, None, thinking_enabled);
+        let mut prompt_tokens = m.tokenizer.encode(&full_prompt);
+
+        // 3. Sliding window context eviction if approaching max_seq_len
+        let max_ctx = m.config.max_seq_len;
+        if prompt_tokens.len() + max_tokens >= max_ctx {
+            // Trim oldest non-system message pair (or message)
+            let mut trimmed_any = false;
+            while prompt_tokens.len() + max_tokens >= (max_ctx * 85) / 100 {
+                let first_non_system = conversation_history
+                    .iter()
+                    .position(|msg| msg.role != mivi_tokenizer::Role::System);
+                if let Some(idx) = first_non_system {
+                    if idx < conversation_history.len().saturating_sub(1) {
+                        conversation_history.remove(idx);
+                        trimmed_any = true;
+                        let active = get_active_chat_context(
+                            &conversation_history,
+                            MAX_ACTIVE_HISTORY_TURNS,
+                        );
+                        full_prompt =
+                            mivi_tokenizer::format_chatml(&active, None, thinking_enabled);
+                        prompt_tokens = m.tokenizer.encode(&full_prompt);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
                 }
             }
-            let think_prompt = mivi_tokenizer::format_chatml(&think_history, None, false);
+            if trimmed_any {
+                println!(
+                    "  \x1b[33m⚠ Context window near capacity: trimmed older messages.\x1b[0m"
+                );
+                m.reset_context();
+                cached_tokens.clear();
+            }
+        }
 
-            print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
-            io::stdout().flush()?;
+        // 4. Reset context and prefill active conversation prompt from position 0
+        // This ensures the SSM recurrent shortconv state and Attention KV cache
+        // are perfectly synchronized with the exact multi-turn ChatML prompt sequence.
+        m.reset_context();
+        let start_pos = 0;
+        let new_prompt_tokens = &prompt_tokens[..];
 
-            let mut think_stream = StreamFilter::with_thinking(true);
-            let think_max = (max_tokens / 2).max(128);
-            let _thoughts = m.generate_streaming(&think_prompt, think_max, |_id, token_str| {
-                think_stream.on_token(token_str);
-                true
-            })?;
-            let think_stats = think_stream.finish();
+        print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
+        io::stdout().flush()?;
 
-            // 2. Generate final clear answer
-            let answer_prompt = mivi_tokenizer::format_chatml(&conversation_history, None, false);
+        let mut stream_filter = StreamFilter::new();
 
-            let mut answer_stream = StreamFilter::new();
-            let output = m.generate_streaming(&answer_prompt, max_tokens, |_id, token_str| {
-                answer_stream.on_token(token_str);
-                true
-            })?;
-            println!();
-
-            let mut ans_stats = answer_stream.finish();
-            ans_stats.total_tokens += think_stats.total_tokens;
-            ans_stats.thinking_tokens = think_stats.total_tokens;
-            ans_stats.thinking_duration_secs = think_stats.total_duration_secs;
-            ans_stats.total_duration_secs += think_stats.total_duration_secs;
-            ans_stats.tokens_per_sec = if ans_stats.total_duration_secs > 0.0 {
-                ans_stats.total_tokens as f64 / ans_stats.total_duration_secs
-            } else {
-                0.0
-            };
-            print_telemetry_footer(&ans_stats);
-            println!("{}", DIVIDER_LINE);
-
-            conversation_history.push(mivi_tokenizer::ChatMessage {
-                role: mivi_tokenizer::Role::Assistant,
-                content: Some(output),
-                name: None,
-            });
-        } else {
-            // Standard single-pass fast generation
-            let prompt = mivi_tokenizer::format_chatml(&conversation_history, None, false);
-
-            print!("  \x1b[1;32mmivi\x1b[0m \x1b[32m›\x1b[0m ");
-            io::stdout().flush()?;
-
-            let mut stream_filter = StreamFilter::new();
-
-            let output = m.generate_streaming(&prompt, max_tokens, |_id, token_str| {
+        let (output, generated_ids) = m.generate_tokens_incremental(
+            new_prompt_tokens,
+            start_pos,
+            max_tokens,
+            |_id, token_str| {
                 stream_filter.on_token(token_str);
                 true
-            })?;
+            },
+        )?;
 
-            println!();
-            let stats = stream_filter.finish();
-            print_telemetry_footer(&stats);
-            println!("{}", DIVIDER_LINE);
+        println!();
+        let stats = stream_filter.finish();
+        print_telemetry_footer(&stats);
+        println!("{}", DIVIDER_LINE);
 
-            conversation_history.push(mivi_tokenizer::ChatMessage {
-                role: mivi_tokenizer::Role::Assistant,
-                content: Some(output),
-                name: None,
-            });
-        }
+        // Update cached tokens
+        cached_tokens.clear();
+        cached_tokens.extend_from_slice(&prompt_tokens);
+        cached_tokens.extend_from_slice(&generated_ids);
+
+        conversation_history.push(mivi_tokenizer::ChatMessage {
+            role: mivi_tokenizer::Role::Assistant,
+            content: Some(output),
+            name: None,
+        });
     }
 
     Ok(())
@@ -220,6 +228,7 @@ fn handle_slash_command(
     history: &mut Vec<mivi_tokenizer::ChatMessage>,
     thinking_enabled: &mut bool,
     system_prompt: &mut Option<String>,
+    cached_tokens: &mut Vec<u32>,
 ) -> bool {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let base_cmd = parts[0].to_lowercase();
@@ -238,11 +247,12 @@ fn handle_slash_command(
                 .filter(|m| m.role == mivi_tokenizer::Role::User)
                 .count();
             println!(
-                "\n  \x1b[1mTelemetry & Runtime Stats:\x1b[0m\n    • \x1b[1mModel:\x1b[0m       {} ({} layers, {} dim)\n    • \x1b[1mContext:\x1b[0m     {} turns in history (max {} tokens)\n    • \x1b[1mSampling:\x1b[0m    temp={:.2} | top_p={:.2} | top_k={} | min_p={:.2} | rep_pen={:.2}\n    • \x1b[1mThinking:\x1b[0m    {}\n    • \x1b[1mMemory RSS:\x1b[0m  {:.1} MB",
+                "\n  \x1b[1mTelemetry & Runtime Stats:\x1b[0m\n    • \x1b[1mModel:\x1b[0m       {} ({} layers, {} dim)\n    • \x1b[1mContext:\x1b[0m     {} turns in history ({} tokens cached, max {})\n    • \x1b[1mSampling:\x1b[0m    temp={:.2} | top_p={:.2} | top_k={} | min_p={:.2} | rep_pen={:.2}\n    • \x1b[1mThinking:\x1b[0m    {}\n    • \x1b[1mMemory RSS:\x1b[0m  {:.1} MB",
                 model.config.name,
                 model.config.n_layers,
                 model.config.dim,
                 turns,
+                cached_tokens.len(),
                 model.config.max_seq_len,
                 model.sampler.config.temperature,
                 model.sampler.config.top_p,
@@ -263,6 +273,8 @@ fn handle_slash_command(
             print!("\x1b[2J\x1b[1;1H");
             let _ = io::stdout().flush();
             history.clear();
+            cached_tokens.clear();
+            model.reset_context();
             if let Some(ref sys_prompt) = system_prompt {
                 history.push(mivi_tokenizer::ChatMessage {
                     role: mivi_tokenizer::Role::System,
@@ -279,6 +291,8 @@ fn handle_slash_command(
         }
         "/reset" => {
             history.clear();
+            cached_tokens.clear();
+            model.reset_context();
             if let Some(ref sys_prompt) = system_prompt {
                 history.push(mivi_tokenizer::ChatMessage {
                     role: mivi_tokenizer::Role::System,
@@ -303,6 +317,8 @@ fn handle_slash_command(
                         name: None,
                     },
                 );
+                cached_tokens.clear();
+                model.reset_context();
                 println!("  \x1b[2mSystem prompt updated to:\x1b[0m \"{}\"", new_sys);
             } else if let Some(ref sys) = system_prompt {
                 println!("  \x1b[2mActive system prompt:\x1b[0m \"{}\"", sys);
@@ -414,6 +430,8 @@ fn handle_slash_command(
         }
         "/thinking" => {
             *thinking_enabled = !*thinking_enabled;
+            cached_tokens.clear();
+            model.reset_context();
             println!(
                 "  \x1b[2mThinking formatting:\x1b[0m {}",
                 if *thinking_enabled {
@@ -427,4 +445,30 @@ fn handle_slash_command(
         }
         _ => false,
     }
+}
+
+/// Helper to extract the active conversational context (System + recent turns) for model prompting.
+fn get_active_chat_context(
+    history: &[mivi_tokenizer::ChatMessage],
+    max_history_turns: usize,
+) -> Vec<mivi_tokenizer::ChatMessage> {
+    let mut out = Vec::new();
+    // 1. Always retain system prompt at the top
+    if let Some(sys) = history
+        .iter()
+        .find(|m| m.role == mivi_tokenizer::Role::System)
+    {
+        out.push(sys.clone());
+    }
+    // 2. Collect non-system messages
+    let non_sys: Vec<_> = history
+        .iter()
+        .filter(|m| m.role != mivi_tokenizer::Role::System)
+        .cloned()
+        .collect();
+    // 3. Keep last max_history_turns * 2 messages (e.g. 2 turns = 4 messages)
+    let keep_count = (max_history_turns * 2).min(non_sys.len());
+    let start_idx = non_sys.len().saturating_sub(keep_count);
+    out.extend_from_slice(&non_sys[start_idx..]);
+    out
 }

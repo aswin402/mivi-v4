@@ -318,7 +318,7 @@ impl Model {
         prompt: &str,
         start_pos: usize,
         max_tokens: usize,
-        mut on_token: F,
+        on_token: F,
     ) -> Result<String>
     where
         F: FnMut(u32, &str) -> bool,
@@ -329,11 +329,12 @@ impl Model {
         }
 
         // Prepend BOS token only for raw/completion prompts at start_pos 0, NOT for ChatML prompts.
+        let is_chatml = prompt.contains("<|im_start|>");
         let add_bos = match self.gguf.metadata.get("tokenizer.ggml.add_bos_token") {
             Some(GgufValue::Bool(b)) => *b,
             _ => false,
         };
-        if add_bos && start_pos == 0 {
+        if add_bos && start_pos == 0 && !is_chatml {
             let bos_id = match self.gguf.metadata.get("tokenizer.ggml.bos_token_id") {
                 Some(v) => v.as_usize().unwrap_or(1) as u32,
                 None => 1,
@@ -343,9 +344,30 @@ impl Model {
             }
         }
 
-        let n_prompt = token_ids.len();
-        // Prefill prompt: skip logits computation for all except the last prompt token
-        for (i, &tok) in token_ids.iter().enumerate() {
+        self.generate_tokens_incremental(&token_ids, start_pos, max_tokens, on_token)
+            .map(|(text, _)| text)
+    }
+
+    /// Prefill given token IDs directly starting from `start_pos` (skipping re-tokenization)
+    /// and generate output tokens up to `max_tokens`.
+    /// Returns a tuple of (generated_text, generated_token_ids).
+    pub fn generate_tokens_incremental<F>(
+        &mut self,
+        prompt_tokens: &[u32],
+        start_pos: usize,
+        max_tokens: usize,
+        mut on_token: F,
+    ) -> Result<(String, Vec<u32>)>
+    where
+        F: FnMut(u32, &str) -> bool,
+    {
+        if prompt_tokens.is_empty() && start_pos == 0 {
+            return Ok((String::new(), Vec::new()));
+        }
+
+        let n_prompt = prompt_tokens.len();
+        // Prefill new prompt tokens: skip logits computation for all except the last prompt token
+        for (i, &tok) in prompt_tokens.iter().enumerate() {
             let cur_pos = start_pos + i;
             let is_last = i + 1 == n_prompt;
             let _ = self.forward_step(tok, cur_pos, is_last)?;
@@ -448,7 +470,7 @@ impl Model {
                 clean_result.truncate(clean_result.len() - st.len());
             }
         }
-        Ok(clean_result)
+        Ok((clean_result, generated_ids))
     }
 
     /// Prefill prompt tokens and generate full string up to `max_tokens`.
