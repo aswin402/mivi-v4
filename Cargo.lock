@@ -749,6 +749,7 @@ dependencies = [
  "mivi-server",
  "mivi-tokenizer",
  "mivi-tools",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

@@ -2,6 +2,7 @@
 
 pub mod bench;
 pub mod chat;
+pub mod chat_stream;
 pub mod doctor;
 pub mod info;
 pub mod serve;
