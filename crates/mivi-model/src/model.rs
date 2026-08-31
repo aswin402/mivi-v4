@@ -390,6 +390,7 @@ impl Model {
         };
 
         let n_prompt = prompt_tokens.len();
+
         // Prefill new prompt tokens: skip logits computation for all except the last prompt token
         for (i, &tok) in prompt_tokens.iter().enumerate() {
             let cur_pos = start_pos + i;
