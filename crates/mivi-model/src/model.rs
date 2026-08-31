@@ -387,8 +387,11 @@ impl Model {
             .and_then(|v| v.as_usize().map(|u| u as u32))
             .unwrap_or(EOS_TOKEN_ID);
 
+        let im_end_id = self.tokenizer.vocab().get_id("<|im_end|>");
+        let endoftext_id = self.tokenizer.vocab().get_id("<|endoftext|>");
+
         // Generation loop
-        for _ in 0..max_tokens {
+        for step in 0..max_tokens {
             if pos >= self.config.max_seq_len {
                 break;
             }
@@ -398,6 +401,24 @@ impl Model {
             self.state
                 .logits_scratch
                 .copy_from_slice(&self.state.logits);
+
+            // Suppress EOS and end-of-sequence tokens on step 0 to prevent empty turn dropouts
+            if step == 0 {
+                if (eos_token_id as usize) < self.state.logits_scratch.len() {
+                    self.state.logits_scratch[eos_token_id as usize] = f32::NEG_INFINITY;
+                }
+                if let Some(id) = im_end_id {
+                    if (id as usize) < self.state.logits_scratch.len() {
+                        self.state.logits_scratch[id as usize] = f32::NEG_INFINITY;
+                    }
+                }
+                if let Some(id) = endoftext_id {
+                    if (id as usize) < self.state.logits_scratch.len() {
+                        self.state.logits_scratch[id as usize] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+
             let next_token = self
                 .sampler
                 .sample(&mut self.state.logits_scratch, recent_slice);

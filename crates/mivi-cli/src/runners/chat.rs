@@ -124,7 +124,7 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
         });
 
         // 1. Extract active conversational context (System + recent turns) for model prompting
-        const MAX_ACTIVE_HISTORY_TURNS: usize = 2;
+        const MAX_ACTIVE_HISTORY_TURNS: usize = 3;
         let active_context =
             get_active_chat_context(&conversation_history, MAX_ACTIVE_HISTORY_TURNS);
 
@@ -136,7 +136,6 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
         // 3. Sliding window context eviction if approaching max_seq_len
         let max_ctx = m.config.max_seq_len;
         if prompt_tokens.len() + max_tokens >= max_ctx {
-            // Trim oldest non-system message pair (or message)
             let mut trimmed_any = false;
             while prompt_tokens.len() + max_tokens >= (max_ctx * 85) / 100 {
                 let first_non_system = conversation_history
@@ -201,11 +200,13 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
         cached_tokens.extend_from_slice(&prompt_tokens);
         cached_tokens.extend_from_slice(&generated_ids);
 
-        conversation_history.push(mivi_tokenizer::ChatMessage {
-            role: mivi_tokenizer::Role::Assistant,
-            content: Some(output),
-            name: None,
-        });
+        if !output.trim().is_empty() {
+            conversation_history.push(mivi_tokenizer::ChatMessage {
+                role: mivi_tokenizer::Role::Assistant,
+                content: Some(output),
+                name: None,
+            });
+        }
     }
 
     Ok(())
@@ -447,7 +448,7 @@ fn handle_slash_command(
     }
 }
 
-/// Helper to extract the active conversational context (System + recent turns) for model prompting.
+/// Helper to extract valid conversational context (System + complete user-assistant pairs + current user prompt).
 fn get_active_chat_context(
     history: &[mivi_tokenizer::ChatMessage],
     max_history_turns: usize,
@@ -460,15 +461,28 @@ fn get_active_chat_context(
     {
         out.push(sys.clone());
     }
-    // 2. Collect non-system messages
+
+    // 2. Filter valid non-system messages with non-empty content
     let non_sys: Vec<_> = history
         .iter()
         .filter(|m| m.role != mivi_tokenizer::Role::System)
+        .filter(|m| {
+            if let Some(ref c) = m.content {
+                !c.trim().is_empty()
+            } else {
+                false
+            }
+        })
         .cloned()
         .collect();
-    // 3. Keep last max_history_turns * 2 messages (e.g. 2 turns = 4 messages)
+
+    // 3. Ensure we start at a User message boundary
     let keep_count = (max_history_turns * 2).min(non_sys.len());
-    let start_idx = non_sys.len().saturating_sub(keep_count);
+    let mut start_idx = non_sys.len().saturating_sub(keep_count);
+    while start_idx < non_sys.len() && non_sys[start_idx].role != mivi_tokenizer::Role::User {
+        start_idx += 1;
+    }
+
     out.extend_from_slice(&non_sys[start_idx..]);
     out
 }
