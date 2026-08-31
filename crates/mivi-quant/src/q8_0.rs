@@ -39,7 +39,7 @@ pub fn try_matvec_q8_0(
     crate::types::validate_matvec_args(out, weights, x, n, d, row_bytes, Q8_0_BLOCK_SIZE)?;
 
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+    let use_avx2 = *mivi_core::simd::HAS_AVX2_FMA;
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx2 = false;
 

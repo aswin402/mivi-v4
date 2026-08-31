@@ -48,7 +48,12 @@ impl From<&MessageDto> for mivi_tokenizer::ChatMessage {
 
 impl From<MessageDto> for mivi_tokenizer::ChatMessage {
     fn from(m: MessageDto) -> Self {
-        (&m).into()
+        let role = m.role.parse().unwrap_or(mivi_tokenizer::Role::User);
+        Self {
+            role,
+            content: m.content,
+            name: m.name,
+        }
     }
 }
 

@@ -2,35 +2,67 @@
 
 use anyhow::Result;
 use mivi_model::Model;
-use mivi_tools::{extract_thinking, extract_tool_calls};
+use mivi_tools::extract_tool_calls;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 const DEFAULT_CHAT_MAX_TOKENS: usize = 512;
 
-pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
-    if !model.exists() {
+#[derive(Debug, Clone)]
+pub struct ChatArgs {
+    pub model: PathBuf,
+    pub temp: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub min_p: f32,
+    pub rep_penalty: f32,
+    pub seed: Option<u64>,
+    pub max_tokens: usize,
+    pub ctx_size: Option<usize>,
+    pub system: Option<String>,
+    pub thinking: bool,
+}
+
+pub fn run_chat(args: ChatArgs) -> Result<()> {
+    if !args.model.exists() {
         anyhow::bail!(
             "Model file not found at {:?}.\n\nTo test with the test model fixture, run:\n  just chat models/mivi-tiny-test.gguf\nOr generate the test fixture using:\n  python3 training/export/generate_fixture.py",
-            model
+            args.model
         );
     }
 
-    println!("Loading Mivi model from {:?}...", model);
-    let mut m = Model::load(&model)?;
-    m.sampler.config.temperature = temp;
-    let max_tokens = if max_tokens > 0 {
-        max_tokens
+    println!("Loading Mivi model from {:?}...", args.model);
+    let mut m = Model::load_with_ctx(&args.model, args.ctx_size)?;
+    m.sampler.config.temperature = args.temp;
+    m.sampler.config.top_p = args.top_p;
+    m.sampler.config.top_k = args.top_k;
+    m.sampler.config.min_p = args.min_p;
+    m.sampler.config.repetition_penalty = args.rep_penalty;
+    m.sampler.config.seed = args.seed;
+    if let Some(s) = args.seed {
+        m.sampler.set_seed(s);
+    }
+
+    let max_tokens = if args.max_tokens > 0 {
+        args.max_tokens
     } else {
         DEFAULT_CHAT_MAX_TOKENS
     };
     println!(
-        "Model loaded successfully! ({} parameters, 32K context)",
-        m.config.name
+        "Model loaded successfully! ({}, {}K context)",
+        m.config.name,
+        m.config.max_seq_len / 1024
     );
     println!("Mivi Interactive REPL. Type your prompt (or 'exit' to quit):\n");
 
     let mut conversation_history = Vec::new();
+    if let Some(sys_prompt) = args.system {
+        conversation_history.push(mivi_tokenizer::ChatMessage {
+            role: mivi_tokenizer::Role::System,
+            content: Some(sys_prompt),
+            name: None,
+        });
+    }
 
     loop {
         print!("user> ");
@@ -58,7 +90,7 @@ pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
             name: None,
         });
 
-        let prompt = mivi_tokenizer::format_chatml(&conversation_history, None, true);
+        let prompt = mivi_tokenizer::format_chatml(&conversation_history, None, args.thinking);
         print!("assistant> ");
         io::stdout().flush()?;
 
@@ -67,12 +99,7 @@ pub fn run_chat(model: PathBuf, temp: f32, max_tokens: usize) -> Result<()> {
             let _ = io::stdout().flush();
             true
         })?;
-        println!("\n");
-
-        // Display thinking if present
-        if let Some(think) = extract_thinking(&output) {
-            println!("\x1b[90m[think: {}]\x1b[0m", think);
-        }
+        println!();
 
         // Display any tool calls
         let tool_calls = extract_tool_calls(&output);

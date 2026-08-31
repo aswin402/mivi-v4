@@ -32,6 +32,33 @@ pub struct ChunkDelta {
     pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
+#[derive(Debug, Serialize)]
+struct ChatCompletionChunkBorrow<'a> {
+    id: &'a str,
+    object: &'static str,
+    created: u64,
+    model: &'a str,
+    choices: [ChunkChoiceBorrow<'a>; 1],
+}
+
+#[derive(Debug, Serialize)]
+struct ChunkChoiceBorrow<'a> {
+    index: usize,
+    delta: ChunkDeltaBorrow<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ChunkDeltaBorrow<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<&'a str>,
+}
+
 pub const OPENAI_CHUNK_OBJECT: &str = "chat.completion.chunk";
 pub const OPENAI_COMPLETION_OBJECT: &str = "chat.completion";
 pub const SSE_DONE_MARKER: &str = "[DONE]";
@@ -45,15 +72,20 @@ pub fn create_chunk_event(
     delta: ChunkDelta,
     finish_reason: Option<&str>,
 ) -> Event {
-    let chunk = ChatCompletionChunk {
-        id: id.to_string(),
-        object: OPENAI_CHUNK_OBJECT.to_string(),
+    let delta_borrow = ChunkDeltaBorrow {
+        role: delta.role.as_deref(),
+        content: delta.content.as_deref(),
+        thinking: delta.thinking.as_deref(),
+    };
+    let chunk = ChatCompletionChunkBorrow {
+        id,
+        object: OPENAI_CHUNK_OBJECT,
         created: chrono::Utc::now().timestamp() as u64,
-        model: model.to_string(),
-        choices: vec![ChunkChoice {
+        model,
+        choices: [ChunkChoiceBorrow {
             index: 0,
-            delta,
-            finish_reason: finish_reason.map(|s| s.to_string()),
+            delta: delta_borrow,
+            finish_reason,
         }],
     };
 
@@ -75,38 +107,90 @@ pub fn create_error_chunk_event(id: &str, model: &str, error: &str) -> Event {
     create_content_chunk_event(id, model, &msg)
 }
 
-/// Create an SSE Event containing a content delta chunk.
+/// Create an SSE Event containing a content delta chunk without allocating extra strings.
 #[inline]
 pub fn create_content_chunk_event(id: &str, model: &str, content: &str) -> Event {
-    create_chunk_event(
+    let chunk = ChatCompletionChunkBorrow {
         id,
+        object: OPENAI_CHUNK_OBJECT,
+        created: chrono::Utc::now().timestamp() as u64,
         model,
-        ChunkDelta {
-            content: Some(content.to_string()),
-            ..Default::default()
-        },
-        None,
-    )
+        choices: [ChunkChoiceBorrow {
+            index: 0,
+            delta: ChunkDeltaBorrow {
+                role: None,
+                content: Some(content),
+                thinking: None,
+            },
+            finish_reason: None,
+        }],
+    };
+
+    let data = match serde_json::to_string(&chunk) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize SSE chunk: {}", e);
+            "{}".to_string()
+        }
+    };
+
+    Event::default().data(data)
 }
 
 /// Create an SSE Event containing a thinking delta chunk.
 #[inline]
 pub fn create_thinking_chunk_event(id: &str, model: &str, thinking: &str) -> Event {
-    create_chunk_event(
+    let chunk = ChatCompletionChunkBorrow {
         id,
+        object: OPENAI_CHUNK_OBJECT,
+        created: chrono::Utc::now().timestamp() as u64,
         model,
-        ChunkDelta {
-            thinking: Some(thinking.to_string()),
-            ..Default::default()
-        },
-        None,
-    )
+        choices: [ChunkChoiceBorrow {
+            index: 0,
+            delta: ChunkDeltaBorrow {
+                role: None,
+                content: None,
+                thinking: Some(thinking),
+            },
+            finish_reason: None,
+        }],
+    };
+
+    let data = match serde_json::to_string(&chunk) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize SSE chunk: {}", e);
+            "{}".to_string()
+        }
+    };
+
+    Event::default().data(data)
 }
 
 /// Create the final SSE Event with finish_reason.
 #[inline]
 pub fn create_done_chunk_event(id: &str, model: &str, finish_reason: &str) -> Event {
-    create_chunk_event(id, model, ChunkDelta::default(), Some(finish_reason))
+    let chunk = ChatCompletionChunkBorrow {
+        id,
+        object: OPENAI_CHUNK_OBJECT,
+        created: chrono::Utc::now().timestamp() as u64,
+        model,
+        choices: [ChunkChoiceBorrow {
+            index: 0,
+            delta: ChunkDeltaBorrow::default(),
+            finish_reason: Some(finish_reason),
+        }],
+    };
+
+    let data = match serde_json::to_string(&chunk) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize SSE chunk: {}", e);
+            "{}".to_string()
+        }
+    };
+
+    Event::default().data(data)
 }
 
 /// Create standard SSE [DONE] termination event.

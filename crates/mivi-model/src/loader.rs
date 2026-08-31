@@ -70,21 +70,78 @@ pub fn extract_model_config(gguf: &GgufFile) -> Result<ModelConfig> {
     read_gguf_meta!(gguf, "lfm2.attention.head_count", as_usize, config.n_heads);
     read_gguf_meta!(gguf, "lfm.attention.head_count", as_usize, config.n_heads);
 
-    read_gguf_meta!(
-        gguf,
+    // head_count_kv can be a scalar or a per-layer array (LFM2 uses per-layer).
+    // SSM layers have kv=0, attention layers have the actual count.
+    // We take the max non-zero value as the global n_kv_heads.
+    for key in &[
         "lfm2.attention.head_count_kv",
-        as_usize,
-        config.n_kv_heads
-    );
-    read_gguf_meta!(
-        gguf,
         "lfm.attention.head_count_kv",
-        as_usize,
-        config.n_kv_heads
-    );
+    ] {
+        match gguf.metadata.get(*key) {
+            Some(GgufValue::Array(arr)) => {
+                let max_kv = arr
+                    .iter()
+                    .filter_map(|v| v.as_usize())
+                    .filter(|&v| v > 0)
+                    .max()
+                    .unwrap_or(config.n_kv_heads);
+                if max_kv > 0 {
+                    config.n_kv_heads = max_kv;
+                }
+            }
+            Some(v) => {
+                if let Some(kv) = v.as_usize() {
+                    config.n_kv_heads = kv;
+                }
+            }
+            None => {}
+        }
+    }
 
     read_gguf_meta!(gguf, "lfm2.rope.freq_base", as_f32, config.rope_base);
     read_gguf_meta!(gguf, "lfm.rope.freq_base", as_f32, config.rope_base);
+
+    read_gguf_meta!(
+        gguf,
+        "lfm2.attention.layer_norm_rms_epsilon",
+        as_f32,
+        config.rms_norm_eps
+    );
+    read_gguf_meta!(
+        gguf,
+        "lfm.attention.layer_norm_rms_epsilon",
+        as_f32,
+        config.rms_norm_eps
+    );
+
+    read_gguf_meta!(
+        gguf,
+        "lfm2.ssm.conv_kernel",
+        as_usize,
+        config.ssm_conv_kernel
+    );
+    read_gguf_meta!(
+        gguf,
+        "lfm.ssm.conv_kernel",
+        as_usize,
+        config.ssm_conv_kernel
+    );
+    for i in 0..config.n_layers {
+        let conv_name = format!("blk.{}.ssm_conv.weight", i);
+        let conv_name_short = format!("blk.{}.shortconv.conv.weight", i);
+        if let Some(t) = gguf
+            .tensors
+            .get(&conv_name)
+            .or_else(|| gguf.tensors.get(&conv_name_short))
+        {
+            let total_elems: usize = t.dims.iter().product();
+            if config.dim > 0 && total_elems >= config.dim && total_elems.is_multiple_of(config.dim)
+            {
+                config.ssm_conv_kernel = total_elems / config.dim;
+                break;
+            }
+        }
+    }
 
     if let Some(GgufValue::Array(tokens)) = gguf.metadata.get("tokenizer.ggml.tokens") {
         config.vocab_size = tokens.len();
@@ -123,21 +180,15 @@ pub fn extract_model_config(gguf: &GgufFile) -> Result<ModelConfig> {
 pub fn extract_vocab(gguf: &GgufFile, default_size: usize) -> Vec<String> {
     let mut tokens = Vec::new();
     if let Some(GgufValue::Array(arr)) = gguf.metadata.get(GGUF_KEY_TOKENIZER_TOKENS) {
-        tokens.reserve(arr.len());
-        for val in arr {
-            if let GgufValue::String(s) = val {
-                tokens.push(s.clone());
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                tokens.push(s.to_string());
             }
         }
     }
     if tokens.is_empty() {
-        tokens.reserve(default_size);
-        let mut buf = String::with_capacity(16);
-        use std::fmt::Write;
         for i in 0..default_size {
-            buf.clear();
-            let _ = write!(&mut buf, "<tok_{}>", i);
-            tokens.push(buf.clone());
+            tokens.push(format!("<tok_{}>", i));
         }
     }
     tokens
@@ -171,6 +222,12 @@ fn get_tensor_entry<'a>(
 /// Resolve a quantized tensor by name from GGUF file.
 pub fn resolve_tensor(gguf: &GgufFile, name: &str) -> Result<QuantizedTensor> {
     let (info, data) = get_tensor_entry(gguf, name)?;
+    if info.dims.is_empty() {
+        return Err(ModelError::DimMismatch(format!(
+            "Tensor '{}' has empty dimensions",
+            name
+        )));
+    }
     Ok(QuantizedTensor {
         quant_type: info.ggml_type,
         offset: gguf.data_offset + info.offset as usize,

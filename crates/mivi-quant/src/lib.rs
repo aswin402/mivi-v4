@@ -77,23 +77,16 @@ pub fn quantized_matvec(
     d: usize,
 ) -> Result<()> {
     match ggml_type {
-        GgmlType::Q4_K => {
-            matvec_q4_k_m(out, weights, x, n, d);
-            Ok(())
-        }
-        GgmlType::Q6_K => {
-            matvec_q6_k(out, weights, x, n, d);
-            Ok(())
-        }
-        GgmlType::Q8_0 => {
-            matvec_q8_0(out, weights, x, n, d);
-            Ok(())
-        }
-        GgmlType::F16 => {
-            matvec_f16(out, weights, x, n, d);
-            Ok(())
-        }
+        GgmlType::Q4_K => try_matvec_q4_k_m(out, weights, x, n, d),
+        GgmlType::Q6_K => try_matvec_q6_k(out, weights, x, n, d),
+        GgmlType::Q8_0 => try_matvec_q8_0(out, weights, x, n, d),
+        GgmlType::F16 => try_matvec_f16(out, weights, x, n, d),
         GgmlType::F32 => {
+            let row_bytes = d.checked_mul(F32_BYTES).ok_or(QuantError::BufferTooSmall {
+                expected: usize::MAX,
+                actual: weights.len(),
+            })?;
+            validate_matvec_args(out, weights, x, n, d, row_bytes, 1)?;
             if (weights.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>()) {
                 // SAFETY: Pointer is non-null, valid for reads, memory-aligned to 4 bytes,
                 // and the resulting slice lifetime is bounded by the input &weights reference.

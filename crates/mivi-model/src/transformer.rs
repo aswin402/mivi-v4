@@ -6,7 +6,7 @@ use crate::lora::ActiveAdapters;
 use crate::model::Result;
 use crate::weights::AttentionLayerWeights;
 use mivi_core::arena::RunState;
-use mivi_core::math::{dot_product, softmax, vec_add};
+use mivi_core::math::{dot_product, vec_add};
 use mivi_core::simd::rms_norm_simd;
 use mivi_kv::KvCache;
 
@@ -52,31 +52,17 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
     // Apply QK-Norm per head if weights are present
     let head_dim = cfg.head_dim;
     if let Some(ref q_norm_w) = w.q_norm {
-        let mut temp = [0.0f32; 128];
         for h in 0..cfg.n_heads {
             let offset = h * head_dim;
             let head_slice = &mut state.q[offset..offset + head_dim];
-            rms_norm_simd(
-                &mut temp[..head_dim],
-                head_slice,
-                q_norm_w,
-                DEFAULT_RMS_NORM_EPS,
-            );
-            head_slice.copy_from_slice(&temp[..head_dim]);
+            mivi_core::rms_norm_in_place_simd(head_slice, q_norm_w, DEFAULT_RMS_NORM_EPS);
         }
     }
     if let Some(ref k_norm_w) = w.k_norm {
-        let mut temp = [0.0f32; 128];
         for kv_h in 0..cfg.n_kv_heads {
             let offset = kv_h * head_dim;
             let head_slice = &mut state.k[offset..offset + head_dim];
-            rms_norm_simd(
-                &mut temp[..head_dim],
-                head_slice,
-                k_norm_w,
-                DEFAULT_RMS_NORM_EPS,
-            );
-            head_slice.copy_from_slice(&temp[..head_dim]);
+            mivi_core::rms_norm_in_place_simd(head_slice, k_norm_w, DEFAULT_RMS_NORM_EPS);
         }
     }
 
@@ -94,7 +80,7 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
     Ok(())
 }
 
-/// Compute multi-head Grouped Query Attention (GQA) over cached keys and values.
+/// Compute multi-head Grouped Query Attention (GQA) over cached keys and values using FlashDecoding (online softmax).
 #[inline]
 fn compute_gqa_attention(
     state: &mut RunState,
@@ -116,29 +102,40 @@ fn compute_gqa_attention(
     for h in 0..n_heads {
         let kv_head = h / heads_per_kv;
         let q_head = &state.q[h * head_dim..(h + 1) * head_dim];
-        let att_scores = &mut state.att[h * cfg.max_seq_len..h * cfg.max_seq_len + seq_len];
-
-        // Compute dot products with past keys in cache (unchecked inner loop)
-        for (t, att_val) in att_scores.iter_mut().enumerate().take(seq_len) {
-            // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
-            let k_cached = unsafe { kv.get_k_unchecked(layer, t) };
-            let k_head = &k_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
-            *att_val = dot_product(q_head, k_head) * scale;
-        }
-
-        // Softmax over attention scores
-        softmax(att_scores);
-
-        // Weighted sum of cached values (unchecked inner loop)
         let out_head = &mut state.attn_out[h * head_dim..(h + 1) * head_dim];
         out_head.fill(0.0);
 
-        for (t, &weight) in att_scores.iter().enumerate().take(seq_len) {
+        let mut running_max = f32::NEG_INFINITY;
+        let mut running_sum = 0.0f32;
+
+        // FlashDecoding online softmax single-pass accumulation
+        for t in 0..seq_len {
             // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
+            let k_cached = unsafe { kv.get_k_unchecked(layer, t) };
+            let k_head = &k_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
+            let score = dot_product(q_head, k_head) * scale;
+
             let v_cached = unsafe { kv.get_v_unchecked(layer, t) };
             let v_head = &v_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
-            for i in 0..head_dim {
-                out_head[i] += weight * v_head[i];
+
+            if score > running_max {
+                let alpha = (running_max - score).exp();
+                running_sum = running_sum * alpha + 1.0;
+                for i in 0..head_dim {
+                    out_head[i] = out_head[i] * alpha + v_head[i];
+                }
+                running_max = score;
+            } else {
+                let beta = (score - running_max).exp();
+                running_sum += beta;
+                mivi_core::vec_fmadd(out_head, beta, v_head);
+            }
+        }
+
+        if running_sum > 0.0 {
+            let inv_sum = 1.0 / running_sum;
+            for v in out_head.iter_mut() {
+                *v *= inv_sum;
             }
         }
     }

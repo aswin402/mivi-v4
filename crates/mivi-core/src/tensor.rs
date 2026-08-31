@@ -89,8 +89,16 @@ impl Tensor {
         }
     }
 
+    pub fn try_zeros(shape: TensorShape) -> Result<Self> {
+        let size = shape.try_num_elements()?;
+        Ok(Self {
+            shape,
+            data: vec![0.0; size],
+        })
+    }
+
     pub fn from_vec(shape: TensorShape, data: Vec<f32>) -> Result<Self> {
-        let expected = shape.num_elements();
+        let expected = shape.try_num_elements()?;
         if data.len() != expected {
             return Err(TensorError::ElementCountMismatch {
                 expected,

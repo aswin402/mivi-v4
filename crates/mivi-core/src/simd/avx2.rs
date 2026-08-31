@@ -55,3 +55,90 @@ pub unsafe fn matvec_f32_avx2(out: &mut [f32], w: &[f32], x: &[f32], n: usize, d
         *out_val = sum;
     }
 }
+
+/// Vector dot product with AVX2 + FMA.
+///
+/// # Safety
+/// Caller must ensure that the target CPU supports `avx2` and `fma` features and slices are at least `len` long.
+#[target_feature(enable = "avx2", enable = "fma")]
+#[inline]
+pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    let chunks = len / 8;
+    let remainder = len % 8;
+
+    let a_ptr = a.as_ptr();
+    let b_ptr = b.as_ptr();
+    let mut acc = _mm256_setzero_ps();
+
+    for c in 0..chunks {
+        let offset = c * 8;
+        let av = _mm256_loadu_ps(a_ptr.add(offset));
+        let bv = _mm256_loadu_ps(b_ptr.add(offset));
+        acc = _mm256_fmadd_ps(av, bv, acc);
+    }
+
+    let mut sum = hsum256_ps(acc);
+    let rem_start = chunks * 8;
+    for r in 0..remainder {
+        sum += *a_ptr.add(rem_start + r) * *b_ptr.add(rem_start + r);
+    }
+    sum
+}
+
+/// Vector in-place addition `out[i] += src[i]` with AVX2.
+///
+/// # Safety
+/// Caller must ensure that the target CPU supports `avx2` and slices are at least `len` long.
+#[target_feature(enable = "avx2")]
+#[inline]
+pub unsafe fn vec_add_avx2(out: &mut [f32], src: &[f32]) {
+    let len = out.len().min(src.len());
+    let chunks = len / 8;
+    let remainder = len % 8;
+
+    let out_ptr = out.as_mut_ptr();
+    let src_ptr = src.as_ptr();
+
+    for c in 0..chunks {
+        let offset = c * 8;
+        let ov = _mm256_loadu_ps(out_ptr.add(offset));
+        let sv = _mm256_loadu_ps(src_ptr.add(offset));
+        let res = _mm256_add_ps(ov, sv);
+        _mm256_storeu_ps(out_ptr.add(offset), res);
+    }
+
+    let rem_start = chunks * 8;
+    for r in 0..remainder {
+        *out_ptr.add(rem_start + r) += *src_ptr.add(rem_start + r);
+    }
+}
+
+/// Vector in-place fused multiply-add `out[i] += scale * src[i]` with AVX2 + FMA.
+///
+/// # Safety
+/// Caller must ensure that the target CPU supports `avx2` and `fma` and slices are at least `len` long.
+#[target_feature(enable = "avx2", enable = "fma")]
+#[inline]
+pub unsafe fn vec_fmadd_avx2(out: &mut [f32], scale: f32, src: &[f32]) {
+    let len = out.len().min(src.len());
+    let chunks = len / 8;
+    let remainder = len % 8;
+
+    let scale_v = _mm256_set1_ps(scale);
+    let out_ptr = out.as_mut_ptr();
+    let src_ptr = src.as_ptr();
+
+    for c in 0..chunks {
+        let offset = c * 8;
+        let ov = _mm256_loadu_ps(out_ptr.add(offset));
+        let sv = _mm256_loadu_ps(src_ptr.add(offset));
+        let res = _mm256_fmadd_ps(scale_v, sv, ov);
+        _mm256_storeu_ps(out_ptr.add(offset), res);
+    }
+
+    let rem_start = chunks * 8;
+    for r in 0..remainder {
+        *out_ptr.add(rem_start + r) += scale * *src_ptr.add(rem_start + r);
+    }
+}

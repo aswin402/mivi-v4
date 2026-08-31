@@ -7,11 +7,15 @@ pub enum EngineCommand {
     Generate {
         prompt: String,
         max_tokens: usize,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
         responder: oneshot::Sender<Result<(String, usize, usize), String>>,
     },
     GenerateStream {
         prompt: String,
         max_tokens: usize,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
         responder: mpsc::Sender<Result<String, String>>,
     },
     Encode {
@@ -68,17 +72,31 @@ impl EngineHandle {
         self.tx.is_closed()
     }
 
-    /// Submit a non-streaming completion job to the engine actor.
+    /// Submit a non-streaming completion job to the engine actor with default sampling parameters.
     pub async fn generate(
         &self,
         prompt: &str,
         max_tokens: usize,
+    ) -> Result<(String, usize, usize), String> {
+        self.generate_with_params(prompt, max_tokens, None, None)
+            .await
+    }
+
+    /// Submit a non-streaming completion job to the engine actor with custom sampling parameters.
+    pub async fn generate_with_params(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
     ) -> Result<(String, usize, usize), String> {
         let (responder, rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::Generate {
                 prompt: prompt.to_string(),
                 max_tokens,
+                temperature,
+                top_p,
                 responder,
             })
             .await
@@ -88,17 +106,31 @@ impl EngineHandle {
             .map_err(|_| ERR_ENGINE_DROPPED_RESPONSE.to_string())?
     }
 
-    /// Submit a streaming generation job to the engine actor.
+    /// Submit a streaming generation job to the engine actor with default sampling parameters.
     pub async fn generate_stream(
         &self,
         prompt: &str,
         max_tokens: usize,
+    ) -> Result<mpsc::Receiver<Result<String, String>>, String> {
+        self.generate_stream_with_params(prompt, max_tokens, None, None)
+            .await
+    }
+
+    /// Submit a streaming generation job to the engine actor with custom sampling parameters.
+    pub async fn generate_stream_with_params(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
     ) -> Result<mpsc::Receiver<Result<String, String>>, String> {
         let (responder, rx) = mpsc::channel(self.stream_buffer_capacity);
         self.tx
             .send(EngineCommand::GenerateStream {
                 prompt: prompt.to_string(),
                 max_tokens,
+                temperature,
+                top_p,
                 responder,
             })
             .await
@@ -119,12 +151,8 @@ impl EngineHandle {
             .await
             .is_ok()
         {
-            rx.await.unwrap_or_else(|_| {
-                tracing::warn!("Engine actor encode responder channel dropped");
-                Vec::new()
-            })
+            rx.await.unwrap_or_default()
         } else {
-            tracing::warn!("Failed to send encode command to engine actor");
             Vec::new()
         }
     }
@@ -133,20 +161,19 @@ impl EngineHandle {
 pub struct EngineActor;
 
 impl EngineActor {
-    /// Spawn the engine actor on a dedicated OS compute thread with default config.
-    #[track_caller]
+    /// Spawn the engine actor on an isolated OS thread with default configuration.
     pub fn spawn(model: Option<mivi_model::Model>) -> EngineHandle {
         Self::spawn_with_config(model, &ServerConfig::default())
     }
 
-    /// Try spawning the engine actor with a custom ServerConfig, returning an IO error on thread creation failure.
+    /// Try spawning the engine actor with a custom ServerConfig. Returns Error on thread spawn failure.
     pub fn try_spawn_with_config(
         mut model: Option<mivi_model::Model>,
         config: &ServerConfig,
     ) -> std::io::Result<EngineHandle> {
+        let (tx, mut rx) = mpsc::channel(config.channel_capacity);
         let has_model = model.is_some();
         let stream_buffer_capacity = config.channel_capacity;
-        let (tx, mut rx) = mpsc::channel::<EngineCommand>(config.channel_capacity);
 
         std::thread::Builder::new()
             .name(ENGINE_ACTOR_THREAD_NAME.to_string())
@@ -155,9 +182,9 @@ impl EngineActor {
                     .enable_all()
                     .build()
                 {
-                    Ok(rt) => rt,
+                    Ok(r) => r,
                     Err(e) => {
-                        tracing::error!("Failed to create engine actor runtime: {}", e);
+                        tracing::error!("Failed to initialize engine actor runtime: {}", e);
                         drop(rx);
                         return;
                     }
@@ -169,16 +196,34 @@ impl EngineActor {
                             EngineCommand::Generate {
                                 prompt,
                                 max_tokens,
+                                temperature,
+                                top_p,
                                 responder,
                             } => {
-                                handle_generate(&mut model, prompt, max_tokens, responder);
+                                handle_generate(
+                                    &mut model,
+                                    prompt,
+                                    max_tokens,
+                                    temperature,
+                                    top_p,
+                                    responder,
+                                );
                             }
                             EngineCommand::GenerateStream {
                                 prompt,
                                 max_tokens,
+                                temperature,
+                                top_p,
                                 responder,
                             } => {
-                                handle_generate_stream(&mut model, prompt, max_tokens, responder);
+                                handle_generate_stream(
+                                    &mut model,
+                                    prompt,
+                                    max_tokens,
+                                    temperature,
+                                    top_p,
+                                    responder,
+                                );
                             }
                             EngineCommand::Encode { text, responder } => {
                                 handle_encode(&model, text, responder);
@@ -209,19 +254,32 @@ fn handle_generate(
     model: &mut Option<mivi_model::Model>,
     prompt: String,
     max_tokens: usize,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     responder: oneshot::Sender<std::result::Result<(String, usize, usize), String>>,
 ) {
     if let Some(ref mut m) = model {
+        let orig_temp = m.sampler.config.temperature;
+        let orig_top_p = m.sampler.config.top_p;
+        if let Some(t) = temperature {
+            m.sampler.config.temperature = t;
+        }
+        if let Some(p) = top_p {
+            m.sampler.config.top_p = p;
+        }
+
         let p_tok = m.tokenizer.encode(&prompt).len();
-        match m.generate(&prompt, max_tokens) {
+        let res = match m.generate(&prompt, max_tokens) {
             Ok(out) => {
                 let c_tok = m.tokenizer.encode(&out).len();
-                let _ = responder.send(Ok((out, p_tok, c_tok)));
+                Ok((out, p_tok, c_tok))
             }
-            Err(e) => {
-                let _ = responder.send(Err(e.to_string()));
-            }
-        }
+            Err(e) => Err(e.to_string()),
+        };
+
+        m.sampler.config.temperature = orig_temp;
+        m.sampler.config.top_p = orig_top_p;
+        let _ = responder.send(res);
     } else {
         let p_tok = prompt.split_whitespace().count().max(1);
         let _ = responder.send(Ok((
@@ -236,15 +294,33 @@ fn handle_generate_stream(
     model: &mut Option<mivi_model::Model>,
     prompt: String,
     max_tokens: usize,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     responder: mpsc::Sender<std::result::Result<String, String>>,
 ) {
     if let Some(ref mut m) = model {
-        let _ = m.generate_streaming(&prompt, max_tokens, |_, text| {
-            responder.try_send(Ok(text.to_string())).is_ok()
+        let orig_temp = m.sampler.config.temperature;
+        let orig_top_p = m.sampler.config.top_p;
+        if let Some(t) = temperature {
+            m.sampler.config.temperature = t;
+        }
+        if let Some(p) = top_p {
+            m.sampler.config.top_p = p;
+        }
+
+        let res = m.generate_streaming(&prompt, max_tokens, |_, text| {
+            responder.blocking_send(Ok(text.to_string())).is_ok()
         });
+
+        if let Err(e) = res {
+            let _ = responder.blocking_send(Err(e.to_string()));
+        }
+
+        m.sampler.config.temperature = orig_temp;
+        m.sampler.config.top_p = orig_top_p;
     } else {
         for &chunk in MOCK_STREAM_CHUNKS {
-            if responder.try_send(Ok(chunk.to_string())).is_err() {
+            if responder.blocking_send(Ok(chunk.to_string())).is_err() {
                 break;
             }
         }

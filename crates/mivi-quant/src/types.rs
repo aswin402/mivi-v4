@@ -191,7 +191,8 @@ pub fn parallel_row_matvec<F>(
     F: Fn(&[u8], usize) -> f32 + Send + Sync,
 {
     if n >= RAYON_PARALLEL_THRESHOLD {
-        out.par_chunks_mut(PARALLEL_CHUNK_SIZE)
+        out[..n]
+            .par_chunks_mut(PARALLEL_CHUNK_SIZE)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * PARALLEL_CHUNK_SIZE;
@@ -249,5 +250,24 @@ mod tests {
     fn test_block_size_unknown_returns_none() {
         assert_eq!(GgmlType::IQ2_XS.block_size(), None);
         assert!(GgmlType::IQ2_XS.block_size_checked().is_err());
+    }
+
+    #[test]
+    fn test_parallel_row_matvec_with_larger_out_buffer() {
+        let n = 300; // >= RAYON_PARALLEL_THRESHOLD
+        let row_bytes = 4;
+        let weights = vec![1u8; n * row_bytes];
+        let mut out = vec![0.0f32; n + 50]; // Buffer larger than n
+
+        parallel_row_matvec(&mut out, &weights, n, row_bytes, |_slice, row_idx| {
+            row_idx as f32
+        });
+
+        for (i, &val) in out[..n].iter().enumerate() {
+            assert_eq!(val, i as f32);
+        }
+        for &val in &out[n..] {
+            assert_eq!(val, 0.0);
+        }
     }
 }

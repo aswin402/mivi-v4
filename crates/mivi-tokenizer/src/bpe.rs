@@ -155,12 +155,8 @@ impl Tokenizer {
         }
 
         // 3. Iterative BPE pair merging using lowest rank in self.merges
-        loop {
-            if symbols.len() < 2 {
-                break;
-            }
-
-            let mut best_pair = None;
+        while symbols.len() >= 2 {
+            let mut best_pair_idx = None;
             let mut min_rank = u32::MAX;
 
             for i in 0..symbols.len() - 1 {
@@ -168,19 +164,18 @@ impl Tokenizer {
                 if let Some(&rank) = self.merges.get(&pair) {
                     if rank < min_rank {
                         min_rank = rank;
-                        best_pair = Some((i, pair));
+                        best_pair_idx = Some(i);
                     }
                 }
             }
 
-            let Some((idx, _)) = best_pair else {
+            let Some(idx) = best_pair_idx else {
                 break;
             };
 
             // Merge symbols[idx] and symbols[idx+1]
-            let merged = format!("{}{}", symbols[idx], symbols[idx + 1]);
-            symbols[idx] = merged;
-            symbols.remove(idx + 1);
+            let next_sym = symbols.remove(idx + 1);
+            symbols[idx].push_str(&next_sym);
         }
 
         // 4. Map merged symbols to vocabulary IDs
@@ -204,41 +199,52 @@ impl Tokenizer {
         out
     }
 
+    /// Append raw decoded bytes for a single token ID into the provided buffer.
+    pub fn decode_token_bytes(&self, id: u32, raw_bytes: &mut Vec<u8>) {
+        if let Some(token_str) = self.vocab.get_token(id) {
+            // Check if byte fallback token like <0x0A> or <0xE2>
+            if token_str.starts_with(BYTE_FALLBACK_PREFIX)
+                && token_str.ends_with('>')
+                && token_str.len() == BYTE_FALLBACK_TOKEN_LEN
+            {
+                let hex_start = BYTE_FALLBACK_PREFIX.len();
+                let hex_end = hex_start + 2;
+                if let Ok(byte_val) = u8::from_str_radix(&token_str[hex_start..hex_end], 16) {
+                    raw_bytes.push(byte_val);
+                    return;
+                }
+            }
+
+            // If special token (e.g. <|im_start|>, <|im_end|>, <think>, <tool_call>, etc.), write literal bytes
+            if (token_str.starts_with("<|") && token_str.ends_with("|>"))
+                || token_str.starts_with("<think")
+                || token_str.starts_with("</think")
+                || token_str.starts_with("<tool")
+                || token_str.starts_with("</tool")
+                || self.vocab.is_special(token_str)
+            {
+                raw_bytes.extend_from_slice(token_str.as_bytes());
+                return;
+            }
+
+            // Map GPT-2 unicode characters back to raw bytes
+            for c in token_str.chars() {
+                if let Some(&b) = UNICODE_TO_BYTE.get(&c) {
+                    raw_bytes.push(b);
+                } else {
+                    let mut buf = [0u8; 4];
+                    let encoded = c.encode_utf8(&mut buf);
+                    raw_bytes.extend_from_slice(encoded.as_bytes());
+                }
+            }
+        }
+    }
+
     /// Decode sequence of token IDs to clean UTF-8 text.
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut raw_bytes = Vec::new();
         for &id in ids {
-            if let Some(token_str) = self.vocab.get_token(id) {
-                // Check if byte fallback token like <0x0A> or <0xE2>
-                if token_str.starts_with(BYTE_FALLBACK_PREFIX)
-                    && token_str.ends_with('>')
-                    && token_str.len() == BYTE_FALLBACK_TOKEN_LEN
-                {
-                    let hex_start = BYTE_FALLBACK_PREFIX.len();
-                    let hex_end = hex_start + 2;
-                    if let Ok(byte_val) = u8::from_str_radix(&token_str[hex_start..hex_end], 16) {
-                        raw_bytes.push(byte_val);
-                        continue;
-                    }
-                }
-
-                // If special token (e.g. <|im_start|>, <|im_end|>), write literal bytes
-                if token_str.starts_with("<|") && token_str.ends_with("|>") {
-                    raw_bytes.extend_from_slice(token_str.as_bytes());
-                    continue;
-                }
-
-                // Map GPT-2 unicode characters back to raw bytes
-                for c in token_str.chars() {
-                    if let Some(&b) = UNICODE_TO_BYTE.get(&c) {
-                        raw_bytes.push(b);
-                    } else {
-                        let mut buf = [0u8; 4];
-                        let encoded = c.encode_utf8(&mut buf);
-                        raw_bytes.extend_from_slice(encoded.as_bytes());
-                    }
-                }
-            }
+            self.decode_token_bytes(id, &mut raw_bytes);
         }
         String::from_utf8_lossy(&raw_bytes).into_owned()
     }
@@ -246,6 +252,77 @@ impl Tokenizer {
     /// Decode single token ID to clean UTF-8 text string.
     pub fn decode_token(&self, id: u32) -> String {
         self.decode(&[id])
+    }
+}
+
+/// Stateful UTF-8 stream decoder that handles multi-byte UTF-8 sequences split across streaming tokens.
+#[derive(Debug, Default, Clone)]
+pub struct Utf8StreamDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(8),
+        }
+    }
+
+    /// Feed incoming bytes and return any newly completed valid UTF-8 string chunk.
+    pub fn feed(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+
+        // Find the longest valid UTF-8 prefix
+        let mut valid_up_to = 0;
+        let len = self.pending.len();
+        let mut i = 0;
+
+        while i < len {
+            let b = self.pending[i];
+            let seq_len = if b & 0b1000_0000 == 0 {
+                1
+            } else if b & 0b1110_0000 == 0b1100_0000 {
+                2
+            } else if b & 0b1111_0000 == 0b1110_0000 {
+                3
+            } else if b & 0b1111_1000 == 0b1111_0000 {
+                4
+            } else {
+                // Invalid leading byte, consume 1 byte as error
+                1
+            };
+
+            if i + seq_len <= len {
+                if std::str::from_utf8(&self.pending[i..i + seq_len]).is_ok() {
+                    i += seq_len;
+                    valid_up_to = i;
+                } else {
+                    i += 1;
+                    valid_up_to = i;
+                }
+            } else {
+                // Incomplete sequence, wait for subsequent bytes
+                break;
+            }
+        }
+
+        if valid_up_to > 0 {
+            let valid_bytes: Vec<u8> = self.pending.drain(..valid_up_to).collect();
+            String::from_utf8_lossy(&valid_bytes).into_owned()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Flush any remaining pending bytes at the end of the stream.
+    pub fn flush(&mut self) -> String {
+        if self.pending.is_empty() {
+            String::new()
+        } else {
+            let out = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending.clear();
+            out
+        }
     }
 }
 
@@ -298,5 +375,26 @@ mod tests {
         let tokenizer = Tokenizer::new(vocab, HashMap::new());
         assert!(tokenizer.encode("").is_empty());
         assert_eq!(tokenizer.decode(&[]), "");
+    }
+
+    #[test]
+    fn test_utf8_stream_decoder_split_multibyte() {
+        let mut decoder = Utf8StreamDecoder::new();
+        // € is [0xE2, 0x82, 0xAC]
+        // Chunk 1: ASCII 'A' + partial Euro [0xE2]
+        let out1 = decoder.feed(&[b'A', 0xE2]);
+        assert_eq!(out1, "A");
+
+        // Chunk 2: partial Euro [0x82]
+        let out2 = decoder.feed(&[0x82]);
+        assert_eq!(out2, "");
+
+        // Chunk 3: completed Euro [0xAC] + 'B'
+        let out3 = decoder.feed(&[0xAC, b'B']);
+        assert_eq!(out3, "€B");
+
+        // Flush
+        let out4 = decoder.flush();
+        assert_eq!(out4, "");
     }
 }

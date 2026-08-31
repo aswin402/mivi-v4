@@ -27,6 +27,15 @@ pub enum Commands {
         host: String,
         #[arg(short, long)]
         model: Option<PathBuf>,
+        /// Maximum RSS memory in MB before triggering safety shutdown (default: 900 MB)
+        #[arg(long, default_value = "900")]
+        max_memory: f32,
+        /// Warning threshold RSS memory in MB (default: 700 MB)
+        #[arg(long, default_value = "700")]
+        warn_memory: f32,
+        /// Disable the resource safety watchdog
+        #[arg(long)]
+        no_safelock: bool,
     },
     /// Interactive terminal chat with local model
     Chat {
@@ -34,8 +43,24 @@ pub enum Commands {
         model: PathBuf,
         #[arg(short = 't', long, default_value = "0.7")]
         temp: f32,
+        #[arg(short = 'p', long, default_value = "0.9")]
+        top_p: f32,
+        #[arg(short = 'k', long, default_value = "40")]
+        top_k: usize,
+        #[arg(long, default_value = "0.05")]
+        min_p: f32,
+        #[arg(short = 'r', long, default_value = "1.1")]
+        rep_penalty: f32,
+        #[arg(long)]
+        seed: Option<u64>,
         #[arg(short = 'n', long, default_value = "512")]
         max_tokens: usize,
+        #[arg(short = 'c', long)]
+        ctx_size: Option<usize>,
+        #[arg(short = 's', long)]
+        system: Option<String>,
+        #[arg(long)]
+        thinking: bool,
     },
     /// Inspect model GGUF metadata and tensor shapes
     Info {

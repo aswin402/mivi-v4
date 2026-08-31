@@ -1,6 +1,7 @@
 use crate::state::{AgentPhase, AgentState};
 use crate::xml_utils::{escape_xml_attr, escape_xml_content};
 use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolResult};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
@@ -14,7 +15,7 @@ pub struct AgentLoop<'a> {
     pub state: AgentState,
     pub broker: &'a ToolBroker,
     pub tool_timeout: Duration,
-    recent_actions: Vec<String>,
+    recent_actions: VecDeque<String>,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -23,7 +24,7 @@ impl<'a> AgentLoop<'a> {
             state,
             broker,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
-            recent_actions: Vec::new(),
+            recent_actions: VecDeque::with_capacity(STAGNATION_WINDOW_SIZE + 1),
         }
     }
 
@@ -46,9 +47,9 @@ impl<'a> AgentLoop<'a> {
         if let Some(think) = extract_thinking(model_output) {
             self.state
                 .memory
-                .push(format!("{}{}", THINKING_PREFIX, think));
+                .push_back(format!("{}{}", THINKING_PREFIX, think));
             if self.state.memory.len() > crate::state::DEFAULT_MAX_MEMORY_ITEMS {
-                self.state.memory.remove(0);
+                self.state.memory.pop_front();
             }
         }
 
@@ -70,14 +71,14 @@ impl<'a> AgentLoop<'a> {
 
         // Stagnation detection: track repeated identical calls
         let call_signature = format!("{:?}", calls);
-        self.recent_actions.push(call_signature.clone());
+        self.recent_actions.push_back(call_signature.clone());
         if self.recent_actions.len() > STAGNATION_WINDOW_SIZE {
-            self.recent_actions.remove(0);
+            self.recent_actions.pop_front();
         }
         if self.recent_actions.len() == STAGNATION_WINDOW_SIZE
             && self.recent_actions.iter().all(|a| a == &call_signature)
         {
-            self.state.phase = AgentPhase::Completed;
+            self.state.phase = AgentPhase::Failed;
             return format!(
                 "<warning>Agent stagnation detected: repeated same tool call {} times. Terminating loop safely.</warning>",
                 STAGNATION_WINDOW_SIZE
@@ -138,7 +139,7 @@ mod tests {
             crate::state::DEFAULT_MAX_MEMORY_ITEMS
         );
         assert_eq!(
-            agent.state.memory.last().unwrap(),
+            agent.state.memory.back().unwrap(),
             &format!("{}{}", THINKING_PREFIX, "Thought 149")
         );
     }

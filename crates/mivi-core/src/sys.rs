@@ -11,6 +11,9 @@ const SC_PAGESIZE: i32 = 30;
 /// Default OS page size when sysconf fails or on non-Linux platforms.
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
+static CACHED_PAGE_SIZE: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(get_system_page_size);
+
 /// Estimate the resident set size (RSS) memory of the current process in megabytes (MB).
 pub fn estimate_process_memory_mb() -> f32 {
     #[cfg(target_os = "linux")]
@@ -18,7 +21,7 @@ pub fn estimate_process_memory_mb() -> f32 {
         if let Ok(statm) = std::fs::read_to_string(PROCMEM_STATM_PATH) {
             if let Some(rss_pages) = statm.split_whitespace().nth(1) {
                 if let Ok(pages) = rss_pages.parse::<usize>() {
-                    let page_size_bytes = get_system_page_size();
+                    let page_size_bytes = *CACHED_PAGE_SIZE;
                     return (pages as f64 * page_size_bytes as f64 / (1024.0 * 1024.0)) as f32;
                 }
             }

@@ -29,12 +29,16 @@ impl std::fmt::Display for MemoryType {
 impl std::str::FromStr for MemoryType {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "episodic" => Ok(Self::Episodic),
-            "semantic" => Ok(Self::Semantic),
-            "procedural" => Ok(Self::Procedural),
-            "entity" => Ok(Self::Entity),
-            _ => Ok(Self::Custom(s.to_string())),
+        if s.eq_ignore_ascii_case("episodic") {
+            Ok(Self::Episodic)
+        } else if s.eq_ignore_ascii_case("semantic") {
+            Ok(Self::Semantic)
+        } else if s.eq_ignore_ascii_case("procedural") {
+            Ok(Self::Procedural)
+        } else if s.eq_ignore_ascii_case("entity") {
+            Ok(Self::Entity)
+        } else {
+            Ok(Self::Custom(s.to_string()))
         }
     }
 }

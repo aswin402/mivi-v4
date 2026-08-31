@@ -86,20 +86,50 @@ pub fn swiglu(gate: &mut [f32], up: &[f32]) {
     }
 }
 
-/// Elementwise vector addition: out[i] += src[i]
+/// Scalar fallback for vector addition: out[i] += src[i]
 #[inline]
-pub fn vec_add(out: &mut [f32], src: &[f32]) {
+pub fn vec_add_scalar(out: &mut [f32], src: &[f32]) {
     assert_same_len("out", out.len(), "src", src.len());
     for i in 0..out.len() {
         out[i] += src[i];
     }
 }
 
-/// Vector dot product.
+/// Elementwise vector addition: out[i] += src[i] (SIMD accelerated)
+#[inline]
+pub fn vec_add(out: &mut [f32], src: &[f32]) {
+    assert_same_len("out", out.len(), "src", src.len());
+    crate::simd::vec_add_simd(out, src);
+}
+
+/// Scalar fallback for fused vector addition: out[i] += scale * src[i]
+#[inline]
+pub fn vec_fmadd_scalar(out: &mut [f32], scale: f32, src: &[f32]) {
+    assert_same_len("out", out.len(), "src", src.len());
+    for i in 0..out.len() {
+        out[i] += scale * src[i];
+    }
+}
+
+/// Elementwise fused multiply-add: out[i] += scale * src[i] (SIMD accelerated)
+#[inline]
+pub fn vec_fmadd(out: &mut [f32], scale: f32, src: &[f32]) {
+    assert_same_len("out", out.len(), "src", src.len());
+    crate::simd::vec_fmadd_simd(out, scale, src);
+}
+
+/// Scalar fallback for vector dot product.
+#[inline]
+pub fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    assert_same_len("a", a.len(), "b", b.len());
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
+/// Vector dot product (SIMD accelerated).
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     assert_same_len("a", a.len(), "b", b.len());
-    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+    crate::simd::dot_product_simd(a, b)
 }
 
 /// Rotary Position Embedding (RoPE) applied to query and key heads.

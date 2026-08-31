@@ -27,7 +27,10 @@ where
 
 pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
     println!("=== Mivi-v4 CPU Kernel Benchmark ===");
-    println!("Target model: {:?}", model.unwrap_or_default());
+    println!(
+        "Target model: {:?}",
+        model.as_deref().unwrap_or_else(|| std::path::Path::new(""))
+    );
     println!(
         "Benchmarking matvec kernels (dim={}, n={})...",
         BENCH_DIM, BENCH_N
@@ -51,6 +54,45 @@ pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
     benchmark_kernel("Q4_K_M", BENCH_ITERS, n, dim, || {
         mivi_quant::matvec_q4_k_m(&mut out, &q4_weights, &x, n, dim);
     });
+
+    // 3. Q6_K Matvec Benchmark
+    let q6_bytes_per_row = (dim / mivi_quant::Q6_K_BLOCK_SIZE) * mivi_quant::Q6_K_BYTES;
+    let q6_weights = vec![1u8; n * q6_bytes_per_row];
+    benchmark_kernel("Q6_K", BENCH_ITERS, n, dim, || {
+        mivi_quant::matvec_q6_k(&mut out, &q6_weights, &x, n, dim);
+    });
+
+    // 4. End-to-end model generation benchmark if model path is valid
+    if let Some(ref model_path) = model {
+        if model_path.exists() {
+            println!("\n=== End-to-End Generation Benchmark ===");
+            let mut model = mivi_model::Model::load(model_path)?;
+            let prompt = "Explain briefly why the sky is blue.";
+            let warmup_tokens = 8;
+            let bench_tokens = 32;
+
+            // Warmup
+            let _ = model.generate(prompt, warmup_tokens)?;
+
+            // Timed run
+            let start = std::time::Instant::now();
+            let mut gen_count = 0usize;
+            let output = model.generate_streaming(prompt, bench_tokens, |_, _| {
+                gen_count += 1;
+                true
+            })?;
+            let elapsed = start.elapsed();
+            let tok_per_sec = (gen_count as f64) / elapsed.as_secs_f64();
+            println!("  Generated tokens : {}", gen_count);
+            println!("  Elapsed time     : {:.2} s", elapsed.as_secs_f64());
+            println!(
+                "  Throughput       : {:.2} tokens/sec ({:.2} ms/token)",
+                tok_per_sec,
+                1000.0 / tok_per_sec
+            );
+            println!("  Output sample    : {:?}", output);
+        }
+    }
 
     println!("\nBenchmark complete.");
     Ok(())

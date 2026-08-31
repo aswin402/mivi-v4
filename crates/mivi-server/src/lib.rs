@@ -4,15 +4,18 @@ pub mod auth;
 pub mod config;
 pub mod engine_actor;
 pub mod grammar;
+pub mod logging;
 pub mod routes;
 pub mod state;
 pub mod streaming;
 pub mod types;
+pub mod watchdog;
 
 pub use auth::require_api_key;
 pub use config::ServerConfig;
 pub use engine_actor::{EngineActor, EngineHandle};
 pub use grammar::{JsonConstraintState, ResponseFormat};
+pub use logging::{mivi_log_middleware, summarize_prompt, LogMetadata};
 pub use routes::create_router;
 pub use state::AppState;
 pub use streaming::{
@@ -23,6 +26,7 @@ pub use types::{
     AgentRunRequest, AppError, ChatCompletionRequest, ChatCompletionResponse, ChoiceDto,
     MessageDto, MiviStatusResponse, OpenAiErrorDetail, OpenAiErrorResponse, UsageDto,
 };
+pub use watchdog::{ResourceWatchdog, WatchdogConfig};
 
 /// Attempts to bind a TcpListener to the given IP and port.
 ///

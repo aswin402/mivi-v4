@@ -18,15 +18,50 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { port, host, model } => {
-            mivi_cli::run_serve(port, host, model).await?;
+        Commands::Serve {
+            port,
+            host,
+            model,
+            max_memory,
+            warn_memory,
+            no_safelock,
+        } => {
+            mivi_cli::run_serve(mivi_cli::ServeArgs {
+                port,
+                host,
+                model,
+                max_memory,
+                warn_memory,
+                no_safelock,
+            })
+            .await?;
         }
         Commands::Chat {
             model,
             temp,
+            top_p,
+            top_k,
+            min_p,
+            rep_penalty,
+            seed,
             max_tokens,
+            ctx_size,
+            system,
+            thinking,
         } => {
-            mivi_cli::run_chat(model, temp, max_tokens)?;
+            mivi_cli::run_chat(mivi_cli::ChatArgs {
+                model,
+                temp,
+                top_p,
+                top_k,
+                min_p,
+                rep_penalty,
+                seed,
+                max_tokens,
+                ctx_size,
+                system,
+                thinking,
+            })?;
         }
         Commands::Info { model } => {
             mivi_cli::run_info(model)?;

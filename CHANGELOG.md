@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.1.2] - 2026-08-31
+
+### Hono-Style Minimal Logs, Resource Safety Watchdog, BOS Alignment & AI Agent Test Suite
+
+#### 🎨 Hono-Style Minimal Terminal Logging & Telemetry
+- **Minimal Borderless Startup Banner**: Replaced boxed ASCII banners with a clean, borderless startup display featuring model name, listening address, registered tool counts, real-time RSS memory, and active route tables.
+- **Colorized Real-Time Request Logging Middleware (`mivi_log_middleware`)**: Built a zero-dependency ANSI logging middleware logging HTTP methods (`GET` in green, `POST` in cyan), routes, colored status codes (2xx green, 4xx yellow `⚠`, 5xx red `✗`), high-resolution latencies (`µs`, `ms`, `s`), truncated user prompt previews, token counts (`prompt→completion`), and tool call markers (`🔧`).
+- **Prompt & Usage Metadata Propagation**: Attached `LogMetadata` to Axum response extensions in `/v1/chat/completions` (blocking & streaming) and `/v1/mivi/agent`.
+
+#### 🛡️ Resource Safety Watchdog (`Safelock`)
+- **Background RAM Monitoring**: Added `ResourceWatchdog` supervisor polling `/proc/self/statm` process RSS physical memory every 3 seconds to protect host systems from OOM or resource starvation.
+- **Two-Tier Threshold Enforcement**: Emits yellow warning logs when memory crosses 700 MB and triggers an automatic graceful shutdown at 900 MB before system freeze.
+- **Configurable CLI Flags**: Added `--max-memory`, `--warn-memory`, and `--no-safelock` options to `mivi serve`.
+
+#### 🧠 Inference Accuracy & BOS Positional Embedding Anchor
+- **Unconditional BOS `<|startoftext|>` Insertion**: Fixed position-0 BOS token injection for ChatML templates in `crates/mivi-model/src/model.rs`, ensuring proper attention head initialization on `LFM2.5-350M`.
+- **Conversational ChatML Formatting**: Removed intrusive default `<think>` system prompts from standard conversational chat, enabling fluent multi-turn chat responses without repetitive echo patterns. Added `--thinking` and `--system` (`-s`) CLI options to `mivi chat`.
+
+#### 🧪 Real-World AI Agent Testing Suite
+- **OpenAI Python SDK Integration**: Created `scripts/test_agents/01_openai_sdk.py` verifying drop-in OpenAI API compatibility.
+- **Tool-Calling Agent Loop**: Created `scripts/test_agents/02_agent_loop.py` demonstrating iterative tool execution with the built-in calculator.
+- **Native Autonomous Agent**: Created `scripts/test_agents/03_native_agent.py` testing the `/v1/mivi/agent` multi-step SSE streaming endpoint.
+- **Test Suite Expansion**: Added unit tests for logging utilities and watchdog state transitions; **74 total tests passing across all 12 workspace crates**.
+
+---
+
 ## [v0.1.1] - 2026-08-30
 
 ### Enterprise Security, Panic Elimination, SIMD Dispatch, RegexSet Router & Robustness Hardening

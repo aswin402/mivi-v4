@@ -9,9 +9,6 @@ use mivi_core::arena::RunState;
 use mivi_core::math::vec_add;
 use mivi_core::simd::rms_norm_simd;
 
-/// Fallback depthwise convolution weight when conv weights are absent.
-const DEFAULT_CONV_WEIGHT: f32 = 0.25;
-
 /// Parameter descriptor for SSM forward pass.
 pub struct SsmParams<'a> {
     pub layer: usize,
@@ -30,11 +27,10 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
     let adapters = params.adapters;
     let dim = cfg.dim;
     let hidden_dim = cfg.hidden_dim;
-    let kernel_size = if !w.ssm_conv.is_empty() && dim > 0 {
-        w.ssm_conv.len() / dim
-    } else {
-        3
-    };
+    let kernel_size = cfg.ssm_conv_kernel;
+    if kernel_size == 0 {
+        return Ok(());
+    }
 
     // 1. Pre-Norm: xb = rms_norm(x, ssm_norm) (SIMD accelerated)
     rms_norm_simd(&mut state.xb, &state.x, &w.ssm_norm, DEFAULT_RMS_NORM_EPS);
@@ -52,40 +48,66 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
     };
     linear_forward(&mut state.shortconv_in, &in_params, &mut state.lora_down)?;
 
-    // 3. Chunk into B (dim), C (dim), X (dim)
-    // bx[d] = B[d] * X[d]
+    // 3. Chunk into B (dim), C (dim), X (dim) and compute bx[d] = B[d] * X[d]
+    let (b_slice, rest) = state.shortconv_in.split_at(dim);
+    let (c_slice, x_slice) = rest.split_at(dim);
     for d in 0..dim {
-        let b_val = state.shortconv_in[d];
-        let x_val = state.shortconv_in[2 * dim + d];
-        state.xb2[d] = b_val * x_val;
+        state.xb2[d] = b_slice[d] * x_slice[d];
     }
 
-    // 4. Depthwise 1D causal convolution over sequence history
+    // Depthwise 1D causal convolution on bx using persistent conv_states buffer.
     let conv_layer_offset = layer * dim * kernel_size;
-    for d in 0..dim {
-        let conv_offset = conv_layer_offset + d * kernel_size;
-        // Shift history left
-        for k in 0..(kernel_size - 1) {
-            state.conv_states[conv_offset + k] = state.conv_states[conv_offset + k + 1];
-        }
-        state.conv_states[conv_offset + (kernel_size - 1)] = state.xb2[d];
+    let has_full_conv = !w.ssm_conv.is_empty() && w.ssm_conv.len() >= dim * kernel_size;
+    let has_shared_conv = !w.ssm_conv.is_empty() && w.ssm_conv.len() >= kernel_size;
 
-        // 1D depthwise convolution dot product
-        let mut conv_out = 0.0f32;
-        for k in 0..kernel_size {
-            let w_k = if w.ssm_conv.len() == dim * kernel_size {
-                w.ssm_conv[d * kernel_size + k]
-            } else if k < w.ssm_conv.len() {
-                w.ssm_conv[k]
+    if kernel_size == 3 && has_full_conv {
+        for (d, &c_val) in c_slice.iter().enumerate().take(dim) {
+            let conv_offset = conv_layer_offset + d * 3;
+            let conv_w_offset = d * 3;
+
+            let s0 = state.conv_states[conv_offset + 1];
+            let s1 = state.conv_states[conv_offset + 2];
+            let s2 = state.xb2[d];
+
+            state.conv_states[conv_offset] = s0;
+            state.conv_states[conv_offset + 1] = s1;
+            state.conv_states[conv_offset + 2] = s2;
+
+            let w0 = w.ssm_conv[conv_w_offset];
+            let w1 = w.ssm_conv[conv_w_offset + 1];
+            let w2 = w.ssm_conv[conv_w_offset + 2];
+
+            let conv_out = w0 * s0 + w1 * s1 + w2 * s2;
+            state.xb2[d] = c_val * conv_out;
+        }
+    } else {
+        for (d, &c_val) in c_slice.iter().enumerate().take(dim) {
+            let conv_offset = conv_layer_offset + d * kernel_size;
+            let mut conv_out = 0.0f32;
+            let conv_w_offset = d * kernel_size;
+
+            for k in 0..(kernel_size - 1) {
+                state.conv_states[conv_offset + k] = state.conv_states[conv_offset + k + 1];
+            }
+            state.conv_states[conv_offset + (kernel_size - 1)] = state.xb2[d];
+
+            if has_full_conv {
+                for k in 0..kernel_size {
+                    conv_out += w.ssm_conv[conv_w_offset + k] * state.conv_states[conv_offset + k];
+                }
+            } else if has_shared_conv {
+                for k in 0..kernel_size {
+                    conv_out += w.ssm_conv[k] * state.conv_states[conv_offset + k];
+                }
             } else {
-                DEFAULT_CONV_WEIGHT
-            };
-            conv_out += state.conv_states[conv_offset + k] * w_k;
-        }
+                let default_w = 1.0 / kernel_size as f32;
+                for k in 0..kernel_size {
+                    conv_out += default_w * state.conv_states[conv_offset + k];
+                }
+            }
 
-        // Modulate with C channel: y[d] = conv_out * C[d]
-        let c_val = state.shortconv_in[dim + d];
-        state.xb2[d] = conv_out * c_val;
+            state.xb2[d] = c_val * conv_out;
+        }
     }
 
     // 5. Output projection: xb = W_out (dim x dim) * xb2 + LoRA

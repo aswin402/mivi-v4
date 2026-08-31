@@ -26,11 +26,14 @@ impl std::fmt::Display for Role {
 impl std::str::FromStr for Role {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "system" => Ok(Self::System),
-            "assistant" => Ok(Self::Assistant),
-            "tool" => Ok(Self::Tool),
-            _ => Ok(Self::User),
+        if s.eq_ignore_ascii_case("system") {
+            Ok(Self::System)
+        } else if s.eq_ignore_ascii_case("assistant") {
+            Ok(Self::Assistant)
+        } else if s.eq_ignore_ascii_case("tool") {
+            Ok(Self::Tool)
+        } else {
+            Ok(Self::User)
         }
     }
 }

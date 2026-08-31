@@ -30,6 +30,7 @@ pub async fn run_agent_task(
         mpsc::channel::<std::result::Result<Event, std::convert::Infallible>>(channel_capacity);
     let cid_clone = cid.clone();
     let mname = model_name.clone();
+    let task_summary = crate::logging::summarize_prompt(&req.task, 40);
 
     tokio::spawn(async move {
         let max_steps = if req.max_steps == 0 {
@@ -43,7 +44,9 @@ pub async fn run_agent_task(
 
         send_sse_sequence(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
             let sanitized_task = mivi_agent::escape_xml_content(&req.task);
-            let mut current_prompt = AGENT_PROMPT_TEMPLATE.replace("{}", &sanitized_task);
+            let base_prompt = AGENT_PROMPT_TEMPLATE.replace("{}", &sanitized_task);
+            let mut conversation_history = String::new();
+            let mut current_prompt = base_prompt.clone();
 
             for _ in 0..max_steps {
                 match engine.generate(&current_prompt, agent_gen_tokens).await {
@@ -63,7 +66,14 @@ pub async fn run_agent_task(
                             break;
                         }
 
-                        current_prompt = result;
+                        conversation_history.push_str(&format!(
+                            "\n<assistant>\n{}\n</assistant>\n{}\n",
+                            model_out, result
+                        ));
+                        current_prompt = format!(
+                            "{}\n{}\nContinue with the task. If complete, indicate the final answer.",
+                            base_prompt, conversation_history
+                        );
                     }
                     Err(e) => {
                         tracing::error!("Agent inference failed: {}", e);
@@ -82,5 +92,12 @@ pub async fn run_agent_task(
         .await;
     });
 
-    sse_response(rx)
+    let mut resp = sse_response(rx);
+    let log_meta = crate::logging::LogMetadata {
+        prompt_summary: Some(task_summary),
+        is_agent: true,
+        ..Default::default()
+    };
+    resp.extensions_mut().insert(log_meta);
+    resp
 }

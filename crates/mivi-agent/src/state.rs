@@ -1,6 +1,7 @@
 //! Canonical agent state machine definition.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentPhase {
@@ -20,7 +21,7 @@ pub struct AgentState {
     pub step_count: usize,
     pub max_steps: usize,
     pub plan: Vec<String>,
-    pub memory: Vec<String>,
+    pub memory: VecDeque<String>,
 }
 
 pub const DEFAULT_MAX_AGENT_STEPS: usize = 10;
@@ -34,7 +35,7 @@ impl AgentState {
             step_count: 0,
             max_steps,
             plan: Vec::new(),
-            memory: Vec::new(),
+            memory: VecDeque::new(),
         }
     }
 }

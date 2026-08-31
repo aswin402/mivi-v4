@@ -13,10 +13,13 @@ pub const AUTH_INVALID_KEY: &str = "Invalid API key provided.";
 
 #[inline]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    let len_eq = a.len().ct_eq(&b.len());
+    let min_len = a.len().min(b.len());
+    let mut acc = 0u8;
+    for i in 0..min_len {
+        acc |= a[i] ^ b[i];
     }
-    a.ct_eq(b).into()
+    bool::from(len_eq) && acc == 0
 }
 
 pub async fn require_api_key(

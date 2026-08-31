@@ -47,6 +47,14 @@ pub async fn chat_completions(
         .min(state.config.max_allowed_tokens);
     let completion_id = format!("{}{}", mivi_core::CHATCMPL_ID_PREFIX, uuid::Uuid::new_v4());
     let is_streaming = req.stream.unwrap_or(false);
+    let last_user_prompt = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_deref())
+        .map(|s| crate::logging::summarize_prompt(s, 40));
+
     let model_name = state.model_name.clone();
 
     let chat_messages: Vec<mivi_tokenizer::ChatMessage> =
@@ -68,35 +76,58 @@ pub async fn chat_completions(
         let ctx = ChatStreamContext {
             prompt,
             max_tokens,
+            temperature: req.temperature,
+            top_p: req.top_p,
             completion_id,
             model_name,
             engine: state.engine.clone(),
             channel_capacity: state.config.channel_capacity,
         };
-        handle_chat_streaming(ctx)
+        let mut resp = handle_chat_streaming(ctx);
+        let log_meta = crate::logging::LogMetadata {
+            prompt_summary: last_user_prompt,
+            ..Default::default()
+        };
+        resp.extensions_mut().insert(log_meta);
+        resp
     } else {
-        handle_chat_blocking(
-            &prompt,
+        let ctx = ChatBlockingContext {
+            prompt: &prompt,
             max_tokens,
+            temperature: req.temperature,
+            top_p: req.top_p,
             completion_id,
             model_name,
-            &state.engine,
-        )
-        .await
+            engine: &state.engine,
+            last_user_prompt,
+        };
+        handle_chat_blocking(ctx).await
     }
 }
 
 struct ChatStreamContext {
     prompt: String,
     max_tokens: usize,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     completion_id: String,
     model_name: String,
     engine: EngineHandle,
     channel_capacity: usize,
 }
 
+struct ChatBlockingContext<'a> {
+    prompt: &'a str,
+    max_tokens: usize,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    completion_id: String,
+    model_name: String,
+    engine: &'a EngineHandle,
+    last_user_prompt: Option<String>,
+}
+
 pub const THINKING_INIT_MSG: &str = "Generating completion with Mivi engine...";
-pub const VERIFIED_OUTPUT_MSG: &str = "Verified output tokens.";
 
 fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let (tx, rx) =
@@ -106,10 +137,15 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let engine = ctx.engine;
     let prompt = ctx.prompt;
     let max_tokens = ctx.max_tokens;
+    let temperature = ctx.temperature;
+    let top_p = ctx.top_p;
 
     tokio::spawn(async move {
-        send_sse_sequence(&tx, &cid, &mname, Some(THINKING_INIT_MSG), || async {
-            match engine.generate_stream(&prompt, max_tokens).await {
+        send_sse_sequence(&tx, &cid, &mname, None, || async {
+            match engine
+                .generate_stream_with_params(&prompt, max_tokens, temperature, top_p)
+                .await
+            {
                 Ok(mut stream_rx) => {
                     while let Some(chunk_res) = stream_rx.recv().await {
                         match chunk_res {
@@ -154,30 +190,53 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     sse_response(rx)
 }
 
-async fn handle_chat_blocking(
-    prompt: &str,
-    max_tokens: usize,
-    completion_id: String,
-    model_name: String,
-    engine: &EngineHandle,
-) -> Response {
-    match engine.generate(prompt, max_tokens).await {
+async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
+    match ctx
+        .engine
+        .generate_with_params(ctx.prompt, ctx.max_tokens, ctx.temperature, ctx.top_p)
+        .await
+    {
         Ok((output, p_tokens, c_tokens)) => {
+            let thinking = mivi_tools::extract_thinking(&output);
+            let tool_calls_extracted = mivi_tools::extract_tool_calls(&output);
+
+            let (tool_calls, finish_reason) = if !tool_calls_extracted.is_empty() {
+                let tc_vals: Vec<serde_json::Value> = tool_calls_extracted
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tc)| {
+                        serde_json::json!({
+                            "id": format!("call_{}_{}", i, uuid::Uuid::new_v4().simple()),
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
+                        })
+                    })
+                    .collect();
+                (Some(tc_vals), "tool_calls")
+            } else if c_tokens >= ctx.max_tokens {
+                (None, "length")
+            } else {
+                (None, "stop")
+            };
+
             let response = ChatCompletionResponse {
-                id: completion_id,
+                id: ctx.completion_id,
                 object: OPENAI_COMPLETION_OBJECT.to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
-                model: model_name,
+                model: ctx.model_name,
                 choices: vec![ChoiceDto {
                     index: 0,
                     message: MessageDto {
                         role: ROLE_ASSISTANT.to_string(),
                         content: Some(output),
                         name: None,
-                        thinking: Some(VERIFIED_OUTPUT_MSG.to_string()),
-                        tool_calls: None,
+                        thinking,
+                        tool_calls,
                     },
-                    finish_reason: Some(FINISH_REASON_STOP.to_string()),
+                    finish_reason: Some(finish_reason.to_string()),
                 }],
                 usage: UsageDto {
                     prompt_tokens: p_tokens,
@@ -185,7 +244,25 @@ async fn handle_chat_blocking(
                     total_tokens: p_tokens + c_tokens,
                 },
             };
-            Json(response).into_response()
+
+            let mut resp = Json(response).into_response();
+            let mut log_meta = crate::logging::LogMetadata {
+                prompt_summary: ctx.last_user_prompt,
+                tokens_prompt: Some(p_tokens),
+                tokens_completion: Some(c_tokens),
+                finish_reason: Some(finish_reason.to_string()),
+                ..Default::default()
+            };
+            if !tool_calls_extracted.is_empty() {
+                log_meta.tool_calls = Some(
+                    tool_calls_extracted
+                        .into_iter()
+                        .map(|tc| format!("{}(...)", tc.name))
+                        .collect(),
+                );
+            }
+            resp.extensions_mut().insert(log_meta);
+            resp
         }
         Err(e) => AppError::InferenceError(e).into_response(),
     }

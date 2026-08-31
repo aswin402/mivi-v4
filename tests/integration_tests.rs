@@ -151,7 +151,7 @@ async fn test_agent_stagnation_guard() {
     let _ = agent.step(same_call).await;
     let res = agent.step(same_call).await;
 
-    assert_eq!(agent.state.phase, AgentPhase::Completed);
+    assert_eq!(agent.state.phase, AgentPhase::Failed);
     assert!(res.contains("Agent stagnation detected"));
 }
 
@@ -311,17 +311,27 @@ async fn test_http_server_error_responses() {
     ));
     let app = create_router(state);
 
-    // 1. Unauthorized when missing API key
-    let req = Request::builder()
+    // 1. Public health check succeeds without API key
+    let health_req = Request::builder()
         .uri("/health")
         .method("GET")
         .body(Body::empty())
         .unwrap();
+    let health_res = app.clone().oneshot(health_req).await.unwrap();
+    assert_eq!(health_res.status(), StatusCode::OK);
 
-    let res = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    // 2. Unauthorized when missing API key on protected endpoint
+    let unauth_req = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"messages":[]}"#))
+        .unwrap();
 
-    // 2. Bad request with empty messages array (with auth header)
+    let unauth_res = app.clone().oneshot(unauth_req).await.unwrap();
+    assert_eq!(unauth_res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. Bad request with empty messages array (with auth header)
     let chat_req = serde_json::json!({
         "model": "mivi-v4-test",
         "messages": []
@@ -423,31 +433,143 @@ fn test_lfm2_350m_model_load_and_forward() {
     let mut model = mivi_model::Model::load(&model_path).expect("Failed to load LFM2.5-350M model");
     assert_eq!(model.config.dim, 1024);
     assert_eq!(model.config.n_layers, 16);
-    let messages = vec![mivi_tokenizer::ChatMessage {
-        role: mivi_tokenizer::Role::User,
-        content: Some("Hello!".to_string()),
-        name: None,
-    }];
-    let prompt = mivi_tokenizer::format_chatml(&messages, None, true);
-    let tokens = model.tokenizer.encode(&prompt);
-    println!("Encoded tokens: {:?}", tokens);
+
+    // Test 1: Raw completion prompt
+    let raw_prompt = "The capital of France is";
+    let mut tokens = model.tokenizer.encode(raw_prompt);
+    if model
+        .gguf
+        .metadata
+        .contains_key("tokenizer.ggml.add_bos_token")
+    {
+        tokens.insert(0, 1); // Prepend BOS
+    }
+    println!("Raw prompt encoded: {:?}", tokens);
     for &t in &tokens {
         println!("  tok {}: {:?}", t, model.tokenizer.decode_token(t));
     }
-    let mut logits_top = Vec::new();
+    model.state.reset();
+    model.kv_cache.reset();
     for (i, &t) in tokens.iter().enumerate() {
         let logits = model.forward(t, i).expect("forward failed");
         if i == tokens.len() - 1 {
             let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
             indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            println!("Top 10 predicted tokens after 'The capital of France is':");
             for &(idx, val) in &indexed[..10] {
-                logits_top.push((idx, val, model.tokenizer.decode_token(idx as u32)));
+                println!(
+                    "  id {}: logit {:.4} ({:?})",
+                    idx,
+                    val,
+                    model.tokenizer.decode_token(idx as u32)
+                );
             }
         }
     }
-    println!("Top 10 predicted tokens after prompt:");
-    for (idx, val, text) in logits_top {
-        println!("  id {}: logit {:.4} ({:?})", idx, val, text);
+
+    // Test 2: Generate 10 tokens from raw prompt
+    model.sampler.config.temperature = 0.0; // Greedy sampling
+    let gen_output = model.generate(raw_prompt, 10).expect("generate failed");
+    println!(
+        "Greedy generation for 'The capital of France is': {:?}",
+        gen_output
+    );
+
+    // Test 3: ChatML structured conversation
+    let mut history = Vec::new();
+    let questions = ["hii", "who are you?", "what is 8 + 8?"];
+    for q in questions {
+        history.push(mivi_tokenizer::ChatMessage {
+            role: mivi_tokenizer::Role::User,
+            content: Some(q.to_string()),
+            name: None,
+        });
+        let prompt = mivi_tokenizer::format_chatml(&history, None, false);
+        model.reset_context();
+        let resp = model.generate(&prompt, 32).expect("chat generate failed");
+        println!("\nUser: {}\nAssistant: {}", q, resp);
+        history.push(mivi_tokenizer::ChatMessage {
+            role: mivi_tokenizer::Role::Assistant,
+            content: Some(resp),
+            name: None,
+        });
     }
-    assert!(!tokens.is_empty());
+
+    assert_eq!(history.len(), 6);
+}
+
+#[tokio::test]
+async fn test_chat_completion_with_custom_sampling_params() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn(None);
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+
+    let chat_req = serde_json::json!({
+        "model": "mivi-v4-test",
+        "messages": [
+            {"role": "user", "content": "Hello"}
+        ],
+        "temperature": 0.2,
+        "top_p": 0.95,
+        "max_tokens": 16
+    });
+
+    let req = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&chat_req).unwrap()))
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[test]
+fn test_special_token_decoding_comprehensive() {
+    let vocab = mivi_tokenizer::Vocab::new(vec![
+        "<|im_start|>".to_string(),
+        "<|im_end|>".to_string(),
+        "<think>".to_string(),
+        "</think>".to_string(),
+        "<tool_call>".to_string(),
+        "</tool_call>".to_string(),
+        "hello".to_string(),
+    ]);
+    let tokenizer = mivi_tokenizer::Tokenizer::new(vocab, std::collections::HashMap::new());
+
+    let decoded = tokenizer.decode(&[0, 6, 1, 2, 6, 3]);
+    assert_eq!(decoded, "<|im_start|>hello<|im_end|><think>hello</think>");
+}
+
+#[tokio::test]
+async fn test_server_blocking_chat_with_tool_calls_extraction() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn(None);
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+
+    let chat_req = serde_json::json!({
+        "model": "mivi-v4-test",
+        "messages": [
+            {"role": "user", "content": "What is 2+2?"}
+        ],
+        "max_tokens": 32
+    });
+
+    let req = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&chat_req).unwrap()))
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(json_res["choices"][0]["finish_reason"], "stop");
 }
