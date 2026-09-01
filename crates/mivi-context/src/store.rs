@@ -44,6 +44,8 @@ impl ContextStore {
         if self.blocks.len() >= self.max_blocks {
             if let Some(pos) = self.blocks.iter().position(|b| !b.pinned) {
                 self.blocks.remove(pos);
+            } else if !self.blocks.is_empty() {
+                self.blocks.remove(0);
             }
         }
         self.blocks.push(ContextBlock {

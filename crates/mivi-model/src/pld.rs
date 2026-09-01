@@ -55,8 +55,8 @@ impl PromptLookupProposer {
         for i in (0..=(search_limit - self.ngram_size)).rev() {
             if &all_tokens[i..i + self.ngram_size] == query_ngram {
                 let draft_start = i + self.ngram_size;
-                let draft_end = (draft_start + self.draft_size).min(search_limit);
-                if draft_start < draft_end {
+                if draft_start < query_start {
+                    let draft_end = (draft_start + self.draft_size).min(query_start);
                     let draft = all_tokens[draft_start..draft_end].to_vec();
                     if !draft.is_empty() {
                         return Some(draft);

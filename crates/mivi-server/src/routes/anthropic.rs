@@ -110,8 +110,32 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
             serde_json::Value::Array(blocks) => {
                 let mut acc = String::new();
                 for block in blocks {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        acc.push_str(text);
+                    let b_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match b_type {
+                        "text" => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                acc.push_str(text);
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            acc.push_str(&format!(
+                                "<tool_call>{{\"name\":\"{}\",\"arguments\":{}}}</tool_call>",
+                                name, input
+                            ));
+                        }
+                        "tool_result" => {
+                            let content_str = block.get("content")
+                                .map(|c| if let Some(s) = c.as_str() { s.to_string() } else { c.to_string() })
+                                .unwrap_or_default();
+                            acc.push_str(&format!("<tool_result>{}</tool_result>", content_str));
+                        }
+                        _ => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                acc.push_str(text);
+                            }
+                        }
                     }
                 }
                 acc
@@ -180,6 +204,33 @@ pub async fn anthropic_messages_handler(
         let mid = message_id.clone();
         let mname = model_name.clone();
 
+        // 1. message_start and content_block_start
+        let msg_start_event = Event::default().event("message_start").data(
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": mid,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": mname,
+                    "content": [],
+                    "stop_reason": null,
+                    "usage": { "input_tokens": 15, "output_tokens": 0 }
+                }
+            })
+            .to_string(),
+        );
+
+        let block_start_event = Event::default().event("content_block_start").data(
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            })
+            .to_string(),
+        );
+
+        // 2. content_block_delta stream
         let stream = ReceiverStream::new(stream_rx).map(move |chunk_res| {
             let chunk = chunk_res.unwrap_or_default();
             let data = serde_json::json!({
@@ -193,25 +244,43 @@ pub async fn anthropic_messages_handler(
             Ok::<Event, Infallible>(Event::default().event("content_block_delta").data(data.to_string()))
         });
 
-        // Prepend message_start event
-        let start_event = Event::default().event("message_start").data(
+        // 3. content_block_stop, message_delta, and message_stop
+        let block_stop_event = Event::default().event("content_block_stop").data(
             serde_json::json!({
-                "type": "message_start",
-                "message": {
-                    "id": mid,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": mname,
-                    "content": [],
-                    "stop_reason": null,
-                    "usage": { "input_tokens": 10, "output_tokens": 0 }
-                }
+                "type": "content_block_stop",
+                "index": 0
             })
             .to_string(),
         );
 
-        let pinned_stream = futures::stream::once(async { Ok(start_event) }).chain(stream);
-        Sse::new(pinned_stream).into_response()
+        let msg_delta_event = Event::default().event("message_delta").data(
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                "usage": { "output_tokens": 10 }
+            })
+            .to_string(),
+        );
+
+        let msg_stop_event = Event::default().event("message_stop").data(
+            serde_json::json!({
+                "type": "message_stop"
+            })
+            .to_string(),
+        );
+
+        let full_stream = futures::stream::iter(vec![
+            Ok(msg_start_event),
+            Ok(block_start_event),
+        ])
+        .chain(stream)
+        .chain(futures::stream::iter(vec![
+            Ok(block_stop_event),
+            Ok(msg_delta_event),
+            Ok(msg_stop_event),
+        ]));
+
+        Sse::new(full_stream).into_response()
     } else {
         // Non-streaming JSON response
         match state

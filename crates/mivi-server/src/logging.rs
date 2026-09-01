@@ -80,11 +80,7 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
     let mut extra_info = String::new();
     if let Some(meta) = response.extensions().get::<LogMetadata>() {
         if let Some(prompt) = &meta.prompt_summary {
-            let truncated = if prompt.len() > 40 {
-                format!("{}...", &prompt[..37])
-            } else {
-                prompt.clone()
-            };
+            let truncated = summarize_prompt(prompt, 40);
             extra_info.push_str(&format!(
                 "  {}user:{} \"{}\"",
                 ansi::DIM,

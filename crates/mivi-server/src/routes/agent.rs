@@ -33,10 +33,11 @@ pub async fn run_agent_task(
     let task_summary = crate::logging::summarize_prompt(&req.task, 40);
 
     tokio::spawn(async move {
+        const MAX_AGENT_STEPS_LIMIT: usize = 50;
         let max_steps = if req.max_steps == 0 {
             default_max_steps
         } else {
-            req.max_steps
+            req.max_steps.min(MAX_AGENT_STEPS_LIMIT)
         };
         let agent_state = mivi_agent::AgentState::new(&req.task, max_steps);
         let mut agent = mivi_agent::AgentLoop::new(agent_state, &broker);

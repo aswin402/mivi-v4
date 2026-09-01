@@ -33,12 +33,19 @@ pub async fn require_api_key(
             .get(header::AUTHORIZATION)
             .and_then(|val| val.to_str().ok());
 
+        let x_api_key = headers
+            .get("x-api-key")
+            .and_then(|val| val.to_str().ok());
+
         let token = match auth_header {
             Some(h) if h.starts_with("Bearer ") => &h[7..],
             Some(h) if h.starts_with("bearer ") => &h[7..],
-            _ => {
-                return Err(AppError::Unauthorized(AUTH_MISSING_HEADER.to_string()).into_response());
-            }
+            _ => match x_api_key {
+                Some(key) => key,
+                None => {
+                    return Err(AppError::Unauthorized(AUTH_MISSING_HEADER.to_string()).into_response());
+                }
+            },
         };
 
         if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {

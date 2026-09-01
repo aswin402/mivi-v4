@@ -185,7 +185,8 @@ impl Tokenizer {
                 out.push(id);
             } else {
                 // Fallback to byte tokens
-                for &b in sym.as_bytes() {
+                for c in sym.chars() {
+                    let b = UNICODE_TO_BYTE.get(&c).copied().unwrap_or(c as u8);
                     let hex = format!("<0x{:02X}>", b);
                     out.push(
                         self.vocab

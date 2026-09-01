@@ -113,7 +113,7 @@ async fn test_agent_loop_execution() {
 </tool_call>"#;
 
     let observation = agent.step(simulated_model_output).await;
-    assert_eq!(agent.state.phase, AgentPhase::Verifying);
+    assert_eq!(agent.state.phase, AgentPhase::Observing);
     assert_eq!(agent.state.step_count, 1);
     assert!(observation.contains("<tool_result name=\"calculator\">100</tool_result>"));
 

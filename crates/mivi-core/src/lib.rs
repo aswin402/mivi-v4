@@ -6,6 +6,7 @@ pub mod math;
 pub mod rope;
 pub mod simd;
 pub mod sys;
+pub mod tensor;
 
 pub use arena::RunState;
 pub use brand::{
@@ -16,3 +17,4 @@ pub use math::{dot_product, rms_norm, silu, silu_scalar, softmax, swiglu, vec_ad
 pub use rope::{RopeCache, RopeError};
 pub use simd::{rms_norm_in_place_simd, rms_norm_simd};
 pub use sys::{estimate_process_memory_mb, get_system_page_size};
+pub use tensor::{Tensor, TensorError, TensorShape};

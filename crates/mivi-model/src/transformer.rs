@@ -1,6 +1,6 @@
 //! Grouped Query Attention (GQA) Transformer layer implementation with RoPE.
 
-use crate::config::{ModelConfig, DEFAULT_RMS_NORM_EPS};
+use crate::config::ModelConfig;
 use crate::ffn::{ffn_swiglu_forward, linear_forward, FfnSwigluParams, LinearParams};
 use crate::lora::ActiveAdapters;
 use crate::model::Result;
@@ -55,14 +55,14 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
         for h in 0..cfg.n_heads {
             let offset = h * head_dim;
             let head_slice = &mut state.q[offset..offset + head_dim];
-            mivi_core::rms_norm_in_place_simd(head_slice, q_norm_w, DEFAULT_RMS_NORM_EPS);
+            mivi_core::rms_norm_in_place_simd(head_slice, q_norm_w, cfg.rms_norm_eps);
         }
     }
     if let Some(ref k_norm_w) = w.k_norm {
         for kv_h in 0..cfg.n_kv_heads {
             let offset = kv_h * head_dim;
             let head_slice = &mut state.k[offset..offset + head_dim];
-            mivi_core::rms_norm_in_place_simd(head_slice, k_norm_w, DEFAULT_RMS_NORM_EPS);
+            mivi_core::rms_norm_in_place_simd(head_slice, k_norm_w, cfg.rms_norm_eps);
         }
     }
 
@@ -156,7 +156,7 @@ pub fn attention_forward(
     let adapters = params.adapters;
 
     // 1. Attention Pre-Norm (SIMD accelerated)
-    rms_norm_simd(&mut state.xb, &state.x, &w.attn_norm, DEFAULT_RMS_NORM_EPS);
+    rms_norm_simd(&mut state.xb, &state.x, &w.attn_norm, cfg.rms_norm_eps);
 
     // 2-4. Q, K, V projections + RoPE + Cache store
     compute_qkv(state, kv, params)?;
@@ -186,7 +186,7 @@ pub fn attention_forward(
         hidden_dim,
         mmap,
         adapters,
-        eps: DEFAULT_RMS_NORM_EPS,
+        eps: cfg.rms_norm_eps,
     };
     ffn_swiglu_forward(state, &ffn_params)
 }

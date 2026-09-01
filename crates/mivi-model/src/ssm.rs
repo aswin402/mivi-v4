@@ -1,6 +1,6 @@
 //! State Space Model (SSM) / Gated Short Convolution layer.
 
-use crate::config::{ModelConfig, DEFAULT_RMS_NORM_EPS};
+use crate::config::ModelConfig;
 use crate::ffn::{ffn_swiglu_forward, linear_forward, FfnSwigluParams, LinearParams};
 use crate::lora::ActiveAdapters;
 use crate::model::Result;
@@ -33,7 +33,7 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
     }
 
     // 1. Pre-Norm: xb = rms_norm(x, ssm_norm) (SIMD accelerated)
-    rms_norm_simd(&mut state.xb, &state.x, &w.ssm_norm, DEFAULT_RMS_NORM_EPS);
+    rms_norm_simd(&mut state.xb, &state.x, &w.ssm_norm, cfg.rms_norm_eps);
 
     // 2. In-projection: shortconv_in (3 * dim) = W_in (3*dim x dim) * xb + LoRA
     let in_rows = 3 * dim;
@@ -132,7 +132,7 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
         hidden_dim,
         mmap,
         adapters,
-        eps: DEFAULT_RMS_NORM_EPS,
+        eps: cfg.rms_norm_eps,
     };
     ffn_swiglu_forward(state, &ffn_params)
 }

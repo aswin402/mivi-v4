@@ -107,14 +107,16 @@ impl<'a> AgentLoop<'a> {
                 res.error.unwrap_or_default()
             };
 
+            let status_attr = if res.success { "" } else { " status=\"error\"" };
             results_str.push_str(&format!(
-                "<tool_result name=\"{}\">{}</tool_result>\n",
+                "<tool_result name=\"{}\"{}>{}</tool_result>\n",
                 escape_xml_attr(&res.name),
+                status_attr,
                 escape_xml_content(&body)
             ));
         }
 
-        self.state.phase = AgentPhase::Verifying;
+        self.state.phase = AgentPhase::Observing;
         results_str
     }
 }

@@ -93,6 +93,7 @@ pub fn handle_list_dir(args: serde_json::Value, ws: &Path) -> ToolResult {
                     names.push(format!("{}: {}", kind, clean_name));
                 }
             }
+            names.sort();
             Ok(names.join("\n"))
         },
     )

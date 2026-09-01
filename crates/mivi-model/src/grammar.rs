@@ -283,7 +283,7 @@ impl JsonGrammar {
                         return false;
                     }
                 }
-                '0'..='9' | '-' | 't' | 'r' | 'u' | 'e' | 'f' | 'a' | 'l' | 's' | 'n' => {
+                '0'..='9' | '-' | '+' | '.' | 'e' | 'E' | 't' | 'r' | 'u' | 'f' | 'a' | 'l' | 's' | 'n' => {
                     if self.expect_value {
                         self.started = true;
                         self.expect_value = false;
@@ -485,6 +485,14 @@ mod tests {
         assert!(grammar.feed("{\"name\":"));
         // Illegal closing brace without value
         assert!(!grammar.feed("}"));
+    }
+
+    #[test]
+    fn test_json_grammar_floating_point_numbers() {
+        let mut grammar = JsonGrammar::new();
+        assert!(grammar.feed("{\"pi\":3.14159,\"rate\":-0.05,\"exp\":1e-4}"));
+        assert!(grammar.completed);
+        assert!(!grammar.has_error);
     }
 
     #[test]

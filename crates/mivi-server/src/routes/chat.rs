@@ -210,7 +210,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                             "type": "function",
                             "function": {
                                 "name": tc.name,
-                                "arguments": tc.arguments,
+                                "arguments": tc.arguments.to_string(),
                             }
                         })
                     })

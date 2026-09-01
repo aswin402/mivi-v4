@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.2] - 2026-09-01
+
+### Codebase Hardening, Full Specification Compliance, Panic Elimination & Audit Fixes
+
+#### 💡 Ideas, Inspirations & Sources
+- **RFC 8259 (The JavaScript Object Notation Data Interchange Format)**:
+  - *Full Numerical Grammar Compliance*: Updated `JsonGrammar` literal matching to properly accept decimal points (`.`), signs (`+`, `-`), and exponential notations (`e`, `E`), preventing premature grammar rejection when models generate floating-point and scientific numbers.
+- **Anthropic Messages SSE Streaming Protocol Specification**:
+  - *Complete Event Stream Lifecycle*: Implemented the full Anthropic streaming event lifecycle (`message_start` $\to$ `content_block_start` $\to$ `content_block_delta` $\to$ `content_block_stop` $\to$ `message_delta` $\to$ `message_stop`), ensuring compatibility with official Anthropic SDKs (Python, TypeScript), Claude Code, and Cursor.
+  - *`x-api-key` & CORS Support*: Added native `x-api-key` authentication header extraction alongside Bearer tokens and added Anthropic header support to CORS preflight headers.
+  - *Multi-Turn Tool Call & Result Handling*: Preserved `tool_use` and `tool_result` content blocks when converting Anthropic requests to ChatML.
+- **OpenAI API Tool Calling Specification**:
+  - *Serialized String Arguments*: Enforced that `function.arguments` is strictly emitted as a JSON-serialized `String` rather than a raw JSON object, adhering to standard OpenAI client deserialization requirements.
+- **Unicode Standard & Rust UTF-8 Safety**:
+  - *Character-Boundary Slicing*: Replaced raw byte slicing in `mivi-server::logging` with `summarize_prompt` using safe character iterators, eliminating runtime panics on multi-byte UTF-8 user prompts.
+- **LMCache & Adaptive Engine Design**:
+  - *Running Counter $O(K)$ Elastic Memory Pruning*: Added `total_memory_bytes` tracking in `PrefixCache` to eliminate $O(N)$ per-chunk recalculations during eviction.
+
+#### 🛠️ Bug Fixes & Code Quality Upgrades
+- **Grammar Floating-Point Parsing (`mivi-model::grammar`)**: Fixed floating-point number rejection by adding `.`, `+`, `e`, `E` to literal patterns.
+- **Safe UTF-8 Slicing (`mivi-server::logging`)**: Eliminated potential byte-slicing panics on non-ASCII prompts.
+- **Speculative Decoding Boundary (`mivi-model::pld`)**: Fixed PLD search boundary to propose continuation tokens on adjacent repeating n-grams.
+- **BPE Byte Fallback Reverse Mapping (`mivi-tokenizer::bpe`)**: Fixed byte fallback to reverse GPT-2 mapped unicode characters to original byte tokens.
+- **Context Store Bounded Memory (`mivi-context::store`)**: Enforced strict capacity bounds when 100% of blocks are pinned.
+- **Deterministic FS Tool Output (`mivi-tools::builtins::fs`)**: Sorted directory listing output for deterministic reproducibility.
+- **Agent Loop Error Tracking (`mivi-agent::engine`)**: Added `status="error"` attribute to tool results on failure and set phase to `Observing`.
+- **Dynamic RMSNorm Epsilon (`mivi-model`)**: Passed `cfg.rms_norm_eps` instead of hardcoded default across SSM and Transformer modules.
+- **Clamped Agent Steps (`mivi-server::routes::agent`)**: Clamped `max_steps` to `MAX_AGENT_STEPS_LIMIT = 50` to prevent unbounded execution loops.
+- **Re-exported Tensor Module (`mivi-core`)**: Re-exported `tensor.rs` primitives in `mivi-core::lib`.
+- **91 Total Passing Tests (100% Pass Rate)**: Verified full test suite across all 13 workspace crates.
+
+---
+
 ## [v0.2.1] - 2026-09-01
 
 ### FreeToken Semantic Anchors, Elastic Memory, Grammar Logit Masking, PLD & Anthropic API Compatibility

@@ -98,6 +98,7 @@ pub struct PrefixCache {
     max_chunks: usize,
     chunks: HashMap<u64, PrefixChunk>,
     lru_order: VecDeque<u64>,
+    total_memory_bytes: usize,
 }
 
 impl Default for PrefixCache {
@@ -114,6 +115,7 @@ impl PrefixCache {
             max_chunks: if max_chunks > 0 { max_chunks } else { DEFAULT_MAX_CACHED_CHUNKS },
             chunks: HashMap::with_capacity(max_chunks),
             lru_order: VecDeque::with_capacity(max_chunks),
+            total_memory_bytes: 0,
         }
     }
 
@@ -139,6 +141,7 @@ impl PrefixCache {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.lru_order.clear();
+        self.total_memory_bytes = 0;
     }
 
     /// Find the longest matching cached prefix for a given sequence of tokens.
@@ -196,10 +199,15 @@ impl PrefixCache {
         // Evict LRU chunk if at max capacity
         if self.chunks.len() >= self.max_chunks {
             if let Some(oldest_hash) = self.lru_order.pop_front() {
-                self.chunks.remove(&oldest_hash);
+                if let Some(evicted_chunk) = self.chunks.remove(&oldest_hash) {
+                    self.total_memory_bytes = self
+                        .total_memory_bytes
+                        .saturating_sub(evicted_chunk.state.memory_bytes());
+                }
             }
         }
 
+        let chunk_mem = state.memory_bytes();
         let chunk = PrefixChunk {
             chunk_index,
             hash,
@@ -209,21 +217,26 @@ impl PrefixCache {
 
         self.chunks.insert(hash, chunk);
         self.lru_order.push_back(hash);
+        self.total_memory_bytes += chunk_mem;
         hash
     }
 
-    /// Calculate total estimated memory consumption of all cached hybrid state snapshots in bytes.
+    /// Calculate total estimated memory consumption of all cached hybrid state snapshots in bytes (O(1)).
+    #[inline]
     pub fn memory_usage_bytes(&self) -> usize {
-        self.chunks.values().map(|c| c.state.memory_bytes()).sum()
+        self.total_memory_bytes
     }
 
-    /// Dynamically prune oldest LRU chunks until total memory is below `target_bytes`.
+    /// Dynamically prune oldest LRU chunks until total memory is below `target_bytes` (O(K)).
     /// Returns the number of chunks evicted.
     pub fn prune_to_bytes(&mut self, target_bytes: usize) -> usize {
         let mut evicted = 0;
-        while self.memory_usage_bytes() > target_bytes && !self.lru_order.is_empty() {
+        while self.total_memory_bytes > target_bytes && !self.lru_order.is_empty() {
             if let Some(oldest_hash) = self.lru_order.pop_front() {
-                if self.chunks.remove(&oldest_hash).is_some() {
+                if let Some(removed) = self.chunks.remove(&oldest_hash) {
+                    self.total_memory_bytes = self
+                        .total_memory_bytes
+                        .saturating_sub(removed.state.memory_bytes());
                     evicted += 1;
                 }
             }

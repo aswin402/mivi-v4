@@ -75,6 +75,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .allow_headers([
                     axum::http::header::CONTENT_TYPE,
                     axum::http::header::AUTHORIZATION,
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderName::from_static("anthropic-version"),
+                    axum::http::HeaderName::from_static("anthropic-beta"),
                 ]),
         )
         .layer(DefaultBodyLimit::max(max_body))
