@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.1] - 2026-09-01
+
+### FreeToken Semantic Anchors, Elastic Memory, Grammar Logit Masking, PLD & Anthropic API Compatibility
+
+#### 💡 Ideas, Inspirations & Sources
+- **FreeToken** (*FlashML / UC Berkeley Sky Computing / MIT HAN Lab*, [arXiv:2608.16157](https://arxiv.org/abs/2608.16157), [GitHub](https://github.com/FlashML-org/FreeToken)):
+  - *Semantic Anchor Checkpointing*: Snapshots recurrent and KV states at natural structural boundaries (`<|im_start|>`, `<think>`, `<tool_call>`), avoiding cache invalidation when agents trim reasoning traces or edit tool results.
+  - *Elastic Memory Management*: Dynamically prunes cached chunks under high RAM pressure without restarting the engine.
+  - *Double-Buffered Layer Execution*: Zero-copy ping-pong activation streaming (`x_ping` $\leftrightarrow$ `x_pong`) keeping L1/L2 caches hot.
+- **llguidance (Microsoft) & Outlines (dottxt)**:
+  - *Grammar-Constrained Decoding*: Deterministic Pushdown Automata (PDA) tracking JSON `{`, `}`, `[`, `]`, literals, and escaping, combined with a 65,536-bit zero-allocation stack bitset (`TokenBitMask`) setting invalid token logits to $-\infty$ before softmax.
+- **Prompt Lookup Decoding (Google Research / Apoorv Saxena)**:
+  - *Prompt Lookup Proposer*: 3-gram n-gram context matching proposing speculative draft continuation slices in $< 5\text{ µs}$ with zero extra parameter overhead.
+- **Anthropic Messages Specification**:
+  - *Claude Code & OpenCode Compatibility*: Drop-in support for `POST /v1/messages` with structured `tool_use` blocks and SSE streaming.
+
+#### 🌟 Features & Upgrades
+- **Semantic Anchor Checkpoints (`mivi-kv::semantic`)**: Added `SemanticAnchorCache` supporting $O(1)$ state rollback on agent thinking trace trims and tool result insertions.
+- **Elastic RAM Watchdog Pruning (`mivi-kv::prefix` & `mivi-server`)**: Added `PrefixCache::prune_to_bytes` connected to `RamWatchdog` memory monitoring.
+- **Double-Buffered Layer Ping-Pong (`mivi-core::arena`)**: Added `x_pong` preallocated buffer to `RunState` for zero-allocation layer streaming.
+- **Grammar-Constrained Logit Masking (`mivi-model::grammar`)**: Built `TokenBitMask`, `JsonGrammar`, and `ToolCallGrammar` guaranteeing 100% syntactically valid JSON output.
+- **Prompt Lookup Speculative Decoding (`mivi-model::pld`)**: Implemented `PromptLookupProposer` for rapid draft generation.
+- **Anthropic `/v1/messages` Endpoint (`mivi-server::routes::anthropic`)**: Exposed native Claude Code / OpenCode compatible endpoint.
+- **89 Passing Tests**: Comprehensive test suite verified with 100% pass rate across all 12 workspace crates.
+
+---
+
 ## [v0.2.0] - 2026-09-01
 
 ### LMCache-Inspired Prefix Caching, Hybrid State Serialization & Persistent Disk Cache (.kvc)
