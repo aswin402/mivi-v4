@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod disk;
 pub mod prefix;
+pub mod semantic;
 
 pub use cache::{KvCache, KvError, Result};
 pub use disk::{
@@ -12,4 +13,7 @@ pub use disk::{
 pub use prefix::{
     compute_chunk_hash, HybridStateSnapshot, PrefixCache, PrefixChunk, DEFAULT_MAX_CACHED_CHUNKS,
     PREFIX_CHUNK_SIZE,
+};
+pub use semantic::{
+    SemanticAnchor, SemanticAnchorCache, SemanticAnchorType, DEFAULT_MAX_SEMANTIC_ANCHORS,
 };

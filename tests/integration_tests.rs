@@ -639,3 +639,85 @@ fn test_disk_kvc_persistence_integration() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_semantic_anchor_checkpointing_and_rollback() {
+    let mut cache = mivi_kv::SemanticAnchorCache::new(16);
+    let mock_snapshot = mivi_kv::HybridStateSnapshot::new(32, vec![0.1; 64], vec![0.2; 64], vec![0.3; 16], vec![]);
+
+    let prompt_tokens: Vec<u32> = (1..=32).collect();
+    cache.insert_anchor(
+        mivi_kv::SemanticAnchorType::TurnAssistant,
+        32,
+        &prompt_tokens,
+        mock_snapshot.clone(),
+    );
+
+    assert_eq!(cache.len(), 1);
+
+    // Query with longer conversational token stream
+    let longer_stream: Vec<u32> = (1..=64).collect();
+    let (matched_pos, anchor) = cache.find_deepest_anchor(&longer_stream).expect("Should match semantic anchor");
+    assert_eq!(matched_pos, 32);
+    assert_eq!(anchor.anchor_type, mivi_kv::SemanticAnchorType::TurnAssistant);
+    assert_eq!(anchor.state, mock_snapshot);
+}
+
+#[tokio::test]
+async fn test_anthropic_messages_endpoint() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn(None);
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+
+    let anthropic_req = serde_json::json!({
+        "model": "mivi-v4-test",
+        "messages": [
+            {"role": "user", "content": "Tell me about Rust."}
+        ],
+        "max_tokens": 16,
+        "stream": false
+    });
+
+    let req = Request::builder()
+        .uri("/v1/messages")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&anthropic_req).unwrap()))
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["type"], "message");
+    assert_eq!(json["role"], "assistant");
+    assert!(json["content"].is_array());
+}
+
+#[test]
+fn test_elastic_memory_pruning_under_pressure() {
+    let mut cache = mivi_kv::PrefixCache::new(10, 64);
+    for i in 0..5 {
+        let chunk_tokens: Vec<u32> = (i * 64..(i + 1) * 64).collect();
+        let snapshot = mivi_kv::HybridStateSnapshot::new(
+            64,
+            vec![1.0; 1000],
+            vec![2.0; 1000],
+            vec![0.5; 100],
+            vec![],
+        );
+        cache.insert_chunk(i as u64, &chunk_tokens, i as usize, snapshot);
+    }
+
+    assert_eq!(cache.len(), 5);
+    let initial_memory = cache.memory_usage_bytes();
+    assert!(initial_memory > 0);
+
+    // Prune to half memory budget
+    let target = initial_memory / 2;
+    let evicted = cache.prune_to_bytes(target);
+    assert!(evicted > 0);
+    assert!(cache.memory_usage_bytes() <= target);
+}

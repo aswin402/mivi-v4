@@ -1,6 +1,7 @@
 //! HTTP route handlers and Axum router builder for mivi-server.
 
 pub mod agent;
+pub mod anthropic;
 pub mod chat;
 
 use crate::state::AppState;
@@ -31,6 +32,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     let protected_routes = Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/v1/messages", post(anthropic::anthropic_messages_handler))
         .route("/v1/mivi/agent", post(agent::run_agent_task));
 
     let protected_routes = if let Some(key) = auth_key {

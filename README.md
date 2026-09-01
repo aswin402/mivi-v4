@@ -13,7 +13,7 @@
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-blue.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-78%20passed%20(100%25)-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-89%20passed%20(100%25)-brightgreen.svg?style=flat-square)](tests/)
 [![Architecture](https://img.shields.io/badge/arch-Hybrid%20SSM%20%2B%20GQA%20Attention-blueviolet.svg?style=flat-square)](#-hybrid-ssm--attention-architecture)
 [![Memory](https://img.shields.io/badge/memory-%7E42--260%20MB%20RAM-purple.svg?style=flat-square)](#-memory-footprint--efficiency)
 [![Speed](https://img.shields.io/badge/throughput-46.6%20GFLOPS%20CPU-success.svg?style=flat-square)](#-performance--benchmarks)

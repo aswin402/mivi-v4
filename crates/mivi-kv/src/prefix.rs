@@ -212,6 +212,25 @@ impl PrefixCache {
         hash
     }
 
+    /// Calculate total estimated memory consumption of all cached hybrid state snapshots in bytes.
+    pub fn memory_usage_bytes(&self) -> usize {
+        self.chunks.values().map(|c| c.state.memory_bytes()).sum()
+    }
+
+    /// Dynamically prune oldest LRU chunks until total memory is below `target_bytes`.
+    /// Returns the number of chunks evicted.
+    pub fn prune_to_bytes(&mut self, target_bytes: usize) -> usize {
+        let mut evicted = 0;
+        while self.memory_usage_bytes() > target_bytes && !self.lru_order.is_empty() {
+            if let Some(oldest_hash) = self.lru_order.pop_front() {
+                if self.chunks.remove(&oldest_hash).is_some() {
+                    evicted += 1;
+                }
+            }
+        }
+        evicted
+    }
+
     /// Move a chunk hash to the back of the LRU queue.
     fn touch(&mut self, hash: &u64) {
         if let Some(pos) = self.lru_order.iter().position(|h| h == hash) {

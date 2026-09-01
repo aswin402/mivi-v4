@@ -25,6 +25,8 @@ pub struct ArenaConfig {
 pub struct RunState {
     // Current token hidden representation (dim)
     pub x: Box<[f32]>,
+    // Ping-pong double buffer for zero-copy layer handoff (dim)
+    pub x_pong: Box<[f32]>,
     // Branch / residual buffer 1 (dim)
     pub xb: Box<[f32]>,
     // Branch / residual buffer 2 (dim)
@@ -64,6 +66,7 @@ impl RunState {
     pub fn new(cfg: &ArenaConfig) -> Self {
         Self {
             x: vec![0.0f32; cfg.dim].into_boxed_slice(),
+            x_pong: vec![0.0f32; cfg.dim].into_boxed_slice(),
             xb: vec![0.0f32; cfg.dim].into_boxed_slice(),
             xb2: vec![0.0f32; cfg.dim].into_boxed_slice(),
             hb: vec![0.0f32; cfg.hidden_dim].into_boxed_slice(),
@@ -86,6 +89,7 @@ impl RunState {
     /// Reset recurrent states and working buffers between independent sequences.
     pub fn reset(&mut self) {
         self.x.fill(0.0);
+        self.x_pong.fill(0.0);
         self.xb.fill(0.0);
         self.xb2.fill(0.0);
         self.hb.fill(0.0);
