@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.0] - 2026-09-01
+
+### LMCache-Inspired Prefix Caching, Hybrid State Serialization & Persistent Disk Cache (.kvc)
+
+#### ⚡ Chunk-Based Prefix Caching (`mivi-kv::prefix`)
+- **64-Token Chunk Partitioning**: Implemented `PrefixCache` that partitions input token sequences into 64-token chunks and computes hierarchical 64-bit FNV-1a rolling hashes.
+- **$O(1)$ Instant Time-To-First-Token (TTFT)**: If an incoming prompt shares a prefix (such as a system prompt, tool schemas, or multi-turn history), the engine matches the prefix chunks, restores the recurrent states in sub-milliseconds, and skips forward-pass computation for all matched tokens.
+- **Bounded In-Memory LRU Eviction**: Manages cached chunk snapshots with LRU eviction under a fixed memory budget.
+
+#### 🧠 Hybrid SSM + Attention State Snapshotting (`mivi-model`)
+- **Dual-State Serialization**: Designed `HybridStateSnapshot` capturing both the **6 GQA Attention KV layers** and the **10 Gated ShortConv SSM 1D convolution rolling buffers** (`conv_states`).
+- **Seamless Prompt Prefill Hook**: Integrated `find_longest_prefix` into `Model::generate_tokens_incremental`, enabling automatic caching during prefill and zero-compute restoration on cache hits.
+
+#### 💾 Persistent On-Disk KV Cache (`.mivi/cache/*.kvc`)
+- **High-Performance Binary Format**: Designed `.kvc` disk format with `MIVIKVC1` magic headers, model checksum verification, token sequences, and raw float buffer storage.
+- **Instant Cross-Process State Loading**: Allows large documents, codebase context, and fixed system prompts to be saved to disk and loaded across server/CLI restarts without running forward passes.
+
+#### 🛠️ CLI & Task Runner Integration
+- **`mivi cache list` / `just cache-list`**: Displays all persisted `.kvc` files, token lengths, model hashes, and file sizes.
+- **`mivi cache clear` / `just cache-clear`**: Clears on-disk cache files to reclaim disk space.
+- **78 Total Passing Tests**: Expanded test suite with unit and integration tests covering chunk hashing, LRU eviction, state import/export, and disk roundtrips.
+
+---
+
 ## [v0.1.2] - 2026-08-31
 
 ### Hono-Style Minimal Logs, Resource Safety Watchdog, BOS Alignment & AI Agent Test Suite

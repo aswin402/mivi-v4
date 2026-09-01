@@ -13,7 +13,7 @@
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-blue.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-76%20passed%20(100%25)-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/tests-78%20passed%20(100%25)-brightgreen.svg?style=flat-square)](tests/)
 [![Architecture](https://img.shields.io/badge/arch-Hybrid%20SSM%20%2B%20GQA%20Attention-blueviolet.svg?style=flat-square)](#-hybrid-ssm--attention-architecture)
 [![Memory](https://img.shields.io/badge/memory-%7E42--260%20MB%20RAM-purple.svg?style=flat-square)](#-memory-footprint--efficiency)
 [![Speed](https://img.shields.io/badge/throughput-46.6%20GFLOPS%20CPU-success.svg?style=flat-square)](#-performance--benchmarks)
@@ -86,6 +86,11 @@ Mivi eliminates the need for heavyweight Python agent runtimes:
 - **Rich Telemetry**: Displays token count, duration, generation speed (tok/s), and real-time process RAM RSS.
 - **Slash Commands**: `/help`, `/clear`, `/history`, `/temp`, `/top_p`, `/rep`, `/thinking`, `/exit`.
 
+### 5. ⚡ LMCache-Inspired Prefix Caching & Disk Persistence
+- **$O(1)$ Instant Time-To-First-Token (TTFT)**: Input prompts are chunked into 64-token blocks and hashed with 64-bit rolling FNV-1a. Shared system prompts, tool schemas, and multi-turn prefixes hit the in-memory cache and skip forward passes.
+- **Hybrid State Snapshotting**: Automatically snapshots both the 6 Attention KV layers and 10 Gated ShortConv SSM convolution states (`conv_states`).
+- **On-Disk Persistence (`.mivi/cache/*.kvc`)**: Saves prefilled prompt states to disk, allowing instant zero-prefill startup across process restarts.
+
 ---
 
 ## 📦 Workspace Architecture (12 Modular Crates)
@@ -96,7 +101,7 @@ The codebase is organized into 12 cleanly isolated workspace crates:
 |---|---|---|
 | [`mivi-core`](crates/mivi-core) | `crates/mivi-core` | Zero-heap `RunState` arena, AVX2/NEON SIMD dispatch, RMSNorm, Softmax, RoPE cache, and brand constants. |
 | [`mivi-quant`](crates/mivi-quant) | `crates/mivi-quant` | Quantization kernels for **Q4_K_M**, **Q6_K**, **Q8_0**, and **F16** with parallel matrix-vector multipliers. |
-| [`mivi-kv`](crates/mivi-kv) | `crates/mivi-kv` | Selective-layer Key-Value cache with bounds checking and memory overflow safety. |
+| [`mivi-kv`](crates/mivi-kv) | `crates/mivi-kv` | Selective-layer KV cache, 64-token chunk prefix caching (`PrefixCache`), and `.kvc` on-disk state persistence. |
 | [`mivi-model`](crates/mivi-model) | `crates/mivi-model` | GGUF v3 file parser, LFM2.5 forward pass, FlashDecoding attention, Gated ShortConv SSM, and Min-P/Top-P sampler. |
 | [`mivi-tokenizer`](crates/mivi-tokenizer) | `crates/mivi-tokenizer` | GPT-2 byte bijection BPE tokenizer, vocabulary lookup, UTF-8 streaming decoder, and ChatML prompt templating. |
 | [`mivi-context`](crates/mivi-context) | `crates/mivi-context` | Persistent conversation store with LRU eviction and micro-VM for context operators. |
@@ -313,12 +318,12 @@ just test
 ```
 
 ```text
-running 76 tests across workspace:
-  - 15 integration tests (Server, Agent, VM, Tokenizer) ......... OK
-  - 1 PyTorch Oracle Golden Ground-Truth validation test ......... OK
-  - 60 unit tests (SIMD, Math, Quant, KV, Router, Tools) ......... OK
+running 78 tests across workspace:
+  - 17 integration tests (Server, Agent, VM, Tokenizer, Prefix Cache, Disk KVC) ... OK
+  - 1 PyTorch Oracle Golden Ground-Truth validation test .......................... OK
+  - 60 unit tests (SIMD, Math, Quant, KV, Router, Tools) .......................... OK
 
-test result: ok. 76 passed; 0 failed; finished in 100% success!
+test result: ok. 78 passed; 0 failed; finished in 100% success!
 ```
 
 ---
@@ -329,12 +334,14 @@ test result: ok. 76 passed; 0 failed; finished in 100% success!
 |---|---|
 | `just build` | Compile workspace in debug mode (max 3 jobs) |
 | `just build-release` | Compile optimized release binary |
-| `just test` | Run complete 76-test suite |
+| `just test` | Run complete 78-test suite |
 | `just clippy` | Run Clippy linter with `-D warnings` |
 | `just fmt-check` | Verify code formatting with `rustfmt` |
 | `just verify` | Run full quality gate (`fmt-check` + `clippy` + `test`) |
 | `just chat` | Launch interactive terminal chat REPL |
 | `just serve` | Start the OpenAI-compatible HTTP API server |
+| `just cache-list` | List all persistent on-disk `.kvc` prefix cache files |
+| `just cache-clear` | Clear all persistent on-disk `.kvc` prefix cache files |
 | `just doctor` | Check CPU SIMD features and execution environment |
 | `just bench` | Benchmark SIMD matrix-vector compute kernels |
 | `just info` | Inspect GGUF model metadata, hyperparameters, and tensors |
