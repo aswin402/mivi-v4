@@ -33,7 +33,8 @@ pub struct AnthropicRequest {
     #[serde(default)]
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
-    pub system: Option<String>,
+    #[serde(default)]
+    pub system: Option<serde_json::Value>,
     pub max_tokens: Option<usize>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -81,7 +82,19 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
     let mut prompt = String::new();
 
     // 1. System prompt
-    let mut system_text = req.system.clone().unwrap_or_default();
+    let mut system_text = match &req.system {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(blocks)) => {
+            let mut acc = String::new();
+            for b in blocks {
+                if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                    acc.push_str(t);
+                }
+            }
+            acc
+        }
+        _ => String::new(),
+    };
     if let Some(ref tools) = req.tools {
         if !tools.is_empty() {
             if !system_text.is_empty() {
@@ -203,6 +216,7 @@ pub async fn anthropic_messages_handler(
 
         let mid = message_id.clone();
         let mname = model_name.clone();
+        let input_tokens = (prompt.len() / 4).max(1);
 
         // 1. message_start and content_block_start
         let msg_start_event = Event::default().event("message_start").data(
@@ -215,7 +229,7 @@ pub async fn anthropic_messages_handler(
                     "model": mname,
                     "content": [],
                     "stop_reason": null,
-                    "usage": { "input_tokens": 15, "output_tokens": 0 }
+                    "usage": { "input_tokens": input_tokens, "output_tokens": 0 }
                 }
             })
             .to_string(),
@@ -280,7 +294,9 @@ pub async fn anthropic_messages_handler(
             Ok(msg_stop_event),
         ]));
 
-        Sse::new(full_stream).into_response()
+        Sse::new(full_stream)
+            .keep_alive(axum::response::sse::KeepAlive::default())
+            .into_response()
     } else {
         // Non-streaming JSON response
         match state
@@ -352,7 +368,7 @@ mod tests {
                 role: "user".to_string(),
                 content: serde_json::json!("Hello Mivi"),
             }],
-            system: Some("You are a helpful assistant.".to_string()),
+            system: Some(serde_json::json!("You are a helpful assistant.")),
             max_tokens: Some(128),
             temperature: Some(0.7),
             top_p: None,
@@ -363,6 +379,14 @@ mod tests {
         let chatml = convert_anthropic_to_chatml(&req);
         assert!(chatml.contains("<|im_start|>system\nYou are a helpful assistant.<|im_end|>"));
         assert!(chatml.contains("<|im_start|>user\nHello Mivi<|im_end|>"));
+
+        // Test polymorphic system block array
+        let mut req_blocks = req.clone();
+        req_blocks.system = Some(serde_json::json!([
+            {"type": "text", "text": "System block text."}
+        ]));
+        let chatml_blocks = convert_anthropic_to_chatml(&req_blocks);
+        assert!(chatml_blocks.contains("<|im_start|>system\nSystem block text.<|im_end|>"));
         assert!(chatml.ends_with("<|im_start|>assistant\n"));
     }
 }

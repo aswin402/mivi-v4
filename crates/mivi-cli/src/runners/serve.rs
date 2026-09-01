@@ -106,6 +106,7 @@ fn print_startup_banner(
     {GREEN}GET{RESET}   {DIM}/v1/mivi/status{RESET}
     {GREEN}GET{RESET}   {DIM}/v1/mivi/tools{RESET}
     {CYAN}POST{RESET}  {DIM}/v1/chat/completions{RESET}
+    {CYAN}POST{RESET}  {DIM}/v1/messages{RESET}
     {CYAN}POST{RESET}  {DIM}/v1/mivi/agent{RESET}
 "#,
         env!("CARGO_PKG_VERSION"),

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.3] - 2026-09-01
+
+### Universal Layer Norm Dequantization, Pratt Parser Sandboxing, Tool Feedback & API Polish
+
+#### 💡 Ideas, Inspirations & Sources
+- **Pratt Parsing & Defensive Compiler Engineering**:
+  - *Recursion Depth Guarding*: Enforced `MAX_PARSER_DEPTH = 128` recursion limit in `mivi-tools::builtins::calc_parser`, neutralizing potential stack exhaustion crashes from deeply nested malicious or hallucinated parentheses.
+- **Universal GGUF Quantization Handling**:
+  - *Multi-Type Norm Dequantization*: Replaced raw float slice assumption in `mivi-model::loader::resolve_f32_vec` with `mivi_quant::dequantize_slice`, enabling correct weight loading across GGUF models with F32, F16, or BF16 layer norms.
+- **Anthropic Messages Specification & Polymorphic Content**:
+  - *Polymorphic System Field*: Added dual parsing support in `mivi-server::routes::anthropic` for both raw `String` and structured `[{"type": "text", "text": "..."}]` content blocks as emitted by official Anthropic SDKs.
+  - *SSE Keep-Alive & Dynamic Token Estimation*: Configured SSE keep-alive heartbeat and dynamic input token estimation.
+- **Defensive Agent Sandboxing & Error Recovery**:
+  - *Resource Bounded Filesystem Tools*: Capped file reading (`MAX_FILE_READ_BYTES = 5MB`) and directory listings (`MAX_DIR_ENTRIES = 500`) to prevent out-of-memory crashes.
+  - *Actionable Tool Syntax Feedback*: Intercepted `__parse_error` in `ToolBroker::execute` to route explicit JSON syntax errors back to the model, allowing autonomous error recovery.
+- **Modern OpenAI SDK Compatibility**:
+  - *`max_completion_tokens` Field Alias*: Added `#[serde(alias = "max_completion_tokens")]` to `ChatCompletionRequest`.
+
+#### 🛠️ Features, Fixes & Polish
+- **Harmonized BOS Injection (`mivi-model`)**: Aligned `generate_tokens_incremental` with ChatML heuristics to prevent accidental leading BOS tokens.
+- **Dynamic Output Norm Epsilon (`mivi-model`)**: Passed `cfg.rms_norm_eps` in final output projection norm.
+- **Banner & Route Transparency (`mivi-cli`)**: Added `POST /v1/messages` to the server startup banner.
+- **Adaptive Rayon Thread Pool (`main.rs`)**: Sized Rayon worker threads dynamically from available CPU cores while respecting `MIVI_THREADS` / `RAYON_NUM_THREADS` and `RUST_LOG`.
+- **92 Total Passing Tests (100% Pass Rate)**: Verified across all 13 workspace crates.
+
+---
+
 ## [v0.2.2] - 2026-09-01
 
 ### Codebase Hardening, Full Specification Compliance, Panic Elimination & Audit Fixes

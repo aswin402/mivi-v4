@@ -5,14 +5,25 @@ use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(filter)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
-    // Initialize Rayon thread pool for low CPU resource usage (3 worker threads)
+    // Initialize Rayon thread pool (respects MIVI_THREADS/RAYON_NUM_THREADS or clamps available CPU cores to [1, 8])
+    let num_threads = std::env::var("MIVI_THREADS")
+        .or_else(|_| std::env::var("RAYON_NUM_THREADS"))
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().clamp(1, 8))
+                .unwrap_or(3)
+        });
     let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(3)
+        .num_threads(num_threads)
         .build_global();
 
     let cli = Cli::parse();

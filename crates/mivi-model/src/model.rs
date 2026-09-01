@@ -1,6 +1,6 @@
 use crate::config::{
     BlockType, GenerationConfig, ModelConfig, DEFAULT_MAX_LORA_RANK, DEFAULT_N_EXPERTS,
-    DEFAULT_RMS_NORM_EPS, RECENT_TOKENS_WINDOW,
+    RECENT_TOKENS_WINDOW,
 };
 use crate::gguf::{GgufFile, GgufValue};
 use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve_model_weights};
@@ -242,7 +242,7 @@ impl Model {
                 &mut self.state.xb,
                 &self.state.x,
                 final_norm,
-                DEFAULT_RMS_NORM_EPS,
+                self.config.rms_norm_eps,
             );
         } else {
             self.state.xb.copy_from_slice(&self.state.x);
@@ -371,7 +371,7 @@ impl Model {
         let prompt_tokens: &[u32] = if start_pos == 0 {
             let add_bos = match self.gguf.metadata.get("tokenizer.ggml.add_bos_token") {
                 Some(GgufValue::Bool(b)) => *b,
-                _ => true,
+                _ => false,
             };
             let bos_id = self
                 .gguf

@@ -39,8 +39,21 @@ where
     }
 }
 
+const MAX_FILE_READ_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
+const MAX_DIR_ENTRIES: usize = 500;
+
 pub fn handle_read_file(args: serde_json::Value, ws: &Path) -> ToolResult {
     with_safe_path("read_file", &args, "path", ws, None, |target, path_str| {
+        let meta = std::fs::metadata(target)
+            .map_err(|e| format!("Failed to read metadata for '{}': {}", path_str, e))?;
+        if meta.len() > MAX_FILE_READ_BYTES {
+            return Err(format!(
+                "File '{}' size ({} bytes) exceeds maximum allowed read limit ({} bytes)",
+                path_str,
+                meta.len(),
+                MAX_FILE_READ_BYTES
+            ));
+        }
         std::fs::read_to_string(target)
             .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))
     })
@@ -81,7 +94,12 @@ pub fn handle_list_dir(args: serde_json::Value, ws: &Path) -> ToolResult {
             let entries = std::fs::read_dir(target)
                 .map_err(|e| format!("Failed to list dir '{}': {}", path_str, e))?;
             let mut names = Vec::new();
+            let mut truncated = false;
             for entry in entries.flatten() {
+                if names.len() >= MAX_DIR_ENTRIES {
+                    truncated = true;
+                    break;
+                }
                 if let Ok(file_type) = entry.file_type() {
                     let kind = if file_type.is_dir() { "dir" } else { "file" };
                     let clean_name: String = entry
@@ -94,6 +112,9 @@ pub fn handle_list_dir(args: serde_json::Value, ws: &Path) -> ToolResult {
                 }
             }
             names.sort();
+            if truncated {
+                names.push(format!("... [truncated: showing first {} entries]", MAX_DIR_ENTRIES));
+            }
             Ok(names.join("\n"))
         },
     )

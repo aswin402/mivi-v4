@@ -25,6 +25,18 @@ impl ToolBroker {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
+        if call.name == crate::schema::PARSE_ERROR_TOOL_NAME {
+            let error_msg = call
+                .arguments
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Malformed JSON syntax in tool call");
+            return ToolResult::err(
+                call.name.clone(),
+                format!("Tool call parse error: {}", error_msg),
+            );
+        }
+
         let handler = {
             let map = self.handlers.read().await;
             map.get(&call.name).cloned()

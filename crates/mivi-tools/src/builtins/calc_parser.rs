@@ -65,14 +65,17 @@ pub fn tokenize_expr(input: &str) -> Result<Vec<MathToken>, String> {
     Ok(tokens)
 }
 
+const MAX_PARSER_DEPTH: usize = 128;
+
 pub struct PrattParser<'a> {
     tokens: &'a [MathToken],
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> PrattParser<'a> {
     pub fn new(tokens: &'a [MathToken]) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, depth: 0 }
     }
 
     pub fn peek(&self) -> Option<&MathToken> {
@@ -103,6 +106,16 @@ impl<'a> PrattParser<'a> {
     }
 
     pub fn parse_expr(&mut self, min_bp: u8) -> Result<f64, String> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err("Expression nesting depth limit exceeded (max 128)".to_string());
+        }
+        self.depth += 1;
+        let res = self.parse_expr_internal(min_bp);
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_expr_internal(&mut self, min_bp: u8) -> Result<f64, String> {
         let mut lhs = match self.next_token() {
             Some(MathToken::Number(n)) => *n,
             Some(MathToken::Minus) => {
@@ -184,5 +197,20 @@ mod tests {
         assert_eq!(evaluate_expression("3 - -5").unwrap(), 8.0);
         assert_eq!(evaluate_expression("-(3 * 2) + -4").unwrap(), -10.0);
         assert_eq!(evaluate_expression("100 / 4 / 5").unwrap(), 5.0);
+    }
+
+    #[test]
+    fn test_calculator_recursion_depth_limit() {
+        let mut deeply_nested = String::new();
+        for _ in 0..150 {
+            deeply_nested.push('(');
+        }
+        deeply_nested.push('1');
+        for _ in 0..150 {
+            deeply_nested.push(')');
+        }
+        let res = evaluate_expression(&deeply_nested);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("depth limit exceeded"));
     }
 }

@@ -10,7 +10,7 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
-    #[serde(default)]
+    #[serde(default, alias = "max_completion_tokens")]
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub stream: Option<bool>,

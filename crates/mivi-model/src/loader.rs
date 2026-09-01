@@ -241,10 +241,13 @@ pub fn resolve_tensor(gguf: &GgufFile, name: &str) -> Result<QuantizedTensor> {
     })
 }
 
-/// Resolve an unquantized f32 tensor vector by name.
+/// Resolve a tensor vector by name and dequantize to f32 (supporting F32, F16, and BF16 formats).
 pub fn resolve_f32_vec(gguf: &GgufFile, name: &str) -> Result<Box<[f32]>> {
-    let (_, raw) = get_tensor_entry(gguf, name)?;
-    Ok(safe_f32_slice(raw)?.to_vec().into_boxed_slice())
+    let (info, raw) = get_tensor_entry(gguf, name)?;
+    let num_elements = info.dims.iter().product::<usize>();
+    let mut out = vec![0.0f32; num_elements];
+    mivi_quant::dequantize_slice(info.ggml_type, raw, &mut out)?;
+    Ok(out.into_boxed_slice())
 }
 
 #[inline]
