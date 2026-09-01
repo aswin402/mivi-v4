@@ -12,6 +12,7 @@ mivi-model.workspace = true
 mivi-quant.workspace = true
 mivi-tools.workspace = true
 mivi-tokenizer.workspace = true
+mivi-kv.workspace = true
 mivi-server.workspace = true
 mivi-agent.workspace = true
 clap.workspace = true

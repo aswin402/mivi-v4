@@ -54,6 +54,7 @@ pub struct Model {
     pub sampler: Sampler,
     pub active_adapters: ActiveAdapters,
     pub rope_cache: mivi_core::RopeCache,
+    pub prefix_cache: mivi_kv::PrefixCache,
 }
 
 impl Model {
@@ -159,6 +160,7 @@ impl Model {
             sampler,
             active_adapters,
             rope_cache,
+            prefix_cache: mivi_kv::PrefixCache::default(),
         })
     }
 
@@ -391,11 +393,64 @@ impl Model {
 
         let n_prompt = prompt_tokens.len();
 
-        // Prefill new prompt tokens: skip logits computation for all except the last prompt token
-        for (i, &tok) in prompt_tokens.iter().enumerate() {
+        // 1. Check hierarchical prefix cache if starting from sequence position 0
+        let mut start_prefill_idx = 0;
+        let mut chained_hash = 0u64;
+
+        if start_pos == 0 {
+            if let Some((matched_len, chunk)) = self.prefix_cache.find_longest_prefix(prompt_tokens) {
+                if matched_len > 0 && matched_len <= prompt_tokens.len() {
+                    if self
+                        .kv_cache
+                        .import_state(matched_len, &chunk.state.k_cache, &chunk.state.v_cache)
+                        .is_ok()
+                    {
+                        self.state
+                            .import_ssm_states(&chunk.state.ssm_conv_states, &chunk.state.ssm_hidden_states);
+                        start_prefill_idx = matched_len;
+                        chained_hash = chunk.hash;
+                    }
+                }
+            }
+        }
+
+        // If the entire prompt matched the prefix cache, we only need to compute the last token's forward step
+        // to populate the logits for the initial generation step.
+        if start_pos == 0 && start_prefill_idx >= n_prompt && n_prompt > 0 {
+            start_prefill_idx = n_prompt - 1;
+        }
+
+        // 2. Prefill new prompt tokens (skipping already-cached prefix tokens)
+        for i in start_prefill_idx..n_prompt {
+            let tok = prompt_tokens[i];
             let cur_pos = start_pos + i;
             let is_last = i + 1 == n_prompt;
             let _ = self.forward_step(tok, cur_pos, is_last)?;
+
+            // If we reached a chunk boundary (e.g. 64, 128, 192), record a snapshot into PrefixCache
+            if start_pos == 0 && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0 {
+                let chunk_idx = (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE - 1;
+                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
+
+                let (k_exp, v_exp) = self.kv_cache.export_state(cur_pos + 1);
+                let (conv_exp, ssm_exp) = self.state.export_ssm_states();
+                let snapshot = mivi_kv::HybridStateSnapshot::new(
+                    cur_pos + 1,
+                    k_exp,
+                    v_exp,
+                    conv_exp,
+                    ssm_exp,
+                );
+
+                chained_hash = self.prefix_cache.insert_chunk(
+                    chained_hash,
+                    chunk_tokens,
+                    chunk_idx,
+                    snapshot,
+                );
+            }
         }
         let mut pos = start_pos + n_prompt;
 

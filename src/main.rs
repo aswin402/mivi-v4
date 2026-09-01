@@ -72,6 +72,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Bench { model } => {
             mivi_cli::run_bench(model)?;
         }
+        Commands::Cache { action } => match action {
+            mivi_cli::commands::CacheCommands::List { dir } => {
+                mivi_cli::run_cache_list(dir)?;
+            }
+            mivi_cli::commands::CacheCommands::Clear { dir } => {
+                mivi_cli::run_cache_clear(dir)?;
+            }
+        },
     }
 
     Ok(())

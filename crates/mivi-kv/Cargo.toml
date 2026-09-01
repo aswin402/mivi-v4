@@ -11,4 +11,5 @@ mivi-core.workspace = true
 mivi-quant.workspace = true
 thiserror.workspace = true
 half.workspace = true
+byteorder.workspace = true
 tracing.workspace = true

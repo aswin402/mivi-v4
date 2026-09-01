@@ -8,6 +8,7 @@ use mivi_context::{ContextOp, ContextStore, ContextVm};
 use mivi_router::{IntentClassifier, TaskFamily};
 use mivi_server::{create_router, AppState, ChatCompletionRequest, MessageDto};
 use mivi_tools::{get_builtin_tool_definitions, register_builtin_tools, ToolBroker, ToolCall};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -572,4 +573,69 @@ async fn test_server_blocking_chat_with_tool_calls_extraction() {
         .unwrap();
     let json_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(json_res["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn test_prefix_caching_hybrid_state_acceleration() {
+    let model_path = PathBuf::from("models/mivi-v4-q4_k_m.gguf");
+    if !model_path.exists() {
+        println!("Skipping real model prefix cache test: model file not found");
+        return;
+    }
+
+    let mut model = mivi_model::Model::load(&model_path).expect("Failed to load model");
+    model.sampler.config.temperature = 0.0;
+
+    // Create a long prompt with >= 64 tokens (1 full chunk)
+    let long_system_prefix = "You are Mivi, an intelligent, concise, and helpful AI assistant designed for high-performance software engineering and systems programming in pure Rust. Always write clean code, follow standard formatting practices, verify all edge cases, and explain your technical reasoning clearly and concisely to the developer.";
+    let prompt_a = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n", long_system_prefix);
+
+    // Turn 1: Fresh prompt, fills prefix cache
+    model.reset_context();
+    let resp_1 = model.generate(&prompt_a, 16).expect("Generation 1 failed");
+    assert!(!resp_1.is_empty());
+    assert!(model.prefix_cache.len() >= 1, "PrefixCache must have cached at least 1 chunk");
+
+    // Turn 2: Same long system prefix, new user question
+    let prompt_b = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nWhat is 3+3?<|im_end|>\n<|im_start|>assistant\n", long_system_prefix);
+    model.reset_context();
+    let resp_2 = model.generate(&prompt_b, 16).expect("Generation 2 with prefix cache failed");
+    assert!(!resp_2.is_empty());
+}
+
+#[test]
+fn test_disk_kvc_persistence_integration() {
+    let tmp_dir = std::env::temp_dir().join(format!("mivi_kvc_integ_{}", std::process::id()));
+    let file_path = tmp_dir.join("system_prompt.kvc");
+
+    let tokens: Vec<u32> = (1..=128).collect();
+    let snapshot = mivi_kv::HybridStateSnapshot::new(
+        128,
+        vec![1.0; 128 * 4],
+        vec![2.0; 128 * 4],
+        vec![0.5; 32],
+        vec![],
+    );
+    let model_hash = 0xDEAD_BEEF_CAFE_BABE;
+
+    // Save
+    assert!(mivi_kv::save_to_disk(&file_path, &tokens, &snapshot, model_hash).is_ok());
+
+    // List
+    let files = mivi_kv::list_cached_files(Some(&tmp_dir)).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].token_count, 128);
+    assert_eq!(files[0].model_hash, model_hash);
+
+    // Load
+    let (loaded_tokens, loaded_snapshot) = mivi_kv::load_from_disk(&file_path, Some(model_hash)).unwrap();
+    assert_eq!(loaded_tokens, tokens);
+    assert_eq!(loaded_snapshot, snapshot);
+
+    // Clear
+    let removed = mivi_kv::clear_cache_dir(Some(&tmp_dir)).unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(mivi_kv::list_cached_files(Some(&tmp_dir)).unwrap().len(), 0);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

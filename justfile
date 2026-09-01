@@ -81,6 +81,14 @@ bench:
 generate-fixture:
     python3 training/export/generate_fixture.py
 
+# List all persistent on-disk .kvc prefix cache files
+cache-list:
+    cargo run --release --jobs 3 -- cache list
+
+# Clear all persistent on-disk .kvc prefix cache files
+cache-clear:
+    cargo run --release --jobs 3 -- cache clear
+
 # ------------------------------------------------------------------------------
 # Maintenance & Cleanup
 # ------------------------------------------------------------------------------

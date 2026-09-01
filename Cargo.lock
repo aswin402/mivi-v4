@@ -744,6 +744,7 @@ dependencies = [
  "clap",
  "mivi-agent",
  "mivi-core",
+ "mivi-kv",
  "mivi-model",
  "mivi-quant",
  "mivi-server",
@@ -779,6 +780,7 @@ dependencies = [
 name = "mivi-kv"
 version = "0.1.2"
 dependencies = [
+ "byteorder",
  "half",
  "mivi-core",
  "mivi-quant",

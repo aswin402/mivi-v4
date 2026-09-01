@@ -205,6 +205,66 @@ impl KvCache {
         let offset = (cache_layer * self.max_seq_len + pos) * self.kv_dim;
         std::slice::from_raw_parts(self.v_cache.as_ptr().add(offset), self.kv_dim)
     }
+
+    /// Returns the number of layers allocated in this KV cache.
+    #[inline]
+    pub fn n_allocated_layers(&self) -> usize {
+        let mut max_idx = 0;
+        let mut count = 0;
+        for &idx in &self.layer_map {
+            if idx != usize::MAX {
+                count += 1;
+                max_idx = max_idx.max(idx + 1);
+            }
+        }
+        max_idx.max(count)
+    }
+
+    /// Export the KV cache memory up to `pos` tokens for state snapshotting.
+    pub fn export_state(&self, pos: usize) -> (Vec<f32>, Vec<f32>) {
+        let n_alloc = self.n_allocated_layers();
+        let target_pos = pos.min(self.max_seq_len);
+        let mut k_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
+        let mut v_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
+
+        for cache_layer in 0..n_alloc {
+            let start = cache_layer * self.max_seq_len * self.kv_dim;
+            let end = start + target_pos * self.kv_dim;
+            if end <= self.k_cache.len() {
+                k_out.extend_from_slice(&self.k_cache[start..end]);
+                v_out.extend_from_slice(&self.v_cache[start..end]);
+            }
+        }
+
+        (k_out, v_out)
+    }
+
+    /// Import a previously exported KV cache memory slice up to `pos` tokens.
+    pub fn import_state(&mut self, pos: usize, k_data: &[f32], v_data: &[f32]) -> Result<()> {
+        let n_alloc = self.n_allocated_layers();
+        let target_pos = pos.min(self.max_seq_len);
+        let expected_elements = n_alloc * target_pos * self.kv_dim;
+
+        if k_data.len() != expected_elements || v_data.len() != expected_elements {
+            return Err(KvError::DimMismatch {
+                expected: expected_elements,
+                got: k_data.len(),
+            });
+        }
+
+        for cache_layer in 0..n_alloc {
+            let start = cache_layer * self.max_seq_len * self.kv_dim;
+            let end = start + target_pos * self.kv_dim;
+            let src_start = cache_layer * target_pos * self.kv_dim;
+            let src_end = src_start + target_pos * self.kv_dim;
+
+            self.k_cache[start..end].copy_from_slice(&k_data[src_start..src_end]);
+            self.v_cache[start..end].copy_from_slice(&v_data[src_start..src_end]);
+        }
+
+        self.current_pos = target_pos;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

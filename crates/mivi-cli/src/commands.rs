@@ -74,4 +74,23 @@ pub enum Commands {
         #[arg(short, long)]
         model: Option<PathBuf>,
     },
+    /// Manage on-disk persistent KV cache files (.kvc)
+    Cache {
+        #[command(subcommand)]
+        action: CacheCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheCommands {
+    /// List all persisted .kvc prefix cache files on disk
+    List {
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+    },
+    /// Clear all persisted .kvc prefix cache files from disk
+    Clear {
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+    },
 }

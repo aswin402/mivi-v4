@@ -102,4 +102,19 @@ impl RunState {
         self.shortconv_in.fill(0.0);
         self.lora_down.fill(0.0);
     }
+
+    /// Export SSM recurrent state buffers for hybrid prefix caching and snapshotting.
+    pub fn export_ssm_states(&self) -> (Vec<f32>, Vec<f32>) {
+        (self.conv_states.to_vec(), self.ssm_states.to_vec())
+    }
+
+    /// Import previously saved SSM recurrent state buffers.
+    pub fn import_ssm_states(&mut self, conv: &[f32], ssm: &[f32]) {
+        if conv.len() == self.conv_states.len() {
+            self.conv_states.copy_from_slice(conv);
+        }
+        if ssm.len() == self.ssm_states.len() {
+            self.ssm_states.copy_from_slice(ssm);
+        }
+    }
 }
