@@ -65,6 +65,19 @@ impl Sampler {
         (r >> 8) as f32 / F32_FROM_U24
     }
 
+    /// Sample token index applying an optional grammar bitmask prior to sampling.
+    pub fn sample_with_mask(
+        &mut self,
+        logits: &mut [f32],
+        recent_tokens: &[u32],
+        mask: Option<&crate::grammar::TokenBitMask>,
+    ) -> u32 {
+        if let Some(mask) = mask {
+            mask.apply_to_logits(logits);
+        }
+        self.sample(logits, recent_tokens)
+    }
+
     /// Sample token index from unnormalized logits without per-token heap allocations.
     pub fn sample(&mut self, logits: &mut [f32], recent_tokens: &[u32]) -> u32 {
         if self.config.temperature <= 0.0 {

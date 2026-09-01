@@ -26,6 +26,46 @@ pub fn dequantize_q8_0_slice(bytes: &[u8], out: &mut [f32]) {
     crate::types::dequantize_blocks(bytes, out, Q8_0_BYTES, Q8_0_BLOCK_SIZE, dequantize_q8_0);
 }
 
+/// Quantize 32 float elements into one Q8_0 block (34 bytes: 2 bytes f16 scale + 32 i8 values).
+#[inline]
+pub fn quantize_f32_to_q8_0_block(src: &[f32], dst_block: &mut [u8]) {
+    assert!(src.len() >= Q8_0_BLOCK_SIZE, "Source float slice too small");
+    assert!(dst_block.len() >= Q8_0_BYTES, "Destination block buffer too small");
+
+    let mut amax = 0.0f32;
+    for &val in &src[..Q8_0_BLOCK_SIZE] {
+        let abs = val.abs();
+        if abs > amax {
+            amax = abs;
+        }
+    }
+
+    let d = amax / 127.0;
+    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+
+    let d_f16 = f16::from_f32(d);
+    let d_bytes = d_f16.to_le_bytes();
+    dst_block[0] = d_bytes[0];
+    dst_block[1] = d_bytes[1];
+
+    for i in 0..Q8_0_BLOCK_SIZE {
+        let q = (src[i] * id).round().clamp(-128.0, 127.0) as i8;
+        dst_block[2 + i] = q as u8;
+    }
+}
+
+/// Compute scalar dot product between f32 Query block and Q8_0 Key block.
+#[inline]
+pub fn dot_q8_0_f32(q: &[f32], k_block: &[u8]) -> f32 {
+    let d = f16::from_le_bytes([k_block[0], k_block[1]]).to_f32();
+    let mut sum = 0.0f32;
+    for i in 0..Q8_0_BLOCK_SIZE {
+        let k_val = (k_block[2 + i] as i8) as f32;
+        sum += q[i] * k_val;
+    }
+    sum * d
+}
+
 /// Checked matvec for Q8_0 weights returning QuantError on dimension mismatch.
 pub fn try_matvec_q8_0(
     out: &mut [f32],
@@ -180,5 +220,32 @@ mod tests {
         matvec_q8_0(&mut out, &weights, &x, n, dim);
 
         assert!((out[0] - 64.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_q8_0_quantize_and_dot_product() {
+        let mut src = [0.0f32; 32];
+        for i in 0..32 {
+            src[i] = (i as f32) - 16.0;
+        }
+
+        let mut block = [0u8; Q8_0_BYTES];
+        quantize_f32_to_q8_0_block(&src, &mut block);
+
+        let mut dequant = [0.0f32; 32];
+        dequantize_q8_0(&block, &mut dequant);
+
+        // Check quantization error is low (< 0.2 error on max range 16.0)
+        for i in 0..32 {
+            assert!((src[i] - dequant[i]).abs() < 0.25);
+        }
+
+        // Test dot product against itself
+        let dot = dot_q8_0_f32(&src, &block);
+        let mut expected_dot = 0.0f32;
+        for i in 0..32 {
+            expected_dot += src[i] * dequant[i];
+        }
+        assert!((dot - expected_dot).abs() < 1e-3);
     }
 }

@@ -16,8 +16,8 @@ pub use q6_k::{
     Q6_K_BYTES,
 };
 pub use q8_0::{
-    dequantize_q8_0, dequantize_q8_0_slice, matvec_q8_0, try_matvec_q8_0, Q8_0_BLOCK_SIZE,
-    Q8_0_BYTES,
+    dequantize_q8_0, dequantize_q8_0_slice, dot_q8_0_f32, matvec_q8_0, quantize_f32_to_q8_0_block,
+    try_matvec_q8_0, Q8_0_BLOCK_SIZE, Q8_0_BYTES,
 };
 pub use types::{
     parallel_row_matvec, validate_matvec_args, GgmlType, QuantError, Result, PARALLEL_CHUNK_SIZE,
