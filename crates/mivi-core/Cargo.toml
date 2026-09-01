@@ -9,3 +9,4 @@ description = "Core tensor operations, SIMD acceleration, RunState memory arena,
 [dependencies]
 rayon.workspace = true
 thiserror.workspace = true
+serde.workspace = true

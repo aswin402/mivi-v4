@@ -144,8 +144,25 @@ impl Model {
         let tokenizer = Tokenizer::new(vocab, merges);
         let sampler = Sampler::new(gen_config);
         let active_adapters = ActiveAdapters::new();
-        let rope_cache =
-            mivi_core::RopeCache::new(config.head_dim, working_seq_len, config.rope_base);
+        let rope_scaling = if working_seq_len > 4096 {
+            let scale = working_seq_len as f32 / 4096.0;
+            mivi_core::rope::RopeScaling::YaRN {
+                scale,
+                orig_max_seq_len: 4096,
+                extrapolation_factor: 1.0,
+                attn_factor: 1.0,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            }
+        } else {
+            mivi_core::rope::RopeScaling::None
+        };
+        let rope_cache = mivi_core::RopeCache::new_with_scaling(
+            config.head_dim,
+            working_seq_len,
+            config.rope_base,
+            rope_scaling,
+        );
 
         Ok(Self {
             config: ModelConfig {

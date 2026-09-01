@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -10,11 +11,36 @@ pub enum RopeError {
 
 pub type Result<T> = std::result::Result<T, RopeError>;
 
+/// Rotary position embedding scaling strategy for long-context extension.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum RopeScaling {
+    /// Standard unscaled RoPE.
+    None,
+    /// Linear frequency scaling (pos / scale).
+    Linear { scale: f32 },
+    /// YaRN (Yet another RoPE extensioN) with NTK-aware frequency interpolation.
+    YaRN {
+        scale: f32,
+        orig_max_seq_len: usize,
+        extrapolation_factor: f32,
+        attn_factor: f32,
+        beta_fast: f32,
+        beta_slow: f32,
+    },
+}
+
+impl Default for RopeScaling {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RopeCache {
     pub head_dim: usize,
     pub half_dim: usize,
     pub max_seq_len: usize,
+    pub scaling: RopeScaling,
     pub cos_table: Box<[f32]>,
     pub sin_table: Box<[f32]>,
 }
@@ -22,11 +48,54 @@ pub struct RopeCache {
 impl RopeCache {
     /// Precomputes the full sin/cos lookup table for sequence lengths up to `max_seq_len`.
     pub fn new(head_dim: usize, max_seq_len: usize, rope_base: f32) -> Self {
+        Self::new_with_scaling(head_dim, max_seq_len, rope_base, RopeScaling::None)
+    }
+
+    /// Precomputes RoPE tables with explicit scaling strategy (e.g. YaRN or Linear).
+    pub fn new_with_scaling(
+        head_dim: usize,
+        max_seq_len: usize,
+        rope_base: f32,
+        scaling: RopeScaling,
+    ) -> Self {
         assert_eq!(head_dim % 2, 0, "head_dim must be even for RoPE");
         let half_dim = head_dim / 2;
 
         let inv_freq: Vec<f32> = (0..half_dim)
-            .map(|i| 1.0 / rope_base.powf((2 * i) as f32 / head_dim as f32))
+            .map(|i| {
+                let base_freq = 1.0 / rope_base.powf((2 * i) as f32 / head_dim as f32);
+                match scaling {
+                    RopeScaling::None => base_freq,
+                    RopeScaling::Linear { scale } => {
+                        if scale > 0.0 {
+                            base_freq / scale
+                        } else {
+                            base_freq
+                        }
+                    }
+                    RopeScaling::YaRN {
+                        scale,
+                        orig_max_seq_len: _,
+                        extrapolation_factor: _,
+                        attn_factor: _,
+                        beta_fast,
+                        beta_slow,
+                    } => {
+                        if scale <= 1.0 {
+                            base_freq
+                        } else {
+                            // YaRN ramp: interpolate between unscaled high-freq and scaled low-freq
+                            let low_rot = 2.0 * std::f32::consts::PI;
+                            let high_rot = 2.0 * std::f32::consts::PI;
+                            let wavelength = 2.0 * std::f32::consts::PI / base_freq;
+                            let r = (wavelength - low_rot) / (high_rot - low_rot).max(1.0);
+                            let ramp = (r.clamp(0.0, 1.0) * (beta_slow - beta_fast) + beta_fast).clamp(0.0, 1.0);
+                            let scaled_freq = base_freq / scale;
+                            (1.0 - ramp) * base_freq + ramp * scaled_freq
+                        }
+                    }
+                }
+            })
             .collect();
 
         let total_elements = max_seq_len * half_dim;
@@ -47,6 +116,7 @@ impl RopeCache {
             head_dim,
             half_dim,
             max_seq_len,
+            scaling,
             cos_table: cos_table.into_boxed_slice(),
             sin_table: sin_table.into_boxed_slice(),
         }
@@ -177,6 +247,35 @@ mod tests {
             assert!((q1[i] - q2[i]).abs() < 1e-5);
             assert!((k1[i] - k2[i]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn test_rope_scaling_yarn_and_linear_64k() {
+        let head_dim = 64;
+        let max_seq_len = 65536;
+        let rope_base = 10000.0;
+
+        let yarn_cache = RopeCache::new_with_scaling(
+            head_dim,
+            max_seq_len,
+            rope_base,
+            RopeScaling::YaRN {
+                scale: 16.0,
+                orig_max_seq_len: 4096,
+                extrapolation_factor: 1.0,
+                attn_factor: 1.0,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            },
+        );
+
+        let mut q = vec![1.0f32; head_dim];
+        let mut k = vec![1.0f32; head_dim];
+
+        // Test at maximum 64K position
+        assert!(yarn_cache.try_apply(&mut q, &mut k, 65535, 1, 1).is_ok());
+        assert!(q.iter().all(|&v| v.is_finite()));
+        assert!(k.iter().all(|&v| v.is_finite()));
     }
 
     #[test]

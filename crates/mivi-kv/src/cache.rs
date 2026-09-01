@@ -109,6 +109,18 @@ impl KvCache {
         self.max_seq_len
     }
 
+    /// Returns the maximum sequence capacity in tokens.
+    #[inline]
+    pub fn capacity_tokens(&self) -> usize {
+        self.max_seq_len
+    }
+
+    /// Returns the exact memory footprint in bytes allocated for this KV cache.
+    #[inline]
+    pub fn memory_bytes(&self) -> usize {
+        (self.k_cache.len() + self.v_cache.len()) * std::mem::size_of::<f32>()
+    }
+
     /// Reset cache position to start of sequence without expensive memory clearing.
     pub fn reset(&mut self) {
         self.current_pos = 0;
@@ -308,5 +320,17 @@ mod tests {
         assert!(kv.store(0, 0, &k, &v).is_err());
         assert!(kv.store(1, 0, &k, &v).is_err());
         assert!(kv.store(3, 0, &k, &v).is_err());
+    }
+
+    #[test]
+    fn test_kv_cache_64k_memory_calculation() {
+        // 16 layers (6 attention layers), 65,536 tokens (64k), kv_dim=512
+        let attention_layers = vec![2, 5, 8, 11, 13, 15];
+        let kv = KvCache::try_new_selective(16, 65536, 512, &attention_layers).unwrap();
+
+        assert_eq!(kv.capacity_tokens(), 65536);
+        assert_eq!(kv.n_allocated_layers(), 6);
+        // 6 layers * 65536 tokens * 512 dim * 4 bytes * 2 (K+V) = 1,610,612,736 bytes (~1.61 GB in F32)
+        assert_eq!(kv.memory_bytes(), 6 * 65536 * 512 * 4 * 2);
     }
 }

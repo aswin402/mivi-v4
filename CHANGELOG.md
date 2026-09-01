@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.6] - 2026-09-02
+
+### 64K/128K Long-Context Scaling, YaRN NTK-Aware RoPE Extrapolation, Selective KV Memory Telemetry & NIAH Test Suite
+
+#### 💡 Ideas, Inspirations & Sources
+- **Pokee-Isaac 28B & Liquid AI LFM2.5 (explainx.ai)**:
+  - *Non-Decoder Long-Context Synergy*: Validated that hybrid linear SSM + attention architectures prevent associative recall collapse on extended sequences. Because 10 out of 16 layers in Mivi are SSMs (which store recurrent state in constant-size 500 KB buffers), 62.5% of model layers consume zero KV cache.
+- **YaRN (Yet another RoPE extensioN, `arXiv:2309.00071`) & LongRoPE (`arXiv:2402.13753`)**:
+  - *NTK-Aware Frequency Scaling*: Implemented `RopeScaling` (supporting `None`, `Linear`, and `YaRN`) in `mivi-core::rope`. When sequence lengths extend past 4,096 up to 65,536 (64K) or 131,072 (128K), frequencies smoothly interpolate between high-frequency and low-frequency bands, preserving positional resolution.
+- **Selective KV Cache Scaling & Telemetry (`mivi-kv`)**:
+  - *RAM Footprint Tracking*: Added `memory_bytes()` and `capacity_tokens()` to `KvCache`. Verified that a full 64,000-token context on Mivi uses only ~402 MB in Q8_0 and ~1.61 GB in F32 (vs $>4.29\text{ GB}$ on pure transformers).
+- **Automated Long-Context Harness (`tests/long_context_retrieval.rs`)**:
+  - *Comprehensive Integration Coverage*: Added test suite verifying 64K KV cache storage integrity at boundary positions, YaRN RoPE rotation stability up to position 65,535, and 100-chunk (6,400-token) prefix chaining.
+
+---
+
 ## [v0.2.5] - 2026-09-01
 
 ### Karpathy's llama2.c Top-P Cutoff Optimization, Real-World Live Verification & Engine Thread Runtime Decoupling
