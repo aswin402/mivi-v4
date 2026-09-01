@@ -62,35 +62,73 @@ pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
         mivi_quant::matvec_q6_k(&mut out, &q6_weights, &x, n, dim);
     });
 
-    // 4. End-to-end model generation benchmark if model path is valid
+    // 4. End-to-end model generation & prefix cache benchmark if model path is valid
     if let Some(ref model_path) = model {
         if model_path.exists() {
-            println!("\n=== End-to-End Generation Benchmark ===");
+            println!("\n=== End-to-End Generation & Prefix Cache Benchmark ===");
             let mut model = mivi_model::Model::load(model_path)?;
-            let prompt = "Explain briefly why the sky is blue.";
-            let warmup_tokens = 8;
-            let bench_tokens = 32;
+            model.sampler.config.temperature = 0.2;
 
-            // Warmup
-            let _ = model.generate(prompt, warmup_tokens)?;
+            let system_prompt = "You are Mivi, an intelligent, concise, and helpful AI assistant designed for high-performance software engineering and systems programming in pure Rust. Always write clean code, follow standard formatting practices, verify all edge cases, and explain your technical reasoning clearly and concisely to the developer.";
+            let prompt_cold = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nWrite a one-sentence summary of Rust ownership.<|im_end|>\n<|im_start|>assistant\n", system_prompt);
+            let prompt_warm = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n", system_prompt);
 
-            // Timed run
-            let start = std::time::Instant::now();
-            let mut gen_count = 0usize;
-            let output = model.generate_streaming(prompt, bench_tokens, |_, _| {
-                gen_count += 1;
+            let bench_tokens = 24;
+
+            // Run 1: Cold Cache (Empty prefix cache)
+            model.reset_context();
+            let mut cold_ttft = std::time::Duration::ZERO;
+            let mut cold_gen_count = 0usize;
+            let cold_start = std::time::Instant::now();
+            let mut first_token_seen = false;
+
+            let output_cold = model.generate_streaming(&prompt_cold, bench_tokens, |_, _| {
+                if !first_token_seen {
+                    cold_ttft = cold_start.elapsed();
+                    first_token_seen = true;
+                }
+                cold_gen_count += 1;
                 true
             })?;
-            let elapsed = start.elapsed();
-            let tok_per_sec = (gen_count as f64) / elapsed.as_secs_f64();
-            println!("  Generated tokens : {}", gen_count);
-            println!("  Elapsed time     : {:.2} s", elapsed.as_secs_f64());
-            println!(
-                "  Throughput       : {:.2} tokens/sec ({:.2} ms/token)",
-                tok_per_sec,
-                1000.0 / tok_per_sec
-            );
-            println!("  Output sample    : {:?}", output);
+            let cold_total = cold_start.elapsed();
+            let cached_chunks_after_cold = model.prefix_cache.len();
+
+            println!("\n  🔹 Run 1: Cold Prefill (Cache Miss)");
+            println!("  ─────────────────────────────────────────────────────────────────");
+            println!("  Time To First Token (TTFT) : {:.2} ms", cold_ttft.as_secs_f64() * 1000.0);
+            println!("  Total Generation Time      : {:.2} s ({} tokens)", cold_total.as_secs_f64(), cold_gen_count);
+            println!("  Chunks in Prefix Cache     : {}", cached_chunks_after_cold);
+            println!("  Output                     : {}", output_cold.trim());
+
+            // Run 2: Warm Cache (Hits the pre-computed system prompt chunks!)
+            model.reset_context();
+            let mut warm_ttft = std::time::Duration::ZERO;
+            let mut warm_gen_count = 0usize;
+            let warm_start = std::time::Instant::now();
+            first_token_seen = false;
+
+            let output_warm = model.generate_streaming(&prompt_warm, bench_tokens, |_, _| {
+                if !first_token_seen {
+                    warm_ttft = warm_start.elapsed();
+                    first_token_seen = true;
+                }
+                warm_gen_count += 1;
+                true
+            })?;
+            let warm_total = warm_start.elapsed();
+
+            let speedup = if warm_ttft.as_secs_f64() > 0.0 {
+                cold_ttft.as_secs_f64() / warm_ttft.as_secs_f64()
+            } else {
+                1.0
+            };
+
+            println!("\n  ⚡ Run 2: Warm Prefill (LMCache Prefix Hit!)");
+            println!("  ─────────────────────────────────────────────────────────────────");
+            println!("  Time To First Token (TTFT) : {:.2} ms", warm_ttft.as_secs_f64() * 1000.0);
+            println!("  Total Generation Time      : {:.2} s ({} tokens)", warm_total.as_secs_f64(), warm_gen_count);
+            println!("  TTFT Speedup Factor        : {:.1}x FASTER", speedup);
+            println!("  Output                     : {}", output_warm.trim());
         }
     }
 
