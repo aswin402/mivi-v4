@@ -318,12 +318,12 @@ just test
 ```
 
 ```text
-running 78 tests across workspace:
+running 84 tests across workspace:
   - 17 integration tests (Server, Agent, VM, Tokenizer, Prefix Cache, Disk KVC) ... OK
   - 1 PyTorch Oracle Golden Ground-Truth validation test .......................... OK
-  - 60 unit tests (SIMD, Math, Quant, KV, Router, Tools) .......................... OK
+  - 66 unit tests (SIMD, Math, Quant, KV, Router, Tools, Grammar, PLD) ............ OK
 
-test result: ok. 78 passed; 0 failed; finished in 100% success!
+test result: ok. 84 passed; 0 failed; finished in 100% success!
 ```
 
 ---
@@ -334,7 +334,7 @@ test result: ok. 78 passed; 0 failed; finished in 100% success!
 |---|---|
 | `just build` | Compile workspace in debug mode (max 3 jobs) |
 | `just build-release` | Compile optimized release binary |
-| `just test` | Run complete 78-test suite |
+| `just test` | Run complete 84-test suite |
 | `just clippy` | Run Clippy linter with `-D warnings` |
 | `just fmt-check` | Verify code formatting with `rustfmt` |
 | `just verify` | Run full quality gate (`fmt-check` + `clippy` + `test`) |
