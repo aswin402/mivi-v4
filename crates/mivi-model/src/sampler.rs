@@ -137,17 +137,25 @@ impl Sampler {
     }
 
     fn sample_top_p(&mut self, probs: &[f32], top_p: f32) -> u32 {
+        let n = probs.len();
+        let cutoff = if n > 1 && top_p < 1.0 {
+            (1.0 - top_p) / (n as f32 - 1.0)
+        } else {
+            0.0
+        };
+
         self.scratch.clear();
         self.scratch.extend(
             probs
                 .iter()
                 .copied()
                 .enumerate()
-                .filter(|&(_, p)| p > 0.0 && p.is_finite()),
+                .filter(|&(_, p)| p >= cutoff && p > 0.0 && p.is_finite()),
         );
 
         if self.scratch.is_empty() {
-            return 0;
+            // Fallback to argmax if cutoff was too aggressive
+            return argmax(probs);
         }
 
         // Quickselect top candidates (up to 1024) to avoid sorting entire vocabulary

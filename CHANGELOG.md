@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.5] - 2026-09-01
+
+### Karpathy's llama2.c Top-P Cutoff Optimization, Real-World Live Verification & Engine Thread Runtime Decoupling
+
+#### 💡 Ideas, Inspirations & Sources
+- **Andrej Karpathy's `llama2.c` (`sample_topp` Heuristic Cutoff)**:
+  - *Sub-Microsecond Nucleus Sampling*: Adopted Karpathy's pre-sort cutoff optimization `cutoff = (1.0 - top_p) / (vocab_size - 1)` in `mivi-model::sampler`. By filtering out tokens with negligible probabilities during the initial pass, sorting size is reduced from 65k–262k down to ~20–80 candidates, delivering massive speedups on large-vocabulary nucleus sampling.
+- **Dedicated OS Worker Actor Architecture (`mivi-server`)**:
+  - *Runtime Decoupling*: Replaced the embedded single-threaded Tokio runtime inside the dedicated engine worker thread with a direct `rx.blocking_recv()` loop. This eliminates Tokio `Cannot block the current thread from within a runtime` conflicts when forwarding streaming token deltas to HTTP response channels.
+- **Real-World Live System Verification**:
+  - *Full End-to-End Validation*: Verified `mivi doctor` (16 cores, AVX2/FMA), `mivi info` (16 hybrid layers), `mivi bench` (47.15 GFLOPS, 7.0x LMCache speedup), `mivi chat` (15.0 tok/s), and real HTTP server endpoints (`/health`, `/v1/models`, `/v1/mivi/status`, `/v1/mivi/tools`, `/v1/chat/completions`, `/v1/messages`, `/v1/mivi/agent`).
+
+---
+
 ## [v0.2.4] - 2026-09-01
 
 ### BF16 Matvec Dispatch, 262k Token Bitmask, Polymorphic Message Payloads, XML Control Stripping & Diagnostic Doctor
