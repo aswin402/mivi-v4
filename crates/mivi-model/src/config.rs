@@ -132,7 +132,7 @@ impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
             max_tokens: 256,
-            temperature: 0.7,
+            temperature: 0.2,
             top_p: 0.9,
             top_k: 40,
             min_p: 0.0,

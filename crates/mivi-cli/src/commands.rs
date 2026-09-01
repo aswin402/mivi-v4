@@ -41,7 +41,7 @@ pub enum Commands {
     Chat {
         #[arg(short, long)]
         model: PathBuf,
-        #[arg(short = 't', long, default_value = "0.7")]
+        #[arg(short = 't', long, default_value = "0.2")]
         temp: f32,
         #[arg(short = 'p', long, default_value = "0.9")]
         top_p: f32,

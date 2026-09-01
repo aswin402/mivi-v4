@@ -54,10 +54,7 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
     };
 
     let mut thinking_enabled = args.thinking;
-    let mut system_prompt = Some(
-        args.system
-            .unwrap_or_else(|| mivi_core::DEFAULT_SYSTEM_PROMPT.to_string()),
-    );
+    let mut system_prompt = args.system;
 
     print_chat_header(
         &m.config.name,

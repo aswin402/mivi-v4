@@ -61,7 +61,7 @@ serve model="models/mivi-v4-q4_k_m.gguf" port="8080" host="127.0.0.1":
 
 # Start interactive CLI terminal chat session with the model
 # Usage: just chat [model_path] [temp]
-chat model="models/mivi-v4-q4_k_m.gguf" temp="0.7":
+chat model="models/mivi-v4-q4_k_m.gguf" temp="0.2":
     cargo run --release --jobs 3 -- chat --model {{model}} --temp {{temp}}
 
 # Run hardware, SIMD, and system environment doctor diagnostics
