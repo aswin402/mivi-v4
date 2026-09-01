@@ -10,6 +10,8 @@ pub enum QuantError {
     BufferTooSmall { expected: usize, actual: usize },
     #[error("Dimension not a multiple of block size {block_size}: {dim}")]
     DimensionMisaligned { dim: usize, block_size: usize },
+    #[error("Arithmetic overflow in quantization operation")]
+    ArithmeticOverflow,
 }
 
 pub type Result<T> = std::result::Result<T, QuantError>;

@@ -319,8 +319,8 @@ pub fn resolve_ssm_layer(
         .or_else(|_| resolve_tensor(gguf, &layer_tensor_name(layer_idx, "shortconv.out_proj")))?;
 
     let a_name = layer_tensor_name(layer_idx, "ssm_a");
-    let ssm_a = match gguf.get_tensor_data(&a_name) {
-        Ok((_, raw)) => safe_f32_slice(raw)?.to_vec().into_boxed_slice(),
+    let ssm_a = match resolve_f32_vec(gguf, &a_name) {
+        Ok(vec) => vec,
         Err(_) => {
             tracing::debug!("Using default SSM A weights for layer {}", layer_idx);
             vec![DEFAULT_SSM_A_VAL; config.ssm_state_dim].into_boxed_slice()
@@ -329,10 +329,10 @@ pub fn resolve_ssm_layer(
 
     let conv_name = layer_tensor_name(layer_idx, "ssm_conv");
     let conv_name_short = layer_tensor_name(layer_idx, "shortconv.conv");
-    let ssm_conv = if let Ok((_, raw)) = gguf.get_tensor_data(&conv_name) {
-        safe_f32_slice(raw)?.to_vec().into_boxed_slice()
-    } else if let Ok((_, raw)) = gguf.get_tensor_data(&conv_name_short) {
-        safe_f32_slice(raw)?.to_vec().into_boxed_slice()
+    let ssm_conv = if let Ok(vec) = resolve_f32_vec(gguf, &conv_name) {
+        vec
+    } else if let Ok(vec) = resolve_f32_vec(gguf, &conv_name_short) {
+        vec
     } else {
         tracing::debug!(
             "SSM conv weights missing for layer {}, using empty buffer",
@@ -386,15 +386,10 @@ pub fn resolve_model_weights(gguf: &GgufFile, config: &ModelConfig) -> Result<Mo
         }
     }
 
-    let output_norm = if let Ok((_, raw)) = gguf
-        .get_tensor_data("output_norm.weight")
-        .or_else(|_| gguf.get_tensor_data("token_embd_norm.weight"))
-        .or_else(|_| gguf.get_tensor_data("token_embd_norm"))
-    {
-        Some(safe_f32_slice(raw)?.to_vec().into_boxed_slice())
-    } else {
-        None
-    };
+    let output_norm = resolve_f32_vec(gguf, "output_norm.weight")
+        .or_else(|_| resolve_f32_vec(gguf, "token_embd_norm.weight"))
+        .or_else(|_| resolve_f32_vec(gguf, "token_embd_norm"))
+        .ok();
 
     let output_proj = if let Ok((info, data)) = gguf
         .get_tensor_data("output.weight")

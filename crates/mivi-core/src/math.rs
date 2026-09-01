@@ -132,29 +132,39 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     crate::simd::dot_product_simd(a, b)
 }
 
-/// Rotary Position Embedding (RoPE) applied to query and key heads.
+/// Rotary Position Embedding (RoPE) applied to all query and key heads.
 #[inline]
 pub fn apply_rope(q: &mut [f32], k: &mut [f32], head_dim: usize, pos: usize, rope_base: f32) {
     assert!(head_dim.is_multiple_of(2));
     assert!(q.len() >= head_dim);
     assert!(k.len() >= head_dim);
 
-    for i in (0..head_dim).step_by(2) {
-        let freq = 1.0 / rope_base.powf(i as f32 / head_dim as f32);
-        let angle = pos as f32 * freq;
-        let (sin, cos) = angle.sin_cos();
+    // Rotate all query heads
+    for q_head in q.chunks_exact_mut(head_dim) {
+        for i in (0..head_dim).step_by(2) {
+            let freq = 1.0 / rope_base.powf(i as f32 / head_dim as f32);
+            let angle = pos as f32 * freq;
+            let (sin, cos) = angle.sin_cos();
 
-        // Rotate Query
-        let q0 = q[i];
-        let q1 = q[i + 1];
-        q[i] = q0 * cos - q1 * sin;
-        q[i + 1] = q0 * sin + q1 * cos;
+            let q0 = q_head[i];
+            let q1 = q_head[i + 1];
+            q_head[i] = q0 * cos - q1 * sin;
+            q_head[i + 1] = q0 * sin + q1 * cos;
+        }
+    }
 
-        // Rotate Key
-        let k0 = k[i];
-        let k1 = k[i + 1];
-        k[i] = k0 * cos - k1 * sin;
-        k[i + 1] = k0 * sin + k1 * cos;
+    // Rotate all key heads
+    for k_head in k.chunks_exact_mut(head_dim) {
+        for i in (0..head_dim).step_by(2) {
+            let freq = 1.0 / rope_base.powf(i as f32 / head_dim as f32);
+            let angle = pos as f32 * freq;
+            let (sin, cos) = angle.sin_cos();
+
+            let k0 = k_head[i];
+            let k1 = k_head[i + 1];
+            k_head[i] = k0 * cos - k1 * sin;
+            k_head[i + 1] = k0 * sin + k1 * cos;
+        }
     }
 }
 

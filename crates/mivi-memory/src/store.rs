@@ -69,9 +69,12 @@ impl MemoryStore {
         if let Some(rest) = trimmed.strip_prefix("---") {
             let rest = rest.strip_prefix('\n').unwrap_or(rest);
             if let Some((yaml_str, body)) = rest.split_once("\n---") {
-                let body = body.strip_prefix('\n').unwrap_or(body);
+                let content = body
+                    .strip_prefix("\n\n")
+                    .or_else(|| body.strip_prefix('\n'))
+                    .unwrap_or(body);
                 let mut record: MemoryRecord = serde_yaml::from_str(yaml_str)?;
-                record.content = body.trim_start().to_string();
+                record.content = content.to_string();
                 return Ok(record);
             }
         }
@@ -89,6 +92,7 @@ impl MemoryStore {
                 paths.push(p);
             }
         }
+        paths.sort();
         Ok(paths)
     }
 }

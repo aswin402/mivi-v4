@@ -5,8 +5,8 @@
 
 use mivi_tokenizer::Vocab;
 
-/// Number of 64-bit words required to cover a 65,536-token vocabulary (1,024 words = 8 KB).
-pub const BITMASK_WORDS: usize = 1024;
+/// Number of 64-bit words required to cover up to 262,144-token vocabularies (4,096 words = 32 KB).
+pub const BITMASK_WORDS: usize = 4096;
 
 /// Stack-friendly, zero-heap bitset representing valid tokens for the current generation step.
 #[derive(Clone, Debug, PartialEq, Eq)]

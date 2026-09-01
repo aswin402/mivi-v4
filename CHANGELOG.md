@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.4] - 2026-09-01
+
+### BF16 Matvec Dispatch, 262k Token Bitmask, Polymorphic Message Payloads, XML Control Stripping & Diagnostic Doctor
+
+#### 💡 Ideas, Inspirations & Sources
+- **BFloat16 & Half-Precision Linear Algebra (`mivi-quant`)**:
+  - *Full BF16 Dispatch*: Implemented `try_matvec_bf16` and `matvec_bf16` with checked overflow bounds, and wired `GgmlType::BF16` into `quantized_matvec`.
+- **Large-Vocabulary Grammar Masking (`mivi-model`)**:
+  - *262k Token Coverage*: Scaled `BITMASK_WORDS` to 4,096 words (covering up to 262,144 tokens), preventing tokens $\ge 65,536$ in modern models (LLaMA 3, Qwen 2.5, Gemma 2) from bypassing JSON/tool grammar constraints.
+- **OpenAI Multi-Part Content Specification (`mivi-server`)**:
+  - *Polymorphic Content Deserialization*: Added `deserialize_polymorphic_content` to `MessageDto` to accept both plain strings and arrays of content parts (`[{"type": "text", "text": "..."}]`) from LangChain, Cursor, and modern SDKs.
+- **W3C XML 1.0 Specification & Defensive Encoding (`mivi-agent`)**:
+  - *Control Character Stripping*: Filtered invalid non-whitespace ASCII control characters (`\x00`–`\x08`, `\x1F`) in `escape_xml_common` to prevent downstream parser crashes.
+- **Memory Record Formatting Integrity (`mivi-memory`)**:
+  - *Preserved Indentation*: Fixed frontmatter delimiter stripping in `load_record` to preserve code block and YAML indentation. Added deterministic sorting to `list_records`.
+- **Defensive Filesystem Sandboxing (`mivi-tools`)**:
+  - *Bounded File Writes & Device File Rejection*: Enforced `MAX_FILE_WRITE_BYTES = 5MB` and verified `meta.is_file()` in `handle_read_file` to prevent device hangs.
+- **System Environment Discovery (`mivi-cli`)**:
+  - *Comprehensive `mivi doctor`*: Expanded system diagnostic suite to report AVX2, FMA, AVX-512F, ARM64 NEON, thread pool settings, `.mivi` workspace state, and discovered GGUF models.
+
+---
+
 ## [v0.2.3] - 2026-09-01
 
 ### Universal Layer Norm Dequantization, Pratt Parser Sandboxing, Tool Feedback & API Polish

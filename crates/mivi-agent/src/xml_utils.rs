@@ -12,6 +12,7 @@ fn escape_xml_common(s: &str, escape_quotes: bool) -> String {
             '>' => out.push_str("&gt;"),
             '"' if escape_quotes => out.push_str("&quot;"),
             '\'' if escape_quotes => out.push_str("&apos;"),
+            c if c.is_control() && c != '\n' && c != '\r' && c != '\t' => {}
             other => out.push(other),
         }
     }
@@ -42,5 +43,11 @@ mod tests {
             escape_xml_content("<test & \" ' >"),
             "&lt;test &amp; \" ' &gt;"
         );
+    }
+
+    #[test]
+    fn test_xml_control_char_filtering() {
+        let dirty = "Hello\x00\x08\x1FWorld\n\t!";
+        assert_eq!(escape_xml_content(dirty), "HelloWorld\n\t!");
     }
 }

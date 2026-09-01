@@ -40,12 +40,16 @@ where
 }
 
 const MAX_FILE_READ_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
+const MAX_FILE_WRITE_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 const MAX_DIR_ENTRIES: usize = 500;
 
 pub fn handle_read_file(args: serde_json::Value, ws: &Path) -> ToolResult {
     with_safe_path("read_file", &args, "path", ws, None, |target, path_str| {
         let meta = std::fs::metadata(target)
             .map_err(|e| format!("Failed to read metadata for '{}': {}", path_str, e))?;
+        if !meta.is_file() {
+            return Err(format!("'{}' is not a regular file", path_str));
+        }
         if meta.len() > MAX_FILE_READ_BYTES {
             return Err(format!(
                 "File '{}' size ({} bytes) exceeds maximum allowed read limit ({} bytes)",
@@ -64,6 +68,17 @@ pub fn handle_write_file(args: serde_json::Value, ws: &Path) -> ToolResult {
         Ok(c) => c,
         Err(e) => return ToolResult::err("write_file", e),
     };
+
+    if content.len() > MAX_FILE_WRITE_BYTES {
+        return ToolResult::err(
+            "write_file",
+            format!(
+                "Content size ({} bytes) exceeds maximum write limit ({} bytes)",
+                content.len(),
+                MAX_FILE_WRITE_BYTES
+            ),
+        );
+    }
 
     with_safe_path("write_file", &args, "path", ws, None, |target, path_str| {
         if let Some(parent) = target.parent() {

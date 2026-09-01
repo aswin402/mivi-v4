@@ -38,7 +38,9 @@ pub fn try_matvec_f16(
     n: usize,
     d: usize,
 ) -> crate::types::Result<()> {
-    let row_bytes = d * F16_BYTES;
+    let row_bytes = d
+        .checked_mul(F16_BYTES)
+        .ok_or(crate::types::QuantError::ArithmeticOverflow)?;
     crate::types::validate_matvec_args(out, weights, x, n, d, row_bytes, 1)?;
 
     crate::types::parallel_row_matvec(out, weights, n, row_bytes, |row_slice, _| {
@@ -54,12 +56,42 @@ pub fn try_matvec_f16(
 }
 
 /// Matvec for F16 weights: out[n] = W[n, d] * x[d] with Rayon multithreading.
-///
-/// # Panics
-/// Panics if buffer lengths are insufficient. Prefer `try_matvec_f16` in fallible contexts.
 #[track_caller]
 pub fn matvec_f16(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usize) {
     if let Err(e) = try_matvec_f16(out, weights, x, n, d) {
+        panic!("{}", e);
+    }
+}
+
+/// Checked matvec for BF16 weights returning QuantError on dimension mismatch.
+pub fn try_matvec_bf16(
+    out: &mut [f32],
+    weights: &[u8],
+    x: &[f32],
+    n: usize,
+    d: usize,
+) -> crate::types::Result<()> {
+    let row_bytes = d
+        .checked_mul(F16_BYTES)
+        .ok_or(crate::types::QuantError::ArithmeticOverflow)?;
+    crate::types::validate_matvec_args(out, weights, x, n, d, row_bytes, 1)?;
+
+    crate::types::parallel_row_matvec(out, weights, n, row_bytes, |row_slice, _| {
+        let mut sum = 0.0f32;
+        for (j, &xj) in x.iter().enumerate().take(d) {
+            let off = j * F16_BYTES;
+            let w = bf16::from_le_bytes([row_slice[off], row_slice[off + 1]]).to_f32();
+            sum += w * xj;
+        }
+        sum
+    });
+    Ok(())
+}
+
+/// Matvec for BF16 weights: out[n] = W[n, d] * x[d] with Rayon multithreading.
+#[track_caller]
+pub fn matvec_bf16(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usize) {
+    if let Err(e) = try_matvec_bf16(out, weights, x, n, d) {
         panic!("{}", e);
     }
 }

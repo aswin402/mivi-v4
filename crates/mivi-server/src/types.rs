@@ -23,6 +23,7 @@ pub struct ChatCompletionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDto {
     pub role: String,
+    #[serde(default, deserialize_with = "deserialize_polymorphic_content")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -30,6 +31,29 @@ pub struct MessageDto {
     pub thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+fn deserialize_polymorphic_content<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Array(blocks)) => {
+            let mut acc = String::new();
+            for b in blocks {
+                if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                    acc.push_str(t);
+                }
+            }
+            Ok(Some(acc))
+        }
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(other) => Ok(Some(other.to_string())),
+    }
 }
 
 impl From<&MessageDto> for mivi_tokenizer::ChatMessage {

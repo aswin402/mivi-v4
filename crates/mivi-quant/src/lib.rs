@@ -6,7 +6,9 @@ pub mod q6_k;
 pub mod q8_0;
 pub mod types;
 
-pub use f16::{dequantize_bf16, dequantize_f16, matvec_f16, try_matvec_f16};
+pub use f16::{
+    dequantize_bf16, dequantize_f16, matvec_bf16, matvec_f16, try_matvec_bf16, try_matvec_f16,
+};
 pub use q4_k_m::{
     dequantize_q4_k_m, dequantize_q4_k_m_slice, matvec_q4_k_m, try_matvec_q4_k_m, Q4_K_BLOCK_SIZE,
     Q4_K_BYTES,
@@ -81,6 +83,7 @@ pub fn quantized_matvec(
         GgmlType::Q6_K => try_matvec_q6_k(out, weights, x, n, d),
         GgmlType::Q8_0 => try_matvec_q8_0(out, weights, x, n, d),
         GgmlType::F16 => try_matvec_f16(out, weights, x, n, d),
+        GgmlType::BF16 => try_matvec_bf16(out, weights, x, n, d),
         GgmlType::F32 => {
             let row_bytes = d.checked_mul(F32_BYTES).ok_or(QuantError::BufferTooSmall {
                 expected: usize::MAX,
