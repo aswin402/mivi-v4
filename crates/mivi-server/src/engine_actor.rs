@@ -171,66 +171,53 @@ impl EngineActor {
         mut model: Option<mivi_model::Model>,
         config: &ServerConfig,
     ) -> std::io::Result<EngineHandle> {
-        let (tx, mut rx) = mpsc::channel(config.channel_capacity);
+        let (tx, rx) = mpsc::channel(config.channel_capacity);
         let has_model = model.is_some();
         let stream_buffer_capacity = config.channel_capacity;
 
         std::thread::Builder::new()
             .name(ENGINE_ACTOR_THREAD_NAME.to_string())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!("Failed to initialize engine actor runtime: {}", e);
-                        drop(rx);
-                        return;
-                    }
-                };
-
-                rt.block_on(async move {
-                    while let Some(cmd) = rx.recv().await {
-                        match cmd {
-                            EngineCommand::Generate {
+                let mut rx = rx;
+                while let Some(cmd) = rx.blocking_recv() {
+                    match cmd {
+                        EngineCommand::Generate {
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            responder,
+                        } => {
+                            handle_generate(
+                                &mut model,
                                 prompt,
                                 max_tokens,
                                 temperature,
                                 top_p,
                                 responder,
-                            } => {
-                                handle_generate(
-                                    &mut model,
-                                    prompt,
-                                    max_tokens,
-                                    temperature,
-                                    top_p,
-                                    responder,
-                                );
-                            }
-                            EngineCommand::GenerateStream {
+                            );
+                        }
+                        EngineCommand::GenerateStream {
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            responder,
+                        } => {
+                            handle_generate_stream(
+                                &mut model,
                                 prompt,
                                 max_tokens,
                                 temperature,
                                 top_p,
                                 responder,
-                            } => {
-                                handle_generate_stream(
-                                    &mut model,
-                                    prompt,
-                                    max_tokens,
-                                    temperature,
-                                    top_p,
-                                    responder,
-                                );
-                            }
-                            EngineCommand::Encode { text, responder } => {
-                                handle_encode(&model, text, responder);
-                            }
+                            );
+                        }
+                        EngineCommand::Encode { text, responder } => {
+                            handle_encode(&model, text, responder);
                         }
                     }
-                });
+                }
             })?;
 
         Ok(EngineHandle::with_capacity(

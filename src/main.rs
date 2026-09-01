@@ -1,6 +1,5 @@
 use clap::Parser;
 use mivi_cli::{Cli, Commands};
-use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
