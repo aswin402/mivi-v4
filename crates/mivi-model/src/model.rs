@@ -578,6 +578,88 @@ impl Model {
     pub fn generate(&mut self, prompt: &str, max_tokens: usize) -> Result<String> {
         self.generate_streaming(prompt, max_tokens, |_, _| true)
     }
+
+    /// Generate text strictly constrained to valid JSON syntax via logit masking.
+    pub fn generate_with_json_grammar(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> Result<String> {
+        let mut grammar = crate::grammar::JsonGrammar::new();
+        let token_ids = self.tokenizer.encode(prompt);
+        if token_ids.is_empty() {
+            return Ok(String::new());
+        }
+
+        self.reset_context();
+        let mut generated_ids = Vec::new();
+        let mut recent_tokens = VecDeque::with_capacity(RECENT_TOKENS_WINDOW + 1);
+        let mut stream_decoder = mivi_tokenizer::Utf8StreamDecoder::new();
+        let mut full_output = String::new();
+        let mut raw_bytes = Vec::new();
+
+        // 1. Prefill
+        for (i, &tok) in token_ids.iter().enumerate() {
+            let is_last = i + 1 == token_ids.len();
+            let _ = self.forward_step(tok, i, is_last)?;
+        }
+        let mut pos = token_ids.len();
+
+        let eos_token_id = self
+            .gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_usize().map(|u| u as u32))
+            .unwrap_or(EOS_TOKEN_ID);
+
+        // If prompt ended with '{', feed it into the grammar
+        if prompt.ends_with('{') {
+            grammar.feed("{");
+        }
+
+        // 2. Generation with grammar logit masking
+        for _ in 0..max_tokens {
+            if pos >= self.config.max_seq_len || grammar.completed {
+                break;
+            }
+
+            self.state
+                .logits_scratch
+                .copy_from_slice(&self.state.logits);
+
+            // Apply grammar mask
+            let mask = grammar.compute_mask(self.tokenizer.vocab());
+            mask.apply_to_logits(&mut self.state.logits_scratch);
+
+            let recent_slice = recent_tokens.make_contiguous();
+            let next_token = self
+                .sampler
+                .sample(&mut self.state.logits_scratch, recent_slice);
+
+            if next_token == eos_token_id {
+                break;
+            }
+
+            generated_ids.push(next_token);
+            recent_tokens.push_back(next_token);
+            if recent_tokens.len() > RECENT_TOKENS_WINDOW {
+                recent_tokens.pop_front();
+            }
+
+            raw_bytes.clear();
+            self.tokenizer.decode_token_bytes(next_token, &mut raw_bytes);
+            let decoded_chunk = stream_decoder.feed(&raw_bytes);
+            if !decoded_chunk.is_empty() {
+                grammar.feed(&decoded_chunk);
+                full_output.push_str(&decoded_chunk);
+            }
+
+            let _ = self.forward_step(next_token, pos, true)?;
+            pos += 1;
+        }
+
+        Ok(full_output)
+    }
 }
 
 /// Helper to find the maximum length of a stop token prefix matching the tail of `text`.
