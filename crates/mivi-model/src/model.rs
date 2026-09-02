@@ -60,11 +60,20 @@ pub struct Model {
 impl Model {
     /// Load model with default context length ceiling (4096).
     pub fn load(path: &Path) -> Result<Self> {
-        Self::load_with_ctx(path, None)
+        Self::load_with_options(path, None, None)
     }
 
     /// Load model with custom working context length.
     pub fn load_with_ctx(path: &Path, max_ctx: Option<usize>) -> Result<Self> {
+        Self::load_with_options(path, max_ctx, None)
+    }
+
+    /// Load model with custom working context length and KV cache precision.
+    pub fn load_with_options(
+        path: &Path,
+        max_ctx: Option<usize>,
+        kv_precision: Option<mivi_kv::KvPrecision>,
+    ) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
         let mut config = extract_model_config(&gguf)?;
         let tokens = extract_vocab(&gguf, config.vocab_size);
@@ -80,10 +89,11 @@ impl Model {
             .iter()
             .filter(|b| **b == BlockType::SSM)
             .count();
+        let precision = kv_precision.unwrap_or(mivi_kv::KvPrecision::F32);
         eprintln!(
-            "[mivi] Config: dim={}, hidden={}, heads={}, kv_heads={}, kv_dim={}, layers={} ({} attn + {} ssm)",
+            "[mivi] Config: dim={}, hidden={}, heads={}, kv_heads={}, kv_dim={}, layers={} ({} attn + {} ssm), kv_precision={:?}",
             config.dim, config.hidden_dim, config.n_heads, config.n_kv_heads, config.kv_dim,
-            config.n_layers, attn_count, ssm_count
+            config.n_layers, attn_count, ssm_count, precision
         );
 
         // Cap working context length to limit memory usage on low-resource systems.
@@ -120,11 +130,12 @@ impl Model {
                 }
             })
             .collect();
-        let kv_cache = KvCache::try_new_selective(
+        let kv_cache = KvCache::try_new_selective_with_precision(
             config.n_layers,
             working_seq_len,
             config.kv_dim,
             &attn_layers,
+            precision,
         )?;
         let weights = resolve_model_weights(&gguf, &config)?;
 

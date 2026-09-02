@@ -20,8 +20,21 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self {
-            warn_mb: 700.0,
-            kill_mb: 900.0,
+            warn_mb: 350.0,
+            kill_mb: 450.0,
+            check_interval: Duration::from_secs(3),
+            enabled: true,
+        }
+    }
+}
+
+impl WatchdogConfig {
+    /// Dynamically compute optimal watchdog thresholds based on model weight and KV cache memory.
+    pub fn adaptive(model_weights_mb: f32, kv_cache_mb: f32) -> Self {
+        let base = model_weights_mb + kv_cache_mb;
+        Self {
+            warn_mb: (base + 60.0).max(300.0),
+            kill_mb: (base + 120.0).max(400.0),
             check_interval: Duration::from_secs(3),
             enabled: true,
         }

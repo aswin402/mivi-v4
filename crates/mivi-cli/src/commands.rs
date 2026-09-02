@@ -27,15 +27,18 @@ pub enum Commands {
         host: String,
         #[arg(short, long)]
         model: Option<PathBuf>,
-        /// Maximum RSS memory in MB before triggering safety shutdown (default: 900 MB)
-        #[arg(long, default_value = "900")]
+        /// Maximum RSS memory in MB before triggering safety shutdown (default: 450 MB)
+        #[arg(long, default_value = "450")]
         max_memory: f32,
-        /// Warning threshold RSS memory in MB (default: 700 MB)
-        #[arg(long, default_value = "700")]
+        /// Warning threshold RSS memory in MB (default: 350 MB)
+        #[arg(long, default_value = "350")]
         warn_memory: f32,
         /// Disable the resource safety watchdog
         #[arg(long)]
         no_safelock: bool,
+        /// KV Cache precision mode: f32, q8_0, tq4 (TurboQuant 4-bit), tq2 (TurboQuant 2-bit)
+        #[arg(long)]
+        kv_precision: Option<String>,
     },
     /// Interactive terminal chat with local model
     Chat {
@@ -61,6 +64,9 @@ pub enum Commands {
         system: Option<String>,
         #[arg(long)]
         thinking: bool,
+        /// KV Cache precision mode: f32, q8_0, tq4 (TurboQuant 4-bit), tq2 (TurboQuant 2-bit)
+        #[arg(long)]
+        kv_precision: Option<String>,
     },
     /// Inspect model GGUF metadata and tensor shapes
     Info {
@@ -73,6 +79,9 @@ pub enum Commands {
     Bench {
         #[arg(short, long)]
         model: Option<PathBuf>,
+        /// KV Cache precision mode: f32, q8_0, tq4 (TurboQuant 4-bit), tq2 (TurboQuant 2-bit)
+        #[arg(long)]
+        kv_precision: Option<String>,
     },
     /// Manage on-disk persistent KV cache files (.kvc)
     Cache {
@@ -93,4 +102,15 @@ pub enum CacheCommands {
         #[arg(short, long)]
         dir: Option<PathBuf>,
     },
+}
+
+/// Parse string representation to KvPrecision enum.
+pub fn parse_kv_precision(s: Option<&str>) -> Option<mivi_kv::KvPrecision> {
+    match s?.to_ascii_lowercase().as_str() {
+        "f32" | "fp32" => Some(mivi_kv::KvPrecision::F32),
+        "q8_0" | "q8" => Some(mivi_kv::KvPrecision::Q8_0),
+        "tq4" | "turboquant4" | "4bit" => Some(mivi_kv::KvPrecision::TurboQuant4),
+        "tq2" | "turboquant2" | "2bit" => Some(mivi_kv::KvPrecision::TurboQuant2),
+        _ => None,
+    }
 }

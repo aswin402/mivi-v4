@@ -25,7 +25,7 @@ where
     );
 }
 
-pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
+pub fn run_bench(model: Option<PathBuf>, kv_precision: Option<String>) -> Result<()> {
     println!("=== Mivi-v4 CPU Kernel Benchmark ===");
     println!(
         "Target model: {:?}",
@@ -66,7 +66,8 @@ pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
     if let Some(ref model_path) = model {
         if model_path.exists() {
             println!("\n=== End-to-End Generation & Prefix Cache Benchmark ===");
-            let mut model = mivi_model::Model::load(model_path)?;
+            let precision = crate::commands::parse_kv_precision(kv_precision.as_deref());
+            let mut model = mivi_model::Model::load_with_options(model_path, None, precision)?;
             model.sampler.config.temperature = 0.2;
 
             let system_prompt = "You are Mivi, an intelligent, concise, and helpful AI assistant designed for high-performance software engineering and systems programming in pure Rust. Always write clean code, follow standard formatting practices, verify all edge cases, and explain your technical reasoning clearly and concisely to the developer.";

@@ -23,6 +23,7 @@ pub struct ChatArgs {
     pub ctx_size: Option<usize>,
     pub system: Option<String>,
     pub thinking: bool,
+    pub kv_precision: Option<String>,
 }
 
 pub fn run_chat(args: ChatArgs) -> Result<()> {
@@ -36,7 +37,8 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
     print!("  \x1b[2mLoading model from {:?}...\x1b[0m\r", args.model);
     let _ = io::stdout().flush();
 
-    let mut m = Model::load_with_ctx(&args.model, args.ctx_size)?;
+    let precision = crate::commands::parse_kv_precision(args.kv_precision.as_deref());
+    let mut m = Model::load_with_options(&args.model, args.ctx_size, precision)?;
     m.sampler.config.temperature = args.temp;
     m.sampler.config.top_p = args.top_p;
     m.sampler.config.top_k = args.top_k;

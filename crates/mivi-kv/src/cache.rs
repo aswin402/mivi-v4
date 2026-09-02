@@ -268,6 +268,21 @@ impl KvCache {
         }
     }
 
+    /// Returns the storage size in bytes allocated per token for this precision mode.
+    #[inline]
+    pub fn bytes_per_token(&self) -> usize {
+        match self.precision {
+            KvPrecision::F32 => self.kv_dim * std::mem::size_of::<f32>(),
+            KvPrecision::Q8_0 => {
+                let blocks_per_head = 32;
+                let num_blocks = (self.kv_dim + blocks_per_head - 1) / blocks_per_head;
+                num_blocks * 34
+            }
+            KvPrecision::TurboQuant4 => 4 + (self.kv_dim + 1) / 2,
+            KvPrecision::TurboQuant2 => 4 + (self.kv_dim + 3) / 4,
+        }
+    }
+
     /// Reset cache position to start of sequence without expensive memory clearing.
     pub fn reset(&mut self) {
         self.current_pos = 0;
@@ -665,56 +680,114 @@ impl KvCache {
 
     /// Export the KV cache memory up to `pos` tokens for state snapshotting.
     pub fn export_state(&self, pos: usize) -> Result<(Vec<f32>, Vec<f32>)> {
-        if self.precision != KvPrecision::F32 {
-            return Err(KvError::UnsupportedPrecision(self.precision));
-        }
-
         let n_alloc = self.n_allocated_layers();
         let target_pos = pos.min(self.max_seq_len);
-        let mut k_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
-        let mut v_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
 
-        for cache_layer in 0..n_alloc {
-            let start = cache_layer * self.max_seq_len * self.kv_dim;
-            let end = start + target_pos * self.kv_dim;
-            if end <= self.k_cache.len() {
-                k_out.extend_from_slice(&self.k_cache[start..end]);
-                v_out.extend_from_slice(&self.v_cache[start..end]);
+        match self.precision {
+            KvPrecision::F32 => {
+                let mut k_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
+                let mut v_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
+
+                for cache_layer in 0..n_alloc {
+                    let start = cache_layer * self.max_seq_len * self.kv_dim;
+                    let end = start + target_pos * self.kv_dim;
+                    if end <= self.k_cache.len() {
+                        k_out.extend_from_slice(&self.k_cache[start..end]);
+                        v_out.extend_from_slice(&self.v_cache[start..end]);
+                    }
+                }
+                Ok((k_out, v_out))
+            }
+            KvPrecision::Q8_0 | KvPrecision::TurboQuant4 | KvPrecision::TurboQuant2 => {
+                let bpt = self.bytes_per_token();
+                let f32_per_token = (bpt + 3) / 4;
+                let mut k_out = vec![0.0f32; n_alloc * target_pos * f32_per_token];
+                let mut v_out = vec![0.0f32; n_alloc * target_pos * f32_per_token];
+
+                let k_out_bytes: &mut [u8] = unsafe {
+                    std::slice::from_raw_parts_mut(k_out.as_mut_ptr() as *mut u8, k_out.len() * 4)
+                };
+                let v_out_bytes: &mut [u8] = unsafe {
+                    std::slice::from_raw_parts_mut(v_out.as_mut_ptr() as *mut u8, v_out.len() * 4)
+                };
+
+                for cache_layer in 0..n_alloc {
+                    let start = cache_layer * self.max_seq_len * bpt;
+                    let end = start + target_pos * bpt;
+                    let dst_start = cache_layer * target_pos * bpt;
+                    let dst_end = dst_start + target_pos * bpt;
+
+                    if end <= self.k_q8_cache.len() {
+                        k_out_bytes[dst_start..dst_end].copy_from_slice(&self.k_q8_cache[start..end]);
+                        v_out_bytes[dst_start..dst_end].copy_from_slice(&self.v_q8_cache[start..end]);
+                    }
+                }
+                Ok((k_out, v_out))
             }
         }
-
-        Ok((k_out, v_out))
     }
 
     /// Import a previously exported KV cache memory slice up to `pos` tokens.
     pub fn import_state(&mut self, pos: usize, k_data: &[f32], v_data: &[f32]) -> Result<()> {
-        if self.precision != KvPrecision::F32 {
-            return Err(KvError::UnsupportedPrecision(self.precision));
-        }
-
         let n_alloc = self.n_allocated_layers();
         let target_pos = pos.min(self.max_seq_len);
-        let expected_elements = n_alloc * target_pos * self.kv_dim;
 
-        if k_data.len() != expected_elements || v_data.len() != expected_elements {
-            return Err(KvError::DimMismatch {
-                expected: expected_elements,
-                got: k_data.len(),
-            });
+        match self.precision {
+            KvPrecision::F32 => {
+                let expected_elements = n_alloc * target_pos * self.kv_dim;
+                if k_data.len() != expected_elements || v_data.len() != expected_elements {
+                    return Err(KvError::DimMismatch {
+                        expected: expected_elements,
+                        got: k_data.len(),
+                    });
+                }
+
+                for cache_layer in 0..n_alloc {
+                    let start = cache_layer * self.max_seq_len * self.kv_dim;
+                    let end = start + target_pos * self.kv_dim;
+                    let src_start = cache_layer * target_pos * self.kv_dim;
+                    let src_end = src_start + target_pos * self.kv_dim;
+
+                    self.k_cache[start..end].copy_from_slice(&k_data[src_start..src_end]);
+                    self.v_cache[start..end].copy_from_slice(&v_data[src_start..src_end]);
+                }
+                self.current_pos = target_pos;
+                Ok(())
+            }
+            KvPrecision::Q8_0 | KvPrecision::TurboQuant4 | KvPrecision::TurboQuant2 => {
+                let bpt = self.bytes_per_token();
+                let f32_per_token = (bpt + 3) / 4;
+                let expected_elements = n_alloc * target_pos * f32_per_token;
+
+                if k_data.len() != expected_elements || v_data.len() != expected_elements {
+                    return Err(KvError::DimMismatch {
+                        expected: expected_elements,
+                        got: k_data.len(),
+                    });
+                }
+
+                let k_src_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(k_data.as_ptr() as *const u8, k_data.len() * 4)
+                };
+                let v_src_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(v_data.as_ptr() as *const u8, v_data.len() * 4)
+                };
+
+                for cache_layer in 0..n_alloc {
+                    let start = cache_layer * self.max_seq_len * bpt;
+                    let end = start + target_pos * bpt;
+                    let src_start = cache_layer * target_pos * bpt;
+                    let src_end = src_start + target_pos * bpt;
+
+                    if end <= self.k_q8_cache.len() {
+                        self.k_q8_cache[start..end].copy_from_slice(&k_src_bytes[src_start..src_end]);
+                        self.v_q8_cache[start..end].copy_from_slice(&v_src_bytes[src_start..src_end]);
+                    }
+                }
+                self.current_pos = target_pos;
+                Ok(())
+            }
         }
-
-        for cache_layer in 0..n_alloc {
-            let start = cache_layer * self.max_seq_len * self.kv_dim;
-            let end = start + target_pos * self.kv_dim;
-            let src_start = cache_layer * target_pos * self.kv_dim;
-            let src_end = src_start + target_pos * self.kv_dim;
-
-            self.k_cache[start..end].copy_from_slice(&k_data[src_start..src_end]);
-            self.v_cache[start..end].copy_from_slice(&v_data[src_start..src_end]);
-        }
-
-        self.current_pos = target_pos;
-        Ok(())
     }
 }
 

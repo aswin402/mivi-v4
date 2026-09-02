@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
             max_memory,
             warn_memory,
             no_safelock,
+            kv_precision,
         } => {
             mivi_cli::run_serve(mivi_cli::ServeArgs {
                 port,
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
                 max_memory,
                 warn_memory,
                 no_safelock,
+                kv_precision,
             })
             .await?;
         }
@@ -58,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
             ctx_size,
             system,
             thinking,
+            kv_precision,
         } => {
             mivi_cli::run_chat(mivi_cli::ChatArgs {
                 model,
@@ -71,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 ctx_size,
                 system,
                 thinking,
+                kv_precision,
             })?;
         }
         Commands::Info { model } => {
@@ -79,8 +83,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             mivi_cli::run_doctor()?;
         }
-        Commands::Bench { model } => {
-            mivi_cli::run_bench(model)?;
+        Commands::Bench {
+            model,
+            kv_precision,
+        } => {
+            mivi_cli::run_bench(model, kv_precision)?;
         }
         Commands::Cache { action } => match action {
             mivi_cli::commands::CacheCommands::List { dir } => {

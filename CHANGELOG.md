@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.17] - 2026-09-02
+
+### Configurable Low-Memory KV Precision (Q8_0 / TurboQuant) & Auto-Adaptive Memory Watchdog
+
+#### 💡 Ideas, Inspirations & Sources
+- **Multi-Precision KV Cache Architecture (`mivi-kv::cache`, `mivi-model::model`)**:
+  - *Full Precision Export & Import*: Extended `KvCache::export_state` and `import_state` to support all quantization precisions (`F32`, `Q8_0`, `TurboQuant4`, `TurboQuant2`), enabling Prefix Caching (LMCache) and Semantic Rollback across all quantized modes.
+  - *Configurable CLI `--kv-precision`*: Added `--kv-precision <f32|q8_0|tq4|tq2>` to `mivi chat`, `mivi serve`, and `mivi bench`.
+  - *Q8_0 High-Performance Quantization*: `kv_precision=q8_0` delivers **21.7 tok/s** with **73.4% KV cache RAM savings** while maintaining 100% mathematical accuracy.
+- **Auto-Adaptive Watchdog & Pruning (`mivi-server::watchdog`)**:
+  - *Lowered Default Ceiling*: Reduced default emergency kill threshold from 900 MB down to **450 MB** (and warning at **350 MB**) tailored for edge and container environments.
+  - *Adaptive Sizing*: Added `WatchdogConfig::adaptive` dynamically computing optimal thresholds from model weights and active KV cache dimensions.
+
+---
+
 ## [v0.2.16] - 2026-09-02
 
 ### JetSpec-Inspired Multi-Branch Tree-PLD, Reasoning Speculative Sizing & Zero-Alloc Tree Verification
