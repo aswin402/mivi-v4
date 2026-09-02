@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.21] - 2026-09-03
+
+### Universal AI Agent API Compatibility & Dual-Stack Host Binding
+
+#### 💡 Ideas, Inspirations & Sources
+- **Base `/v1` Probe & Model Retrieval (`mivi-server::routes`, `v1_root`, `get_model_info`)**:
+  - *Inspiration*: [OpenAI API Reference, LangChain, AutoGen, CrewAI & LiteLLM].
+  - *Problem Fixed*: AI agent frameworks ping `GET /v1` or `GET /v1/` on initialization and query `GET /v1/models/{model}` to verify engine availability. Previously returned 404.
+  - *Solution*: Added dedicated routes for `GET /v1`, `GET /v1/`, `GET /v1/models/:model_id`, `GET /models`, and `GET /models/:model_id`.
+- **Ollama API Compatibility Layer (`/api/tags`, `/api/version`)**:
+  - Added native Ollama endpoint compatibility for agent frameworks and IDE extensions (Continue, Roo Code, Cline, OpenCode) that autodetect local Ollama instances.
+- **Unprefixed Route Aliases (`/chat/completions`, `/messages`)**:
+  - Registered direct unprefixed paths for client libraries that configure `baseURL = "http://localhost:8080"` without `/v1`.
+- **Permissive CORS Policy (`CorsLayer::permissive()`)**:
+  - Enabled full cross-origin resource sharing supporting browser webviews, web extensions, and local frontends sending preflight `OPTIONS` requests.
+- **`0.0.0.0` Host Binding in Recipes (`justfile`)**:
+  - Changed default `just serve` host to `0.0.0.0` so clients resolving `localhost` to IPv6 `::1` or IPv4 `127.0.0.1` connect without `ECONNREFUSED`.
+- **Flexible Schema & Role Mapping (`mivi-server::types`, `mivi-tokenizer::chatml`)**:
+  - Made `model` optional with fallback to the running SLM and mapped OpenAI `developer` message role to `system`.
+
+---
+
 ## [v0.2.20] - 2026-09-03
 
 ### PrefixCache RAM Budget Ceiling & Real SLM Default Alignment

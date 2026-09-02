@@ -16,7 +16,7 @@ use axum::{
 use mivi_tools::get_builtin_tool_definitions;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
@@ -28,13 +28,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(crate::ui::serve_embedded_ui))
         .route("/web", get(crate::ui::serve_embedded_ui))
         .route("/health", get(health_check))
+        // Base API check endpoints for AI agent frameworks (e.g. baseURL = http://localhost:8080/v1)
+        .route("/v1", get(v1_root))
+        .route("/v1/", get(v1_root))
         .route("/v1/models", get(list_models))
+        .route("/v1/models/:model_id", get(get_model_info))
+        .route("/models", get(list_models))
+        .route("/models/:model_id", get(get_model_info))
         .route("/v1/mivi/status", get(get_status))
-        .route("/v1/mivi/tools", get(list_tools));
+        .route("/v1/mivi/tools", get(list_tools))
+        // Ollama API compatibility routes
+        .route("/api/tags", get(list_models_ollama))
+        .route("/api/version", get(ollama_version));
 
     let protected_routes = Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/chat/completions", post(chat::chat_completions))
         .route("/v1/messages", post(anthropic::anthropic_messages_handler))
+        .route("/messages", post(anthropic::anthropic_messages_handler))
         .route("/v1/mivi/agent", post(agent::run_agent_task));
 
     let protected_routes = if let Some(key) = auth_key {
@@ -55,43 +66,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
         ))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::predicate(|origin, _| {
-                    if let Ok(s) = origin.to_str() {
-                        let host_part = s
-                            .strip_prefix("http://")
-                            .or_else(|| s.strip_prefix("https://"))
-                            .unwrap_or(s);
-                        let host = host_part.split(':').next().unwrap_or(host_part);
-                        host == "localhost"
-                            || host == "127.0.0.1"
-                            || host == "[::1]"
-                            || host == "::1"
-                            || host == "0.0.0.0"
-                            || host.starts_with("192.168.")
-                            || host.starts_with("10.")
-                            || (host.starts_with("172.")
-                                && host
-                                    .split('.')
-                                    .nth(1)
-                                    .and_then(|p| p.parse::<u8>().ok())
-                                    .map_or(false, |b| b >= 16 && b <= 31))
-                    } else {
-                        false
-                    }
-                }))
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                    axum::http::HeaderName::from_static("x-api-key"),
-                    axum::http::HeaderName::from_static("anthropic-version"),
-                    axum::http::HeaderName::from_static("anthropic-beta"),
-                ]),
-        )
+        .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state)
+}
+
+async fn v1_root(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "ok",
+        "engine": mivi_core::ENGINE_NAME,
+        "model": state.model_name,
+        "version": env!("CARGO_PKG_VERSION"),
+        "endpoints": {
+            "chat_completions": "/v1/chat/completions",
+            "messages": "/v1/messages",
+            "models": "/v1/models",
+            "agent": "/v1/mivi/agent"
+        }
+    }))
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -123,6 +115,50 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "permission": []
             }
         ]
+    }))
+}
+
+async fn get_model_info(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let id = if model_id.is_empty() {
+        state.model_name.clone()
+    } else {
+        model_id
+    };
+    Json(serde_json::json!({
+        "id": id,
+        "object": "model",
+        "owned_by": mivi_core::ENGINE_OWNER,
+        "permission": []
+    }))
+}
+
+async fn list_models_ollama(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "models": [
+            {
+                "name": state.model_name,
+                "model": state.model_name,
+                "modified_at": chrono::Utc::now().to_rfc3339(),
+                "size": 0,
+                "digest": "",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "hybrid-slm",
+                    "parameter_size": "1.2B",
+                    "quantization_level": "Q4_K_M"
+                }
+            }
+        ]
+    }))
+}
+
+async fn ollama_version() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION")
     }))
 }
 

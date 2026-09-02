@@ -26,7 +26,7 @@ impl std::fmt::Display for Role {
 impl std::str::FromStr for Role {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("system") {
+        if s.eq_ignore_ascii_case("system") || s.eq_ignore_ascii_case("developer") {
             Ok(Self::System)
         } else if s.eq_ignore_ascii_case("assistant") {
             Ok(Self::Assistant)

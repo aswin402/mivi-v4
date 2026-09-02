@@ -56,7 +56,7 @@ verify: fmt-check clippy test
 
 # Launch the OpenAI-compatible HTTP inference & Agent OS server
 # Usage: just serve [model_path] [port] [host] [max_memory] [warn_memory]
-serve model="models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" port="8080" host="127.0.0.1" max_memory="3000" warn_memory="2400":
+serve model="models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" port="8080" host="0.0.0.0" max_memory="3000" warn_memory="2400":
     cargo run --release --jobs 3 -- serve --model {{model}} --host {{host}} --port {{port}} --max-memory {{max_memory}} --warn-memory {{warn_memory}}
 
 # Start interactive CLI terminal chat session with the model
