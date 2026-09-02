@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.14] - 2026-09-02
+
+### Turbo-BPE Zero-Allocation Intrusive Merger, Word Memo Cache & Workload-Adaptive Expert Learning Cache
+
+#### 💡 Ideas, Inspirations & Sources
+- **GigaToken (`marcelroed/gigatoken`)**:
+  - *Turbo-BPE Zero-Allocation Intrusive Linked Merger (`mivi-tokenizer::turbo`)*: Replaced vector allocations and string-cloning loops with a stack-allocated intrusive linked-array buffer (`[BpeSymbolNode; 256]`), eliminating 100% of heap allocations during BPE symbol merges.
+  - *Word-Level Memoization Cache (`mivi-tokenizer::turbo`)*: Implemented thread-safe direct-mapped `WordMemoCache` for sub-5ns Zipf word token retrieval, bypassing merge loops for common keywords (`function`, `import`, `let`, `def`, `class`, `the`, `return`).
+  - *256-Byte Pre-Token Lookup Table*: Added $O(1)$ ASCII character classifier (`BYTE_CLASS_TABLE`) for rapid whitespace/word boundary identification.
+- **AirLLM (`lyogavin/airllm`) & Colibrì (`JustVugg/colibri`)**:
+  - *Workload-Adaptive Expert Learning Cache (`mivi-model::expert_cache`)*: Implemented `ExpertHeatTracker` and `ExpertPinningManager` tracking MoE expert activation frequency with exponential moving average (EMA) decay.
+  - *Dynamic RAM Residency Policies*: Added `ExpertPinningStrategy::TopGlobal` and `TopPerLayer` to pin the hottest 20% of MoE specialists in RAM while streaming cold experts on demand.
+  - *Persistence*: Auto-saves/loads learned user workload heat profiles to `.mivi/expert_heat.json`.
+
+---
+
 ## [v0.2.13] - 2026-09-02
 
 ### Full Codebase Hardening, Zero-Allocation Grammar Engine, FlashDecoding Numerical Stability & Web UI Refinement

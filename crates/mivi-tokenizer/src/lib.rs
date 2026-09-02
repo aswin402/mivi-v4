@@ -2,6 +2,7 @@ pub mod align;
 pub mod bpe;
 pub mod chatml;
 pub mod special;
+pub mod turbo;
 pub mod vocab;
 
 pub use align::{
@@ -11,4 +12,5 @@ pub use align::{
 pub use bpe::{Result, Tokenizer, TokenizerError, Utf8StreamDecoder};
 pub use chatml::{format_chatml, ChatMessage, Role};
 pub use special::*;
+pub use turbo::{IntrusiveBpeMerger, WordMemoCache, BYTE_CLASS_TABLE};
 pub use vocab::Vocab;

@@ -46,6 +46,7 @@ pub fn unicode_to_bytes() -> HashMap<char, u8> {
         .collect()
 }
 
+#[allow(dead_code)]
 static BYTE_TO_UNICODE: std::sync::LazyLock<HashMap<u8, char>> =
     std::sync::LazyLock::new(bytes_to_unicode);
 static UNICODE_TO_BYTE: std::sync::LazyLock<HashMap<char, u8>> =
@@ -68,11 +69,16 @@ static SPECIAL_TOKENS_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::Lazy
 pub struct Tokenizer {
     vocab: Vocab,
     merges: HashMap<(String, String), u32>,
+    memo_cache: crate::turbo::WordMemoCache,
 }
 
 impl Tokenizer {
     pub fn new(vocab: Vocab, merges: HashMap<(String, String), u32>) -> Self {
-        Self { vocab, merges }
+        Self {
+            vocab,
+            merges,
+            memo_cache: crate::turbo::WordMemoCache::new(),
+        }
     }
 
     pub fn vocab(&self) -> &Vocab {
@@ -81,6 +87,10 @@ impl Tokenizer {
 
     pub fn merges(&self) -> &HashMap<(String, String), u32> {
         &self.merges
+    }
+
+    pub fn memo_cache(&self) -> &crate::turbo::WordMemoCache {
+        &self.memo_cache
     }
 
     /// Encode input text into a sequence of BPE token IDs, preserving special tokens atomically.
@@ -116,8 +126,11 @@ impl Tokenizer {
     fn encode_regular_text(&self, text: &str, tokens: &mut Vec<u32>) {
         for m in PRE_TOKENIZE_REGEX.find_iter(text) {
             let piece = m.as_str();
-            let piece_tokens = self.bpe_encode_piece(piece);
-            tokens.extend(piece_tokens);
+            if !self.memo_cache.lookup(piece, tokens) {
+                let piece_tokens = self.bpe_encode_piece(piece);
+                self.memo_cache.insert(piece, &piece_tokens);
+                tokens.extend(piece_tokens);
+            }
         }
     }
 
@@ -132,71 +145,16 @@ impl Tokenizer {
             return vec![id];
         }
 
-        // 2. Convert UTF-8 bytes to GPT-2 unicode symbols
-        let mut symbols: Vec<String> = piece
-            .as_bytes()
-            .iter()
-            .map(|&b| {
-                if let Some(&c) = BYTE_TO_UNICODE.get(&b) {
-                    c.to_string()
-                } else {
-                    (b as char).to_string()
-                }
-            })
-            .collect();
-
-        if symbols.len() <= 1 {
-            if let Some(s) = symbols.first() {
-                if let Some(id) = self.vocab.get_id(s) {
-                    return vec![id];
-                }
-            }
-            return vec![crate::special::UNK_TOKEN_ID];
+        let mut out = Vec::new();
+        crate::turbo::IntrusiveBpeMerger::encode_piece_zero_alloc(
+            piece,
+            &self.vocab,
+            &self.merges,
+            &mut out,
+        );
+        if out.is_empty() {
+            out.push(crate::special::UNK_TOKEN_ID);
         }
-
-        // 3. Iterative BPE pair merging using lowest rank in self.merges
-        while symbols.len() >= 2 {
-            let mut best_pair_idx = None;
-            let mut min_rank = u32::MAX;
-
-            for i in 0..symbols.len() - 1 {
-                let pair = (symbols[i].clone(), symbols[i + 1].clone());
-                if let Some(&rank) = self.merges.get(&pair) {
-                    if rank < min_rank {
-                        min_rank = rank;
-                        best_pair_idx = Some(i);
-                    }
-                }
-            }
-
-            let Some(idx) = best_pair_idx else {
-                break;
-            };
-
-            // Merge symbols[idx] and symbols[idx+1]
-            let next_sym = symbols.remove(idx + 1);
-            symbols[idx].push_str(&next_sym);
-        }
-
-        // 4. Map merged symbols to vocabulary IDs
-        let mut out = Vec::with_capacity(symbols.len());
-        for sym in &symbols {
-            if let Some(id) = self.vocab.get_id(sym) {
-                out.push(id);
-            } else {
-                // Fallback to byte tokens
-                for c in sym.chars() {
-                    let b = UNICODE_TO_BYTE.get(&c).copied().unwrap_or(c as u8);
-                    let hex = format!("<0x{:02X}>", b);
-                    out.push(
-                        self.vocab
-                            .get_id(&hex)
-                            .unwrap_or(crate::special::UNK_TOKEN_ID),
-                    );
-                }
-            }
-        }
-
         out
     }
 
