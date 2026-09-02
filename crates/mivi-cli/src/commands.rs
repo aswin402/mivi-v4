@@ -27,11 +27,11 @@ pub enum Commands {
         host: String,
         #[arg(short, long)]
         model: Option<PathBuf>,
-        /// Maximum RSS memory in MB before triggering safety shutdown (default: 450 MB)
-        #[arg(long, default_value = "450")]
+        /// Maximum RSS memory in MB before triggering safety shutdown (default: 3000 MB)
+        #[arg(long, default_value = "3000")]
         max_memory: f32,
-        /// Warning threshold RSS memory in MB (default: 350 MB)
-        #[arg(long, default_value = "350")]
+        /// Warning threshold RSS memory in MB (default: 2400 MB)
+        #[arg(long, default_value = "2400")]
         warn_memory: f32,
         /// Disable the resource safety watchdog
         #[arg(long)]

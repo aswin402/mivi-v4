@@ -20,8 +20,8 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self {
-            warn_mb: 350.0,
-            kill_mb: 450.0,
+            warn_mb: 2400.0,
+            kill_mb: 3000.0,
             check_interval: Duration::from_secs(3),
             enabled: true,
         }

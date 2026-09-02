@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.18] - 2026-09-03
+
+### Default 3.0 GB Memory Ceiling & Large Model Server Hardening
+
+#### 💡 Ideas, Inspirations & Sources
+- **Expanded Default Memory Envelope (`mivi-server::watchdog`, `mivi-cli::commands`, `justfile`)**:
+  - *3.0 GB RAM Ceiling*: Increased default watchdog kill ceiling from 450 MB to **3000 MB** (with soft warning threshold at **2400 MB**), allowing seamless full-context inference on larger 1.2B and 2.6B models without premature safety aborts during heavy generation.
+  - *Justfile Alignment*: Updated `just serve` recipe defaults to pass `--max-memory 3000` and `--warn-memory 2400`.
+
+---
+
 ## [v0.2.17] - 2026-09-02
 
 ### Configurable Low-Memory KV Precision (Q8_0 / TurboQuant) & Auto-Adaptive Memory Watchdog
