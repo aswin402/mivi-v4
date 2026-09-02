@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.20] - 2026-09-03
+
+### PrefixCache RAM Budget Ceiling & Real SLM Default Alignment
+
+#### 💡 Ideas, Inspirations & Sources
+- **Strict Memory Budget for PrefixCache (`mivi-kv::prefix`, `PrefixCache::prune_to_bytes`)**:
+  - *Inspiration*: [LMCache & vLLM memory pool management].
+  - *Problem Fixed*: Previously, `PrefixCache` allowed up to 256 uncompressed `HybridStateSnapshot` state instances with no byte limit, which caused RAM to balloon toward 3.0 GB and trigger the emergency safety watchdog during multi-turn or long reasoning inferences on 1.2B/2.6B models.
+  - *Solution*: Set `DEFAULT_MAX_CACHED_CHUNKS = 32` and introduced a strict `DEFAULT_MAX_PREFIX_CACHE_BYTES = 32 MB` ceiling with automatic LRU byte-level pruning (`prune_to_bytes`) after every snapshot insertion.
+- **Recipe Alignment with Real SLMs (`justfile`)**:
+  - Configured `just serve`, `just chat`, and `just info` recipes to default to `models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf` instead of the early 350M dummy test fixture, ensuring full intelligence, multi-turn reasoning, and real answers out of the box.
+
+---
+
 ## [v0.2.19] - 2026-09-03
 
 ### Live Hono-Style HTTP Logs with User Prompt & SLM Output Visualizer

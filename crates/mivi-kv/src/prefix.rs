@@ -10,8 +10,10 @@ use std::collections::{HashMap, VecDeque};
 /// Default token chunk size for hierarchical prefix caching (64 tokens).
 pub const PREFIX_CHUNK_SIZE: usize = 64;
 
-/// Default maximum number of cached chunks in memory (~64 MB budget).
-pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 256;
+/// Default maximum number of cached chunks in memory.
+pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 32;
+/// Default maximum RAM budget for PrefixCache (32 MB).
+pub const DEFAULT_MAX_PREFIX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Snapshot of the complete hybrid inference state at a given sequence position.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +101,7 @@ pub struct PrefixCache {
     chunks: HashMap<u64, PrefixChunk>,
     lru_order: VecDeque<u64>,
     total_memory_bytes: usize,
+    max_memory_bytes: usize,
 }
 
 impl Default for PrefixCache {
@@ -110,12 +113,18 @@ impl Default for PrefixCache {
 impl PrefixCache {
     /// Create a new prefix cache with specified capacity and chunk size.
     pub fn new(max_chunks: usize, chunk_size: usize) -> Self {
+        Self::with_budget(max_chunks, chunk_size, DEFAULT_MAX_PREFIX_CACHE_BYTES)
+    }
+
+    /// Create a prefix cache with an explicit maximum memory byte budget.
+    pub fn with_budget(max_chunks: usize, chunk_size: usize, max_memory_bytes: usize) -> Self {
         Self {
             chunk_size: if chunk_size > 0 { chunk_size } else { PREFIX_CHUNK_SIZE },
             max_chunks: if max_chunks > 0 { max_chunks } else { DEFAULT_MAX_CACHED_CHUNKS },
-            chunks: HashMap::with_capacity(max_chunks),
-            lru_order: VecDeque::with_capacity(max_chunks),
+            chunks: HashMap::with_capacity(max_chunks.min(32)),
+            lru_order: VecDeque::with_capacity(max_chunks.min(32)),
             total_memory_bytes: 0,
+            max_memory_bytes: if max_memory_bytes > 0 { max_memory_bytes } else { DEFAULT_MAX_PREFIX_CACHE_BYTES },
         }
     }
 
@@ -218,6 +227,7 @@ impl PrefixCache {
         self.chunks.insert(hash, chunk);
         self.lru_order.push_back(hash);
         self.total_memory_bytes += chunk_mem;
+        self.prune_to_bytes(self.max_memory_bytes);
         hash
     }
 
