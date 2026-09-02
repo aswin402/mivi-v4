@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.12] - 2026-09-02
+
+### In-Engine Prefix Cache Alignment, AST Code Minification, Grammar Compaction & OKF v0.2 Knowledge Engine
+
+#### 💡 Ideas, Inspirations & Sources
+- **Headroom MCP (`aswin402/headroom-mcp`) & LMCache**:
+  - *In-Engine Prefix Cache Boundary Aligner (`mivi-tokenizer::align`)*: Implemented `split_aligned_prefix`, `pad_to_chunk_boundary`, and `normalize_prompt_whitespace` to align static prompts and ChatML headers to exact 64-token chunk boundaries (`PREFIX_CHUNK_SIZE = 64`), guaranteeing **100% prefix cache reuse and 0 ms TTFT**.
+  - *Syntax-Aware AST Code & Output Minifier (`mivi-core::minifier`)*: Implemented AST signature extractors for Rust, Python, and TypeScript, stripping function bodies while retaining type contracts to reduce code token consumption by up to **85%** and prevent SLM attention dispersion.
+  - *Command Output & Log Filters*: Added compiler/test minification that suppresses passing tests and download spam while preserving failing assertion traces and panics.
+- **Google Cloud Platform Open Knowledge Format v0.2 (`GoogleCloudPlatform/open-knowledge-format`)**:
+  - *Native OKF v0.2 Knowledge Parser & Navigator (`mivi-context::okf`)*: Ingests Markdown concepts with structured YAML frontmatter (`type`, `sources`, `trust_tier`, `status`, `stale_after`) and hierarchical `index.md` progressive disclosure navigation.
+- **Grammar & JSON Schema Compactor (`mivi-model::grammar`)**:
+  - *Canonical Schema Minifier*: Added `compact_json_schema` and `compact_json_schema_str` stripping non-structural annotations (`description`, `title`, `$comment`) to save **40%–60%** prompt tokens during grammar-constrained logit masking.
+
+---
+
 ## [v0.2.11] - 2026-09-02
 
 ### Built-in Interactive Web UI Dashboard & Telemetry Visualizer

@@ -3,6 +3,7 @@
 pub mod arena;
 pub mod brand;
 pub mod math;
+pub mod minifier;
 pub mod rope;
 pub mod simd;
 pub mod sys;
@@ -15,6 +16,10 @@ pub use brand::{
     ENGINE_OWNER, ENV_API_KEY,
 };
 pub use math::{dot_product, rms_norm, silu, silu_scalar, softmax, swiglu, vec_add, vec_fmadd};
+pub use minifier::{
+    minify_git_diff, minify_json_payload, minify_python_code, minify_rust_code, minify_source,
+    minify_test_output, minify_typescript_code, Language,
+};
 pub use rope::{RopeCache, RopeError};
 pub use simd::{rms_norm_in_place_simd, rms_norm_simd};
 pub use sys::{estimate_process_memory_mb, get_system_page_size};
