@@ -25,6 +25,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let auth_key = state.api_key.clone();
     let max_body = state.config.max_body_bytes;
     let public_routes = Router::new()
+        .route("/", get(crate::ui::serve_embedded_ui))
+        .route("/web", get(crate::ui::serve_embedded_ui))
         .route("/health", get(health_check))
         .route("/v1/models", get(list_models))
         .route("/v1/mivi/status", get(get_status))

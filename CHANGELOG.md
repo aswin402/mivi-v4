@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.11] - 2026-09-02
+
+### Built-in Interactive Web UI Dashboard & Telemetry Visualizer
+
+#### 💡 Ideas, Inspirations & Sources
+- **Colibrì (`JustVugg/colibri`) & AirLLM (`lyogavin/airllm`)**:
+  - *Embedded Web UI & Live Telemetry Dashboard (`mivi-server::ui`)*: Inspired by Colibrì's `./coli web` dashboard, added a zero-dependency, single-file HTML/CSS/JS interface served directly at `http://localhost:8913/` (and `/web`) with live SSE streaming chat, collapsible `<think>` blocks, interactive `<tool_call>` execution cards, live generation speedometers, and memory tier watermarks.
+  - *Architectural Research & Future Roadmap Blueprint (`docs/AIRLLM_AND_COLIBRI_RESEARCH.md`)*: Saved research for future implementation:
+    1. *Workload-Adaptive Expert Learning Cache (`.mivi/expert_heat.json`)*: Track expert routing frequencies across user sessions and pin the hottest specialists into RAM.
+    2. *Asynchronous Lookahead Weight Prefetching*: Overlap layer $L+1$ disk reading via `madvise(MADV_WILLNEED)` while layer $L$ computes.
+
+---
+
 ## [v0.2.10] - 2026-09-02
 
 ### Outlier-Free TurboQuant 4-Bit & 2-Bit Attention KV Cache Compression

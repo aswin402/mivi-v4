@@ -101,6 +101,7 @@ fn print_startup_banner(
   {DIM}•{RESET} {BOLD}Memory:{RESET}    {:.1} MB {DIM}({}){RESET}
 
   {BOLD}Routes:{RESET}
+    {GREEN}GET{RESET}   {BOLD_CYAN}/{RESET} {DIM}(Interactive Web UI Dashboard){RESET}
     {GREEN}GET{RESET}   {DIM}/health{RESET}
     {GREEN}GET{RESET}   {DIM}/v1/models{RESET}
     {GREEN}GET{RESET}   {DIM}/v1/mivi/status{RESET}

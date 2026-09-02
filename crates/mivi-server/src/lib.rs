@@ -9,6 +9,7 @@ pub mod routes;
 pub mod state;
 pub mod streaming;
 pub mod types;
+pub mod ui;
 pub mod watchdog;
 
 pub use auth::require_api_key;
@@ -26,6 +27,7 @@ pub use types::{
     AgentRunRequest, AppError, ChatCompletionRequest, ChatCompletionResponse, ChoiceDto,
     MessageDto, MiviStatusResponse, OpenAiErrorDetail, OpenAiErrorResponse, UsageDto,
 };
+pub use ui::serve_embedded_ui;
 pub use watchdog::{ResourceWatchdog, WatchdogConfig};
 
 /// Attempts to bind a TcpListener to the given IP and port.
