@@ -57,6 +57,8 @@ struct ChunkDeltaBorrow<'a> {
     content: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<&'a [serde_json::Value]>,
 }
 
 pub const OPENAI_CHUNK_OBJECT: &str = "chat.completion.chunk";
@@ -76,6 +78,7 @@ pub fn create_chunk_event(
         role: delta.role.as_deref(),
         content: delta.content.as_deref(),
         thinking: delta.thinking.as_deref(),
+        tool_calls: delta.tool_calls.as_deref(),
     };
     let chunk = ChatCompletionChunkBorrow {
         id,
@@ -114,6 +117,7 @@ pub fn create_initial_chunk_event(id: &str, model: &str) -> Event {
                 role: Some(ROLE_ASSISTANT),
                 content: Some(""),
                 thinking: None,
+                tool_calls: None,
             },
             finish_reason: None,
         }],
@@ -158,6 +162,7 @@ pub fn create_content_chunk_event(id: &str, model: &str, content: &str) -> Event
                 role: None,
                 content: Some(content),
                 thinking: None,
+                tool_calls: None,
             },
             finish_reason: None,
         }],
@@ -188,6 +193,7 @@ pub fn create_thinking_chunk_event(id: &str, model: &str, thinking: &str) -> Eve
                 role: None,
                 content: None,
                 thinking: Some(thinking),
+                tool_calls: None,
             },
             finish_reason: None,
         }],

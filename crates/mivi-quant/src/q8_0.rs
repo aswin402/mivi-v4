@@ -75,7 +75,7 @@ pub fn dot_q8_0_f32(q: &[f32], k_block: &[u8]) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn dot_q8_0_f32_avx2(q: &[f32], k_block: &[u8], d: f32) -> f32 {
     let q_ptr = q.as_ptr();
     let k_ptr = k_block.as_ptr().add(2); // Skip 2 bytes of f16 scale

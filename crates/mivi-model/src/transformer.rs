@@ -140,7 +140,7 @@ fn compute_gqa_attention(
             mivi_kv::KvPrecision::Q8_0 => {
                 let blocks_per_head = (head_dim + 31) / 32;
                 let kv_head_block_start = kv_head * blocks_per_head;
-                let mut v_head_buf = [0.0f32; 128];
+                let mut v_head_buf = [0.0f32; 256];
 
                 for t in 0..seq_len {
                     // Compute fused dot product directly over Q8_0 blocks

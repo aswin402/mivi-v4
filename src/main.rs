@@ -18,8 +18,8 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| n.get().clamp(1, 8))
-                .unwrap_or(3)
+                .map(|n| n.get().max(1))
+                .unwrap_or(4)
         });
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)

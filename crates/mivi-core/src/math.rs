@@ -74,7 +74,11 @@ pub fn softmax(x: &mut [f32]) {
 /// Scalar SiLU activation: x / (1.0 + exp(-x))
 #[inline]
 pub fn silu_scalar(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
+    if x <= -50.0 {
+        0.0
+    } else {
+        x / (1.0 + (-x).exp())
+    }
 }
 
 /// In-place SiLU (Swish) activation: x = x * sigmoid(x)

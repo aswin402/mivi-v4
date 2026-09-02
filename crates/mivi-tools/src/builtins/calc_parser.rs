@@ -46,10 +46,21 @@ pub fn tokenize_expr(input: &str) -> Result<Vec<MathToken>, String> {
             }
             '0'..='9' | '.' => {
                 let mut num_str = String::new();
+                let mut has_e = false;
                 while let Some(&nc) = chars.peek() {
                     if nc.is_ascii_digit() || nc == '.' {
                         num_str.push(nc);
                         chars.next();
+                    } else if (nc == 'e' || nc == 'E') && !has_e {
+                        has_e = true;
+                        num_str.push(nc);
+                        chars.next();
+                        if let Some(&sign) = chars.peek() {
+                            if sign == '+' || sign == '-' {
+                                num_str.push(sign);
+                                chars.next();
+                            }
+                        }
                     } else {
                         break;
                     }
@@ -212,5 +223,11 @@ mod tests {
         let res = evaluate_expression(&deeply_nested);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("depth limit exceeded"));
+    }
+
+    #[test]
+    fn test_calculator_scientific_notation() {
+        assert_eq!(evaluate_expression("1e6 + 2e5").unwrap(), 1200000.0);
+        assert_eq!(evaluate_expression("2.5e-3 * 1000").unwrap(), 2.5);
     }
 }

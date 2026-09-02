@@ -59,16 +59,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|origin, _| {
                     if let Ok(s) = origin.to_str() {
-                        s.starts_with("http://localhost")
-                            || s.starts_with("https://localhost")
-                            || s.starts_with("http://127.0.0.1")
-                            || s.starts_with("https://127.0.0.1")
-                            || s.starts_with("http://[::1]")
-                            || s.starts_with("https://[::1]")
-                            || s.starts_with("http://0.0.0.0")
-                            || s.starts_with("http://192.168.")
-                            || s.starts_with("http://10.")
-                            || s.starts_with("http://172.")
+                        let host_part = s
+                            .strip_prefix("http://")
+                            .or_else(|| s.strip_prefix("https://"))
+                            .unwrap_or(s);
+                        let host = host_part.split(':').next().unwrap_or(host_part);
+                        host == "localhost"
+                            || host == "127.0.0.1"
+                            || host == "[::1]"
+                            || host == "::1"
+                            || host == "0.0.0.0"
+                            || host.starts_with("192.168.")
+                            || host.starts_with("10.")
+                            || (host.starts_with("172.")
+                                && host
+                                    .split('.')
+                                    .nth(1)
+                                    .and_then(|p| p.parse::<u8>().ok())
+                                    .map_or(false, |b| b >= 16 && b <= 31))
                     } else {
                         false
                     }

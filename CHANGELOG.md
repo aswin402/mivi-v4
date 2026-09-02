@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.15] - 2026-09-02
+
+### Full Codebase Hardening, Security Safeguards & Multimodal Tool Enhancements
+
+#### 💡 Ideas, Inspirations & Sources
+- **Tokenizer & Turbo-BPE Hardening (`mivi-tokenizer::turbo`, `mivi-tokenizer::chatml`)**:
+  - *Intrusive BPE Array Bounds Clamp*: Fixed potential stack array out-of-bounds panic when input piece length equals or exceeds `MAX_PIECE_BYTES = 256`.
+  - *ChatML Multi-System Instruction Guard*: Enforced single-injection for `<tools>` and thinking instruction tags across conversation histories with multiple system turns.
+- **FlashDecoding & Model Execution (`mivi-model::transformer`, `mivi-core::math`)**:
+  - *Head Dimension Scalability*: Expanded `v_head_buf` to 256 elements in `mivi-model::transformer`, supporting models with `head_dim = 256` (Gemma 2, Command R+, DeepSeek V2/V3).
+  - *Numerical Stability on $-\infty$*: Guarded `silu_scalar` against IEEE 754 $-\infty / (1.0 + \infty) = \text{NaN}$ computation on extreme negative inputs.
+  - *AVX2 Target Feature Syntax*: Fixed comma-separated target feature string syntax in `mivi-quant::q8_0`.
+- **Server Security & Protocol Compliance (`mivi-server::routes`, `mivi-server::streaming`)**:
+  - *CORS Origin Validation*: Replaced naive prefix matching with exact host parsing to eliminate cross-origin request vulnerabilities.
+  - *Streaming Tool Call Serialization*: Added missing `tool_calls` delta borrowing to `ChunkDeltaBorrow` to ensure streaming tool calls serialize correctly.
+- **Rayon Parallelism & Tool Enhancements (`src/main.rs`, `mivi-tools::calc_parser`)**:
+  - *High-Core CPU Scalability*: Removed arbitrary 8-thread clamp on Rayon thread pool to fully utilize 16, 32, 64, and 128 core machines.
+  - *Scientific Notation Support*: Added exponent `e`/`E` parsing to calculator Pratt parser (e.g. `1e6 + 2.5e-3`).
+
+---
+
 ## [v0.2.14] - 2026-09-02
 
 ### Turbo-BPE Zero-Allocation Intrusive Merger, Word Memo Cache & Workload-Adaptive Expert Learning Cache

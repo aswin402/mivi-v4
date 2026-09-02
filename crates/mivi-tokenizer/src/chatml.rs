@@ -71,6 +71,8 @@ pub fn format_chatml(
         writeln!(out, "{}", EOS_TOKEN).unwrap();
     }
 
+    let mut system_instructions_injected = false;
+
     for msg in messages {
         if let Some(name) = &msg.name {
             writeln!(out, "{}{}:{name}", BOS_TOKEN, msg.role).unwrap();
@@ -82,8 +84,9 @@ pub fn format_chatml(
             out.push_str(content);
         }
 
-        if msg.role == Role::System {
+        if msg.role == Role::System && !system_instructions_injected {
             append_tool_and_thinking_instructions(&mut out, tools_json, enable_thinking);
+            system_instructions_injected = true;
         }
 
         writeln!(out, "{}", EOS_TOKEN).unwrap();
