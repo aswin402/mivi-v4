@@ -254,7 +254,9 @@ impl TurboQuant4Bit {
         let mut packed = vec![0u8; packed_len];
 
         for (i, &coord) in rotated.iter().enumerate() {
-            let code = match self.scaled_boundaries.binary_search_by(|b| b.partial_cmp(&coord).unwrap()) {
+            let code = match self.scaled_boundaries.binary_search_by(|b| {
+                b.partial_cmp(&coord).unwrap_or(std::cmp::Ordering::Less)
+            }) {
                 Ok(idx) => (idx + 1).min(15) as u8,
                 Err(idx) => idx.min(15) as u8,
             };

@@ -664,7 +664,11 @@ impl KvCache {
     }
 
     /// Export the KV cache memory up to `pos` tokens for state snapshotting.
-    pub fn export_state(&self, pos: usize) -> (Vec<f32>, Vec<f32>) {
+    pub fn export_state(&self, pos: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        if self.precision != KvPrecision::F32 {
+            return Err(KvError::UnsupportedPrecision(self.precision));
+        }
+
         let n_alloc = self.n_allocated_layers();
         let target_pos = pos.min(self.max_seq_len);
         let mut k_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
@@ -679,11 +683,15 @@ impl KvCache {
             }
         }
 
-        (k_out, v_out)
+        Ok((k_out, v_out))
     }
 
     /// Import a previously exported KV cache memory slice up to `pos` tokens.
     pub fn import_state(&mut self, pos: usize, k_data: &[f32], v_data: &[f32]) -> Result<()> {
+        if self.precision != KvPrecision::F32 {
+            return Err(KvError::UnsupportedPrecision(self.precision));
+        }
+
         let n_alloc = self.n_allocated_layers();
         let target_pos = pos.min(self.max_seq_len);
         let expected_elements = n_alloc * target_pos * self.kv_dim;

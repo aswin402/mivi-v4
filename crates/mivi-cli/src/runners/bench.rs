@@ -182,7 +182,7 @@ pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
                 let is_last = i + 1 == anchor_tokens.len();
                 let _ = model.forward_step(tok, i, is_last)?;
             }
-            let (k_exp, v_exp) = model.kv_cache.export_state(anchor_tokens.len());
+            let (k_exp, v_exp) = model.kv_cache.export_state(anchor_tokens.len())?;
             let (conv_exp, ssm_exp) = model.state.export_ssm_states();
             let anchor_snapshot = mivi_kv::HybridStateSnapshot::new(
                 anchor_tokens.len(),

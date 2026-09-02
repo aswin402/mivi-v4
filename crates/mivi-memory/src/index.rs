@@ -146,6 +146,11 @@ impl TurboMemoryIndex {
 
     /// Save the 4-bit quantized index to a binary/JSON file.
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let serialized = serde_json::to_vec(self)
             .map_err(|e| MemoryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         std::fs::write(path, serialized)?;

@@ -305,7 +305,7 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
         <div class="logo-title">Mivi-v4</div>
         <div style="font-size: 11px; color: var(--text-muted);">Local Hybrid Inference</div>
       </div>
-      <span class="version-tag">v0.2.10</span>
+      <span class="version-tag">v0.2.12</span>
     </div>
 
     <!-- Live Telemetry -->
@@ -377,7 +377,7 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
     <header class="chat-header">
       <div class="chat-header-status">
         <div class="status-dot"></div>
-        <span>Mivi Engine Actor: <strong>Online</strong> (localhost:8913)</span>
+        <span>Mivi Engine Actor: <strong>Online</strong> (<span id="server-host-label"></span>)</span>
       </div>
       <button onclick="clearHistory()" style="background: transparent; border: 1px solid var(--card-border); color: var(--text-muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;">Clear Chat</button>
     </header>
@@ -479,8 +479,9 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let streamDone = false;
 
-        while (true) {
+        while (!streamDone) {
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -492,7 +493,10 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
             const trimmed = line.trim();
             if (!trimmed.startsWith('data:')) continue;
             const dataStr = trimmed.substring(5).trim();
-            if (dataStr === '[DONE]') break;
+            if (dataStr === '[DONE]') {
+              streamDone = true;
+              break;
+            }
 
             try {
               const chunk = JSON.parse(dataStr);
@@ -507,6 +511,10 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
                 if (delta.content) {
                   tokenCount++;
                   fullAssistantText += delta.content;
+                  renderFormattedText(contentDiv, fullAssistantText);
+                } else if (delta.thinking) {
+                  tokenCount++;
+                  fullAssistantText += delta.thinking;
                   renderFormattedText(contentDiv, fullAssistantText);
                 }
               }
@@ -546,14 +554,19 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
     }
 
     function renderFormattedText(container, text) {
-      // Parse <think> ... </think> blocks
       let html = "";
       let remaining = text;
 
-      const thinkStart = remaining.indexOf('<think>');
-      if (thinkStart !== -1) {
-        const beforeThink = remaining.substring(0, thinkStart);
-        if (beforeThink) html += escapeHtml(beforeThink);
+      while (remaining.length > 0) {
+        const thinkStart = remaining.indexOf('<think>');
+        if (thinkStart === -1) {
+          html += escapeHtml(remaining);
+          break;
+        }
+
+        if (thinkStart > 0) {
+          html += escapeHtml(remaining.substring(0, thinkStart));
+        }
 
         const thinkEnd = remaining.indexOf('</think>', thinkStart);
         if (thinkEnd !== -1) {
@@ -565,10 +578,6 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
           html += `<div class="think-card"><div class="think-header">🧠 Reasoning (Thinking...)</div><div class="think-body">${escapeHtml(thinkContent)}</div></div>`;
           remaining = "";
         }
-      }
-
-      if (remaining) {
-        html += escapeHtml(remaining);
       }
 
       container.innerHTML = html.replace(/\n/g, '<br>');
@@ -584,6 +593,13 @@ pub const EMBEDDED_WEB_UI_HTML: &str = r#"<!DOCTYPE html>
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
     }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const hostEl = document.getElementById('server-host-label');
+      if (hostEl) {
+        hostEl.innerText = window.location.host || 'localhost';
+      }
+    });
   </script>
 </body>
 </html>

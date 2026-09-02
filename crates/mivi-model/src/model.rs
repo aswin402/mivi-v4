@@ -451,22 +451,23 @@ impl Model {
                 let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
 
-                let (k_exp, v_exp) = self.kv_cache.export_state(cur_pos + 1);
-                let (conv_exp, ssm_exp) = self.state.export_ssm_states();
-                let snapshot = mivi_kv::HybridStateSnapshot::new(
-                    cur_pos + 1,
-                    k_exp,
-                    v_exp,
-                    conv_exp,
-                    ssm_exp,
-                );
+                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
+                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
+                    let snapshot = mivi_kv::HybridStateSnapshot::new(
+                        cur_pos + 1,
+                        k_exp,
+                        v_exp,
+                        conv_exp,
+                        ssm_exp,
+                    );
 
-                chained_hash = self.prefix_cache.insert_chunk(
-                    chained_hash,
-                    chunk_tokens,
-                    chunk_idx,
-                    snapshot,
-                );
+                    chained_hash = self.prefix_cache.insert_chunk(
+                        chained_hash,
+                        chunk_tokens,
+                        chunk_idx,
+                        snapshot,
+                    );
+                }
             }
         }
         let mut pos = start_pos + n_prompt;

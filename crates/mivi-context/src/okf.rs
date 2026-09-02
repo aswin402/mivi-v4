@@ -205,6 +205,7 @@ fn extract_wiki_links(text: &str) -> Vec<String> {
 /// Lightweight YAML parser for frontmatter metadata without heavy runtime dependencies.
 fn parse_simple_yaml(yaml: &str) -> OkfFrontmatter {
     let mut frontmatter = OkfFrontmatter::default();
+    let mut active_list_key: Option<&'static str> = None;
 
     for line in yaml.lines() {
         let trimmed = line.trim();
@@ -212,9 +213,23 @@ fn parse_simple_yaml(yaml: &str) -> OkfFrontmatter {
             continue;
         }
 
+        // Handle multiline list item: - "value" or - value
+        if trimmed.starts_with('-') {
+            let item = trimmed.trim_start_matches('-').trim().trim_matches('"').trim_matches('\'').to_string();
+            if !item.is_empty() {
+                match active_list_key {
+                    Some("sources") => frontmatter.sources.push(item),
+                    Some("tags") => frontmatter.tags.push(item),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         if let Some((key, val)) = trimmed.split_once(':') {
             let key = key.trim().to_lowercase();
             let val = val.trim().trim_matches('"').trim_matches('\'');
+            active_list_key = None;
 
             match key.as_str() {
                 "id" | "concept_id" => frontmatter.id = val.to_string(),
@@ -232,6 +247,8 @@ fn parse_simple_yaml(yaml: &str) -> OkfFrontmatter {
                             .collect();
                     } else if !val.is_empty() {
                         frontmatter.sources = vec![val.to_string()];
+                    } else {
+                        active_list_key = Some("sources");
                     }
                 }
                 "tags" => {
@@ -243,6 +260,8 @@ fn parse_simple_yaml(yaml: &str) -> OkfFrontmatter {
                             .collect();
                     } else if !val.is_empty() {
                         frontmatter.tags = vec![val.to_string()];
+                    } else {
+                        active_list_key = Some("tags");
                     }
                 }
                 _ => {}
@@ -308,5 +327,29 @@ See also [[crates/mivi-core]] and [[crates/mivi-kv]].
         assert!(outline.contains("Knowledge Bundle Catalog"));
         assert!(outline.contains("State Space Models"));
         assert!(outline.contains("GQA Attention"));
+    }
+
+    #[test]
+    fn test_parse_okf_concept_with_multiline_yaml_lists() {
+        let doc = r#"---
+id: algorithms/pld
+type: algorithm
+title: Prompt Lookup Decoding
+sources:
+  - "Google Research"
+  - "Apoorv Saxena"
+tags:
+  - speculative_decoding
+  - pld
+  - latency
+---
+# Prompt Lookup Decoding
+Matches n-grams in the context buffer.
+"#;
+
+        let concept = OkfConcept::parse(doc, "default_id").unwrap();
+        assert_eq!(concept.frontmatter.id, "algorithms/pld");
+        assert_eq!(concept.frontmatter.sources, vec!["Google Research", "Apoorv Saxena"]);
+        assert_eq!(concept.frontmatter.tags, vec!["speculative_decoding", "pld", "latency"]);
     }
 }

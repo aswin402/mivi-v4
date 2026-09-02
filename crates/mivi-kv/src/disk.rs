@@ -135,11 +135,12 @@ pub fn load_from_disk(
 
     let file_meta = file_path.metadata()?;
     let file_len = file_meta.len() as usize;
+    const HEADER_BYTES: usize = 40;
     let expected_payload_bytes = (n_tokens * 4) + (k_len + v_len + conv_len + ssm_len) * 4;
-    if expected_payload_bytes > file_len {
+    if HEADER_BYTES + expected_payload_bytes > file_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Cache header sizes ({expected_payload_bytes} bytes) exceed file size ({file_len} bytes)"),
+            format!("Cache header payload ({} bytes total) exceeds file size ({} bytes)", HEADER_BYTES + expected_payload_bytes, file_len),
         ));
     }
 

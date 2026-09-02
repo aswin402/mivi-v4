@@ -65,20 +65,22 @@ impl TokenBitMask {
     }
 
     /// Apply mask directly to logits array in-place, setting disallowed token logits to -inf.
+    /// Apply mask directly to logits array in-place, setting disallowed token logits to -inf.
     #[inline(always)]
     pub fn apply_to_logits(&self, logits: &mut [f32]) {
         for (word_idx, &word) in self.words.iter().enumerate() {
             let base = word_idx * 64;
+            if base >= logits.len() {
+                break; // Stop scanning once we exceed actual vocabulary size
+            }
             if word == u64::MAX {
                 continue; // Fast path: all 64 tokens in this word are allowed
             }
             if word == 0 {
                 // Fast path: all 64 tokens in this word are disallowed
                 let end = (base + 64).min(logits.len());
-                if base < logits.len() {
-                    for logit in &mut logits[base..end] {
-                        *logit = f32::NEG_INFINITY;
-                    }
+                for logit in &mut logits[base..end] {
+                    *logit = f32::NEG_INFINITY;
                 }
                 continue;
             }
@@ -97,17 +99,22 @@ impl TokenBitMask {
     }
 }
 
+/// Maximum nesting depth for JSON structures on the stack.
+pub const MAX_JSON_STACK_DEPTH: usize = 32;
+
 /// Context stack element for JSON nesting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JsonScope {
+    #[default]
     Object,
     Array,
 }
 
-/// Pushdown Automaton tracking structural JSON syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pushdown Automata tracking structural JSON syntax (100% stack-allocated, zero-heap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonGrammar {
-    pub scope_stack: Vec<JsonScope>,
+    pub scope_stack: [JsonScope; MAX_JSON_STACK_DEPTH],
+    pub stack_depth: usize,
     pub in_string: bool,
     pub escape: bool,
     pub expect_key: bool,
@@ -129,7 +136,8 @@ impl JsonGrammar {
     /// Create a new JSON grammar validator.
     pub fn new() -> Self {
         Self {
-            scope_stack: Vec::with_capacity(16),
+            scope_stack: [JsonScope::Object; MAX_JSON_STACK_DEPTH],
+            stack_depth: 0,
             in_string: false,
             escape: false,
             expect_key: false,
@@ -142,14 +150,48 @@ impl JsonGrammar {
         }
     }
 
-    /// Check whether this grammar accepts a given candidate token text chunk.
+    /// Check whether this grammar accepts a given candidate token text chunk without any heap allocation.
+    #[inline(always)]
     pub fn can_accept(&self, chunk: &str) -> bool {
         if self.completed || self.has_error || chunk.is_empty() {
             return false;
         }
 
-        let mut sim = self.clone();
+        let mut sim = *self;
         sim.feed(chunk)
+    }
+
+    /// Push a scope onto the stack.
+    #[inline(always)]
+    fn push_scope(&mut self, scope: JsonScope) -> bool {
+        if self.stack_depth < MAX_JSON_STACK_DEPTH {
+            self.scope_stack[self.stack_depth] = scope;
+            self.stack_depth += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pop a scope from the stack.
+    #[inline(always)]
+    fn pop_scope(&mut self) -> Option<JsonScope> {
+        if self.stack_depth > 0 {
+            self.stack_depth -= 1;
+            Some(self.scope_stack[self.stack_depth])
+        } else {
+            None
+        }
+    }
+
+    /// Peek top scope.
+    #[inline(always)]
+    fn last_scope(&self) -> Option<JsonScope> {
+        if self.stack_depth > 0 {
+            Some(self.scope_stack[self.stack_depth - 1])
+        } else {
+            None
+        }
     }
 
     /// Advance parser state with a decoded token chunk. Returns true if valid, false if syntax error.
@@ -205,11 +247,10 @@ impl JsonGrammar {
 
             match ch {
                 '{' => {
-                    if !self.expect_value {
+                    if !self.expect_value || !self.push_scope(JsonScope::Object) {
                         self.has_error = true;
                         return false;
                     }
-                    self.scope_stack.push(JsonScope::Object);
                     self.expect_value = false;
                     self.expect_key = true;
                     self.expect_comma_or_close = true; // Can be empty object {}
@@ -220,12 +261,12 @@ impl JsonGrammar {
                         self.has_error = true;
                         return false;
                     }
-                    if let Some(JsonScope::Object) = self.scope_stack.pop() {
+                    if let Some(JsonScope::Object) = self.pop_scope() {
                         self.expect_comma_or_close = true;
                         self.expect_key = false;
                         self.expect_colon = false;
                         self.expect_value = false;
-                        if self.scope_stack.is_empty() && self.started {
+                        if self.stack_depth == 0 && self.started {
                             self.completed = true;
                         }
                     } else {
@@ -234,11 +275,10 @@ impl JsonGrammar {
                     }
                 }
                 '[' => {
-                    if !self.expect_value {
+                    if !self.expect_value || !self.push_scope(JsonScope::Array) {
                         self.has_error = true;
                         return false;
                     }
-                    self.scope_stack.push(JsonScope::Array);
                     self.expect_value = true;
                     self.expect_comma_or_close = true; // Can be empty array []
                     self.started = true;
@@ -248,10 +288,10 @@ impl JsonGrammar {
                         self.has_error = true;
                         return false;
                     }
-                    if let Some(JsonScope::Array) = self.scope_stack.pop() {
+                    if let Some(JsonScope::Array) = self.pop_scope() {
                         self.expect_comma_or_close = true;
                         self.expect_value = false;
-                        if self.scope_stack.is_empty() && self.started {
+                        if self.stack_depth == 0 && self.started {
                             self.completed = true;
                         }
                     } else {
@@ -272,7 +312,7 @@ impl JsonGrammar {
                 ',' => {
                     if self.expect_comma_or_close && !self.expect_value && !self.expect_colon {
                         self.expect_comma_or_close = false;
-                        if let Some(JsonScope::Object) = self.scope_stack.last() {
+                        if let Some(JsonScope::Object) = self.last_scope() {
                             self.expect_key = true;
                             self.expect_value = false;
                         } else {
@@ -441,10 +481,21 @@ impl ToolCallGrammar {
     }
 }
 
+/// Maximum recursion depth for JSON schema compaction to prevent stack overflow.
+pub const MAX_SCHEMA_COMPACT_DEPTH: usize = 32;
+
 /// Recursively compacts a JSON Schema by removing non-structural metadata fields
 /// (such as `description`, `title`, `$comment`, `examples`, `default`) to save 40-60% prompt tokens
 /// while preserving exact structural type validation constraints.
 pub fn compact_json_schema(schema: &serde_json::Value) -> serde_json::Value {
+    compact_json_schema_bounded(schema, 0)
+}
+
+fn compact_json_schema_bounded(schema: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth >= MAX_SCHEMA_COMPACT_DEPTH {
+        return schema.clone();
+    }
+
     match schema {
         serde_json::Value::Object(map) => {
             let mut compacted = serde_json::Map::new();
@@ -459,12 +510,12 @@ pub fn compact_json_schema(schema: &serde_json::Value) -> serde_json::Value {
                 {
                     continue;
                 }
-                compacted.insert(key.clone(), compact_json_schema(val));
+                compacted.insert(key.clone(), compact_json_schema_bounded(val, depth + 1));
             }
             serde_json::Value::Object(compacted)
         }
         serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(compact_json_schema).collect())
+            serde_json::Value::Array(arr.iter().map(|v| compact_json_schema_bounded(v, depth + 1)).collect())
         }
         other => other.clone(),
     }

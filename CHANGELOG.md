@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.13] - 2026-09-02
+
+### Full Codebase Hardening, Zero-Allocation Grammar Engine, FlashDecoding Numerical Stability & Web UI Refinement
+
+#### 💡 Ideas, Inspirations & Sources
+- **FlashDecoding & Attention Numerical Stability (`mivi-model::transformer`)**:
+  - *Guarded Online Softmax ($-\infty$ Threshold)*: Resolved numerical edge case where masked tokens with $-\infty$ scores could receive non-zero probability weights on first accumulation.
+  - *Dynamic Memory Sizing for TurboQuant*: Migrated attention dequantization to model arena buffers (`state.hb`), lifting previous fixed 1024-dimension stack limits.
+  - *GQA Head Ratio Safety*: Added `.max(1)` division-by-zero protection for uneven query/KV head ratios.
+- **Zero-Allocation Stack-Allocated Grammar Engine (`mivi-model::grammar`)**:
+  - *Zero-Heap `JsonGrammar` Pushdown Automaton*: Refactored scope tracking from heap vectors to a fixed 32-slot stack array (`[JsonScope; 32]`), making `JsonGrammar` `Copy`-able and eliminating **16+ million heap allocations** during token-by-token grammar logit masking.
+  - *Vocabulary-Bounded Logit Scanning*: Added early break in `TokenBitMask::apply_to_logits` when scanning past actual vocabulary boundaries.
+  - *Schema Recursion Depth Bound*: Added `MAX_SCHEMA_COMPACT_DEPTH = 32` guard to prevent stack overflow on deep JSON schemas.
+- **TurboQuant & Core Math Hardening (`mivi-core::turboquant`)**:
+  - *NaN-Safe Binary Search*: Handled coordinate `NaN` float comparisons gracefully in `TurboQuant4Bit::quantize` using `unwrap_or(Ordering::Less)`.
+- **Open Knowledge Format (OKF v0.2) Parser (`mivi-context::okf`)**:
+  - *Multiline YAML List Parsing*: Added stateful parsing for standard indented `- item` bullet lists under `sources:` and `tags:`.
+- **Web UI & Telemetry Refinements (`mivi-server::ui`)**:
+  - *SSE Stream Reader Termination*: Fixed reader loop exit on `[DONE]` events.
+  - *Multi-Turn `<think>` Card Rendering*: Implemented full multi-block reasoning trace parser.
+  - *Host Auto-Discovery*: Replaced hardcoded localhost ports with dynamic `window.location.host`.
+
+---
+
 ## [v0.2.12] - 2026-09-02
 
 ### In-Engine Prefix Cache Alignment, AST Code Minification, Grammar Compaction & OKF v0.2 Knowledge Engine
