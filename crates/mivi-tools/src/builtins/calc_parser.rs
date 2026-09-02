@@ -7,6 +7,7 @@ pub enum MathToken {
     Minus,
     Star,
     Slash,
+    Caret,
     LParen,
     RParen,
 }
@@ -34,6 +35,10 @@ pub fn tokenize_expr(input: &str) -> Result<Vec<MathToken>, String> {
             }
             '/' => {
                 tokens.push(MathToken::Slash);
+                chars.next();
+            }
+            '^' => {
+                tokens.push(MathToken::Caret);
                 chars.next();
             }
             '(' => {
@@ -105,13 +110,14 @@ impl<'a> PrattParser<'a> {
         match op {
             MathToken::Plus | MathToken::Minus => Some((1, 2)),
             MathToken::Star | MathToken::Slash => Some((3, 4)),
+            MathToken::Caret => Some((6, 5)), // Right-associative exponentiation
             _ => None,
         }
     }
 
     pub fn prefix_binding_power(op: &MathToken) -> Option<u8> {
         match op {
-            MathToken::Plus | MathToken::Minus => Some(5),
+            MathToken::Plus | MathToken::Minus => Some(7),
             _ => None,
         }
     }
@@ -172,6 +178,7 @@ impl<'a> PrattParser<'a> {
                         }
                         lhs / rhs
                     }
+                    MathToken::Caret => lhs.powf(rhs),
                     _ => unreachable!(),
                 };
             } else {
