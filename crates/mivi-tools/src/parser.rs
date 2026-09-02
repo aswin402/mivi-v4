@@ -51,16 +51,38 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
 }
 
 pub fn extract_thinking(text: &str) -> Option<String> {
-    THINKING_RE
-        .captures(text)
-        .and_then(|cap| cap.get(1))
-        .map(|m| m.as_str().trim().to_string())
+    if let Some(cap) = THINKING_RE.captures(text) {
+        cap.get(1).map(|m| m.as_str().trim().to_string())
+    } else if let Some(idx) = text.find("<think>") {
+        let after = &text[idx + 7..];
+        if !after.trim().is_empty() {
+            Some(after.trim().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 /// Strip <tool_call>...</tool_call> tags from text.
 pub fn strip_tool_calls(text: &str) -> String {
     let without_calls = TOOL_CALL_RE.replace_all(text, "");
     without_calls.trim().to_string()
+}
+
+/// Strip <think>...</think> tags (including unclosed <think>) from text.
+pub fn strip_thinking(text: &str) -> String {
+    let without_think = THINKING_RE.replace_all(text, "");
+    if without_think.contains("<think>") {
+        if let Some(idx) = without_think.find("<think>") {
+            without_think[..idx].trim().to_string()
+        } else {
+            without_think.trim().to_string()
+        }
+    } else {
+        without_think.trim().to_string()
+    }
 }
 
 #[cfg(test)]

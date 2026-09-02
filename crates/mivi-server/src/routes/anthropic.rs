@@ -196,6 +196,23 @@ pub async fn anthropic_messages_handler(
     };
     let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
+    let last_user_prompt = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| match &m.content {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Array(arr) => arr.iter().find_map(|item| {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    item.get("text").and_then(|t| t.as_str()).map(ToString::to_string)
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        });
+
     if req.stream {
         // SSE streaming response
         let stream_rx = match state
@@ -249,10 +266,15 @@ pub async fn anthropic_messages_handler(
         // 2. content_block_delta stream with dynamic token counting
         let token_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let tc_clone = token_counter.clone();
+        let assembled_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let text_accum = assembled_text.clone();
 
         let stream = ReceiverStream::new(stream_rx).map(move |chunk_res| {
             let chunk = chunk_res.unwrap_or_default();
             tc_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut guard) = text_accum.lock() {
+                guard.push_str(&chunk);
+            }
             let data = serde_json::json!({
                 "type": "content_block_delta",
                 "index": 0,
@@ -260,12 +282,15 @@ pub async fn anthropic_messages_handler(
                     "type": "text_delta",
                     "text": chunk
                 }
-            });
-            Ok::<Event, Infallible>(Event::default().event("content_block_delta").data(data.to_string()))
+            })
+            .to_string();
+            Ok::<Event, Infallible>(Event::default().event("content_block_delta").data(data))
         });
 
         // 3. content_block_stop, message_delta, and message_stop
         let tc_final = token_counter.clone();
+        let prompt_log_clone = last_user_prompt.clone();
+        let text_final = assembled_text.clone();
         let block_stop_event = Event::default().event("content_block_stop").data(
             serde_json::json!({
                 "type": "content_block_stop",
@@ -276,6 +301,19 @@ pub async fn anthropic_messages_handler(
 
         let msg_delta_stream = futures::stream::once(async move {
             let out_tokens = tc_final.load(std::sync::atomic::Ordering::Relaxed).max(1);
+            if let Ok(guard) = text_final.lock() {
+                if !guard.is_empty() {
+                    let thinking = mivi_tools::extract_thinking(&guard);
+                    let clean = mivi_tools::strip_thinking(&guard);
+                    crate::logging::print_interaction_box(
+                        prompt_log_clone.as_deref(),
+                        thinking.as_deref(),
+                        None,
+                        Some(&clean),
+                        false,
+                    );
+                }
+            }
             let msg_delta_event = Event::default().event("message_delta").data(
                 serde_json::json!({
                     "type": "message_delta",
@@ -307,9 +345,16 @@ pub async fn anthropic_messages_handler(
             Ok(msg_stop_event),
         ]));
 
-        Sse::new(full_stream)
+        let mut resp = Sse::new(full_stream)
             .keep_alive(axum::response::sse::KeepAlive::default())
-            .into_response()
+            .into_response();
+        let log_meta = crate::logging::LogMetadata {
+            prompt_summary: last_user_prompt,
+            is_streaming: true,
+            ..Default::default()
+        };
+        resp.extensions_mut().insert(log_meta);
+        resp
     } else {
         // Non-streaming JSON response
         match state
@@ -320,17 +365,18 @@ pub async fn anthropic_messages_handler(
             Ok((output_text, prompt_tokens, completion_tokens)) => {
                 let parsed_tools = mivi_tools::extract_tool_calls(&output_text);
                 let has_tools = !parsed_tools.is_empty();
+                let clean_text = mivi_tools::strip_tool_calls(&output_text);
+                let thinking = mivi_tools::extract_thinking(&output_text);
                 let content_blocks = if has_tools {
                     let mut blocks = Vec::new();
-                    let clean_text = mivi_tools::strip_tool_calls(&output_text);
                     if !clean_text.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: clean_text });
+                        blocks.push(AnthropicContentBlock::Text { text: clean_text.clone() });
                     }
-                    for tool in parsed_tools {
+                    for tool in &parsed_tools {
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),
-                            name: tool.name,
-                            input: tool.arguments,
+                            name: tool.name.clone(),
+                            input: tool.arguments.clone(),
                         });
                     }
                     blocks
@@ -352,14 +398,29 @@ pub async fn anthropic_messages_handler(
                     role: "assistant".to_string(),
                     content: content_blocks,
                     model: model_name,
-                    stop_reason,
+                    stop_reason: stop_reason.clone(),
                     usage: AnthropicUsage {
                         input_tokens: prompt_tokens,
                         output_tokens: completion_tokens,
                     },
                 };
 
-                Json(resp).into_response()
+                let mut resp_obj = Json(resp).into_response();
+                let reply_preview = if clean_text.is_empty() { output_text.clone() } else { clean_text };
+                let mut log_meta = crate::logging::LogMetadata {
+                    prompt_summary: last_user_prompt,
+                    response_summary: Some(reply_preview),
+                    thinking_summary: thinking,
+                    tokens_prompt: Some(prompt_tokens),
+                    tokens_completion: Some(completion_tokens),
+                    finish_reason: stop_reason,
+                    ..Default::default()
+                };
+                if has_tools {
+                    log_meta.tool_calls = Some(parsed_tools.into_iter().map(|t| format!("{}(...)", t.name)).collect());
+                }
+                resp_obj.extensions_mut().insert(log_meta);
+                resp_obj
             }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,

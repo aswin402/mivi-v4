@@ -32,6 +32,7 @@ pub async fn run_agent_task(
     let mname = model_name.clone();
     let task_summary = crate::logging::summarize_prompt(&req.task, 40);
 
+    let task_for_log = req.task.clone();
     tokio::spawn(async move {
         const MAX_AGENT_STEPS_LIMIT: usize = 50;
         let max_steps = if req.max_steps == 0 {
@@ -89,6 +90,20 @@ pub async fn run_agent_task(
                     }
                 }
             }
+
+            let last_reply = agent
+                .state
+                .memory
+                .back()
+                .cloned()
+                .unwrap_or_else(|| "Completed agent task execution.".to_string());
+            crate::logging::print_interaction_box(
+                Some(&task_for_log),
+                None,
+                None,
+                Some(&last_reply),
+                true,
+            );
         })
         .await;
     });

@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn test_watchdog_config_default() {
         let config = WatchdogConfig::default();
-        assert_eq!(config.warn_mb, 700.0);
-        assert_eq!(config.kill_mb, 900.0);
+        assert_eq!(config.warn_mb, 2400.0);
+        assert_eq!(config.kill_mb, 3000.0);
         assert!(config.enabled);
     }
 

@@ -82,10 +82,12 @@ pub async fn chat_completions(
             model_name,
             engine: state.engine.clone(),
             channel_capacity: state.config.channel_capacity,
+            last_user_prompt: last_user_prompt.clone(),
         };
         let mut resp = handle_chat_streaming(ctx);
         let log_meta = crate::logging::LogMetadata {
             prompt_summary: last_user_prompt,
+            is_streaming: true,
             ..Default::default()
         };
         resp.extensions_mut().insert(log_meta);
@@ -114,6 +116,7 @@ struct ChatStreamContext {
     model_name: String,
     engine: EngineHandle,
     channel_capacity: usize,
+    last_user_prompt: Option<String>,
 }
 
 struct ChatBlockingContext<'a> {
@@ -139,6 +142,7 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let max_tokens = ctx.max_tokens;
     let temperature = ctx.temperature;
     let top_p = ctx.top_p;
+    let user_prompt = ctx.last_user_prompt;
 
     tokio::spawn(async move {
         send_sse_sequence(&tx, &cid, &mname, None, || async {
@@ -147,9 +151,11 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                 .await
             {
                 Ok(mut stream_rx) => {
+                    let mut assembled = String::new();
                     while let Some(chunk_res) = stream_rx.recv().await {
                         match chunk_res {
                             Ok(word) => {
+                                assembled.push_str(&word);
                                 if tx
                                     .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
                                     .await
@@ -170,6 +176,19 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 break;
                             }
                         }
+                    }
+                    if !assembled.is_empty() {
+                        let thinking = mivi_tools::extract_thinking(&assembled);
+                        let clean_reply = mivi_tools::strip_thinking(&assembled);
+                        let tool_calls = mivi_tools::extract_tool_calls(&assembled);
+                        let tc_names: Vec<String> = tool_calls.into_iter().map(|tc| format!("{}(...)", tc.name)).collect();
+                        crate::logging::print_interaction_box(
+                            user_prompt.as_deref(),
+                            thinking.as_deref(),
+                            if tc_names.is_empty() { None } else { Some(&tc_names) },
+                            Some(&clean_reply),
+                            false,
+                        );
                     }
                 }
                 Err(e) => {
@@ -230,7 +249,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                     Some(cleaned)
                 }
             } else {
-                Some(output)
+                Some(output.clone())
             };
 
             let response = ChatCompletionResponse {
@@ -242,9 +261,9 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                     index: 0,
                     message: MessageDto {
                         role: ROLE_ASSISTANT.to_string(),
-                        content,
+                        content: content.clone(),
                         name: None,
-                        thinking,
+                        thinking: thinking.clone(),
                         tool_calls,
                     },
                     finish_reason: Some(finish_reason.to_string()),
@@ -257,8 +276,11 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
             };
 
             let mut resp = Json(response).into_response();
+            let reply_preview = mivi_tools::strip_thinking(&output);
             let mut log_meta = crate::logging::LogMetadata {
                 prompt_summary: ctx.last_user_prompt,
+                response_summary: Some(reply_preview),
+                thinking_summary: thinking,
                 tokens_prompt: Some(p_tokens),
                 tokens_completion: Some(c_tokens),
                 finish_reason: Some(finish_reason.to_string()),

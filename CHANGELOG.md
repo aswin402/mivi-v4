@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.19] - 2026-09-03
+
+### Live Hono-Style HTTP Logs with User Prompt & SLM Output Visualizer
+
+#### 💡 Ideas, Inspirations & Sources
+- **Hono-Style Terminal Logger (`mivi-server::logging`, `mivi_log_middleware`)**:
+  - *Inspiration*: [Hono.js logger middleware](https://hono.dev/docs/middleware/builtin/logger) & [Ollama / vLLM terminal telemetry].
+  - *Clean Box-Drawing Formatting*: Implemented `print_interaction_box` using unicode box-drawing characters (`┌─`, `│`, `└─`) to cleanly format user input prompts, model thinking process (`💭 thinking › "..."`), tool calls (`🔧 tool call › ...`), and final SLM output (`mivi › "..."`).
+  - *Streaming & Blocking Log Unification*: Full support for both non-streaming JSON responses and streaming SSE sequences (`/v1/chat/completions`, `/v1/messages`, `/v1/mivi/agent`) with accurate token counts, tokens/sec generation throughput, and response latency.
+  - *Thinking & Response Separation*: Enhanced `mivi_tools::parser` (`extract_thinking`, `strip_thinking`) to gracefully isolate `<think>...</think>` tags (even for unclosed tags on truncated completions) so reasoning steps and final answers are displayed in dedicated rows.
+
+---
+
 ## [v0.2.18] - 2026-09-03
 
 ### Default 3.0 GB Memory Ceiling & Large Model Server Hardening
