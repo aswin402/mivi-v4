@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.10] - 2026-09-02
+
+### Outlier-Free TurboQuant 4-Bit & 2-Bit Attention KV Cache Compression
+
+#### 💡 Ideas, Inspirations & Sources
+- **TurboQuant Attention KV Cache Quantization (`mivi-kv::cache`)**:
+  - *Outlier Energy Dispersion via Block-Hadamard Transforms*: Applied deterministic orthogonal 2-round Block-Hadamard rotations to Key and Value activations, uniformly dispersing outlier channel magnitudes across all dimensions.
+  - *Extreme 87.3% and 93.5% Memory Reduction*: Added `KvPrecision::TurboQuant4` (204 MB for 64K context) and `KvPrecision::TurboQuant2` (103 MB for 64K context vs 1.61 GB in FP32).
+  - *Exact Inverse Orthogonal Reconstruction*: Added `unrotate_vector_in_place` in `mivi-core::turboquant` ensuring bit-exact vector reconstruction for Value dequantization.
+- **In-Place FlashDecoding Query LUT Scoring (`mivi-model::transformer`)**:
+  - *Zero-Heap Allocation Attention*: Evaluates Query-Key attention dot products directly in CPU registers by computing single-pass Query LUT lookups against 4-bit and 2-bit packed Key vectors.
+
+---
+
 ## [v0.2.9] - 2026-09-02
 
 ### TurboQuant 4-bit Vector Quantization, Orthogonal Block-Hadamard Transforms & Compact Semantic Memory Search

@@ -86,7 +86,6 @@ pub fn rotate_vector_in_place(buf: &mut [f32]) {
         return;
     }
 
-    // Determine largest power-of-two block size <= 64 dividing or fitting dim
     let mut block_size = 64;
     while block_size > 8 && (dim % block_size != 0) {
         block_size /= 2;
@@ -118,6 +117,69 @@ pub fn rotate_vector_in_place(buf: &mut [f32]) {
         // 3. Block-wise Fast Walsh-Hadamard Transform
         for block in buf.chunks_exact_mut(block_size) {
             fwht_in_place(block);
+        }
+    }
+}
+
+/// Applies the exact inverse orthogonal transform to `buf` to reconstruct the original vector.
+pub fn unrotate_vector_in_place(buf: &mut [f32]) {
+    let dim = buf.len();
+    if dim < 8 {
+        return;
+    }
+
+    let mut block_size = 64;
+    while block_size > 8 && (dim % block_size != 0) {
+        block_size /= 2;
+    }
+    if dim % block_size != 0 {
+        block_size = 8;
+    }
+
+    let mut rng = SplitMix64::new(DEFAULT_ROTATION_SEED ^ (dim as u64));
+
+    // Record PRNG generated swaps and sign bits for both rounds
+    let num_chunks = (dim + 63) / 64;
+    let mut round_swaps = Vec::with_capacity(2);
+    let mut round_bits = Vec::with_capacity(2);
+
+    for _round in 0..2 {
+        let mut swaps = Vec::with_capacity(dim);
+        for i in (1..dim).rev() {
+            let j = (rng.next_u32() as usize) % (i + 1);
+            swaps.push((i, j));
+        }
+        round_swaps.push(swaps);
+
+        let mut bits = Vec::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
+            bits.push(rng.next_u64());
+        }
+        round_bits.push(bits);
+    }
+
+    // Apply inverse transform in reverse order: Round 1 inverse, then Round 0 inverse
+    for round in (0..2).rev() {
+        // 1. Inverse of FWHT is FWHT itself (self-inverse orthogonal matrix)
+        for block in buf.chunks_exact_mut(block_size) {
+            fwht_in_place(block);
+        }
+
+        // 2. Inverse of sign-flip is sign-flip itself
+        let bits_list = &round_bits[round];
+        for (chunk_idx, chunk) in buf.chunks_mut(64).enumerate() {
+            let bits = bits_list[chunk_idx];
+            for (idx, val) in chunk.iter_mut().enumerate() {
+                if ((bits >> (idx % 64)) & 1) == 1 {
+                    *val = -*val;
+                }
+            }
+        }
+
+        // 3. Inverse of Fisher-Yates permutation is applying recorded swaps in reverse order
+        let swaps = &round_swaps[round];
+        for &(i, j) in swaps.iter().rev() {
+            buf.swap(i, j);
         }
     }
 }
@@ -208,6 +270,34 @@ impl TurboQuant4Bit {
         (norm, packed)
     }
 
+    /// Dequantize a packed 4-bit vector back to FP32 into `out`.
+    pub fn dequantize(&self, norm: f32, packed: &[u8], out: &mut [f32]) {
+        assert_eq!(out.len(), self.dim, "Output vector dimension mismatch");
+        if norm == 0.0 {
+            out.fill(0.0);
+            return;
+        }
+
+        let mut coord_idx = 0;
+        for &byte in packed {
+            let c0 = (byte & 0x0F) as usize;
+            out[coord_idx] = self.scaled_centroids[c0] * norm;
+            coord_idx += 1;
+            if coord_idx >= self.dim {
+                break;
+            }
+
+            let c1 = ((byte >> 4) & 0x0F) as usize;
+            out[coord_idx] = self.scaled_centroids[c1] * norm;
+            coord_idx += 1;
+            if coord_idx >= self.dim {
+                break;
+            }
+        }
+
+        unrotate_vector_in_place(out);
+    }
+
     /// Precompute Query Look-Up Table (LUT) of size `dim * 16` for rapid asymmetric inner product search.
     pub fn build_query_lut(&self, query: &[f32]) -> Vec<f32> {
         assert_eq!(query.len(), self.dim, "Query vector dimension mismatch");
@@ -251,6 +341,161 @@ impl TurboQuant4Bit {
             coord_idx += 1;
             if coord_idx >= self.dim {
                 break;
+            }
+        }
+
+        dot * target_norm
+    }
+}
+
+/// Standard normal 2-bit Lloyd-Max centroids (4 optimal reconstruction levels).
+pub const LLOYD_MAX_2BIT_CENTROIDS: [f32; 4] = [-1.510, -0.453, 0.453, 1.510];
+
+/// Decision boundaries between consecutive 2-bit centroids (3 boundary thresholds).
+pub const LLOYD_MAX_2BIT_BOUNDARIES: [f32; 3] = [-0.9815, 0.0, 0.9815];
+
+/// 2-bit TurboQuant Vector Quantizer Engine (4 coordinates per byte, 4-level quantization).
+#[derive(Debug, Clone)]
+pub struct TurboQuant2Bit {
+    dim: usize,
+    sigma: f32,
+    scaled_centroids: [f32; 4],
+    scaled_boundaries: [f32; 3],
+}
+
+impl TurboQuant2Bit {
+    /// Create a new 2-bit quantizer for vectors of dimension `dim`.
+    pub fn new(dim: usize) -> Self {
+        assert!(dim >= 8, "TurboQuant requires dimension >= 8");
+        let sigma = 1.0 / (dim as f32).sqrt();
+
+        let mut scaled_centroids = [0.0f32; 4];
+        for i in 0..4 {
+            scaled_centroids[i] = LLOYD_MAX_2BIT_CENTROIDS[i] * sigma;
+        }
+
+        let mut scaled_boundaries = [0.0f32; 3];
+        for i in 0..3 {
+            scaled_boundaries[i] = LLOYD_MAX_2BIT_BOUNDARIES[i] * sigma;
+        }
+
+        Self {
+            dim,
+            sigma,
+            scaled_centroids,
+            scaled_boundaries,
+        }
+    }
+
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    #[inline]
+    pub fn sigma(&self) -> f32 {
+        self.sigma
+    }
+
+    /// Quantize an input float vector into a tuple of `(l2_norm, packed_2bit_bytes)`.
+    /// Packs 4 coordinates per byte (2 bits per coordinate).
+    pub fn quantize(&self, vec: &[f32]) -> (f32, Vec<u8>) {
+        assert_eq!(vec.len(), self.dim, "Input vector dimension mismatch");
+
+        let sum_sq: f32 = vec.iter().map(|&x| x * x).sum();
+        let norm = sum_sq.sqrt();
+        if norm == 0.0 {
+            let packed_len = (self.dim + 3) / 4;
+            return (0.0, vec![0x55u8; packed_len]); // Index 1 & 2 are near 0.0
+        }
+
+        let mut rotated = vec.to_vec();
+        let inv_norm = 1.0 / norm;
+        for val in rotated.iter_mut() {
+            *val *= inv_norm;
+        }
+        rotate_vector_in_place(&mut rotated);
+
+        let packed_len = (self.dim + 3) / 4;
+        let mut packed = vec![0u8; packed_len];
+
+        for (i, &coord) in rotated.iter().enumerate() {
+            let code = if coord < self.scaled_boundaries[0] {
+                0u8
+            } else if coord < self.scaled_boundaries[1] {
+                1u8
+            } else if coord < self.scaled_boundaries[2] {
+                2u8
+            } else {
+                3u8
+            };
+
+            let byte_idx = i / 4;
+            let shift = (i % 4) * 2;
+            packed[byte_idx] |= (code & 0x03) << shift;
+        }
+
+        (norm, packed)
+    }
+
+    /// Dequantize a packed 2-bit vector back to FP32 into `out`.
+    pub fn dequantize(&self, norm: f32, packed: &[u8], out: &mut [f32]) {
+        assert_eq!(out.len(), self.dim, "Output vector dimension mismatch");
+        if norm == 0.0 {
+            out.fill(0.0);
+            return;
+        }
+
+        let mut coord_idx = 0;
+        for &byte in packed {
+            for shift in [0, 2, 4, 6] {
+                let code = ((byte >> shift) & 0x03) as usize;
+                out[coord_idx] = self.scaled_centroids[code] * norm;
+                coord_idx += 1;
+                if coord_idx >= self.dim {
+                    unrotate_vector_in_place(out);
+                    return;
+                }
+            }
+        }
+        unrotate_vector_in_place(out);
+    }
+
+    /// Precompute Query Look-Up Table (LUT) of size `dim * 4` for rapid asymmetric inner product search.
+    pub fn build_query_lut(&self, query: &[f32]) -> Vec<f32> {
+        assert_eq!(query.len(), self.dim, "Query vector dimension mismatch");
+
+        let mut rotated_query = query.to_vec();
+        rotate_vector_in_place(&mut rotated_query);
+
+        let mut lut = vec![0.0f32; self.dim * 4];
+        for (i, &q_val) in rotated_query.iter().enumerate() {
+            let row_offset = i * 4;
+            for c in 0..4 {
+                lut[row_offset + c] = q_val * self.scaled_centroids[c];
+            }
+        }
+        lut
+    }
+
+    /// Compute approximate dot product between a precomputed Query LUT and a packed 2-bit vector.
+    #[inline]
+    pub fn score_query_lut(&self, query_lut: &[f32], target_norm: f32, packed: &[u8]) -> f32 {
+        if target_norm == 0.0 {
+            return 0.0;
+        }
+
+        let mut dot = 0.0f32;
+        let mut coord_idx = 0;
+
+        for &byte in packed {
+            for shift in [0, 2, 4, 6] {
+                let code = ((byte >> shift) & 0x03) as usize;
+                dot += query_lut[coord_idx * 4 + code];
+                coord_idx += 1;
+                if coord_idx >= self.dim {
+                    return dot * target_norm;
+                }
             }
         }
 
@@ -302,6 +547,35 @@ mod tests {
         assert!(
             relative_err < 0.15,
             "4-bit TurboQuant cosine approximation error must be < 15% (true: {true_dot}, approx: {approx_dot})"
+        );
+    }
+
+    #[test]
+    fn test_turboquant_2bit_quantize_and_lut_scoring() {
+        let dim = 64;
+        let quantizer = TurboQuant2Bit::new(dim);
+
+        let mut v1 = vec![0.0f32; dim];
+        let mut v2 = vec![0.0f32; dim];
+        for i in 0..dim {
+            v1[i] = ((i as f32 * 0.13).sin() * 2.0).clamp(-2.0, 2.0);
+            v2[i] = ((i as f32 * 0.17).cos() * 1.5).clamp(-2.0, 2.0);
+        }
+
+        let (norm1, packed1) = quantizer.quantize(&v1);
+        assert_eq!(packed1.len(), (dim + 3) / 4);
+        assert!(norm1 > 0.0);
+
+        let lut = quantizer.build_query_lut(&v2);
+        let approx_dot = quantizer.score_query_lut(&lut, norm1, &packed1);
+
+        let true_dot: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
+        let diff = (approx_dot - true_dot).abs();
+        let relative_err = diff / true_dot.abs().max(1e-4);
+
+        assert!(
+            relative_err < 0.25,
+            "2-bit TurboQuant cosine approximation error must be < 25% (true: {true_dot}, approx: {approx_dot})"
         );
     }
 }

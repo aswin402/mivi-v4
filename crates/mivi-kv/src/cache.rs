@@ -1,3 +1,4 @@
+use mivi_core::{TurboQuant2Bit, TurboQuant4Bit};
 use mivi_quant::q8_0::{quantize_f32_to_q8_0_block, Q8_0_BLOCK_SIZE, Q8_0_BYTES};
 use thiserror::Error;
 
@@ -7,6 +8,10 @@ pub enum KvPrecision {
     F32,
     /// 8-bit block-quantized precision with f16 scale (34 bytes per 32 elements = 1.0625 bytes per element).
     Q8_0,
+    /// TurboQuant 4-bit data-oblivious quantization with orthogonal rotation (0.5 bytes per element + 4 bytes norm).
+    TurboQuant4,
+    /// TurboQuant 2-bit data-oblivious quantization with orthogonal rotation (0.25 bytes per element + 4 bytes norm).
+    TurboQuant2,
 }
 
 #[derive(Error, Debug)]
@@ -42,9 +47,11 @@ pub struct KvCache {
     // Flat buffer for F32: [n_allocated_layers, max_seq_len, kv_dim]
     k_cache: Box<[f32]>,
     v_cache: Box<[f32]>,
-    // Flat buffer for Q8_0: [n_allocated_layers, max_seq_len, blocks_per_token * 34]
+    // Flat buffer for Q8_0 / TurboQuant: [n_allocated_layers, max_seq_len, bytes_per_token]
     k_q8_cache: Box<[u8]>,
     v_q8_cache: Box<[u8]>,
+    tq4: Option<TurboQuant4Bit>,
+    tq2: Option<TurboQuant2Bit>,
     current_pos: usize,
 }
 
@@ -127,6 +134,8 @@ impl KvCache {
                     v_cache: vec![0.0f32; total_elements].into_boxed_slice(),
                     k_q8_cache: vec![0u8; 0].into_boxed_slice(),
                     v_q8_cache: vec![0u8; 0].into_boxed_slice(),
+                    tq4: None,
+                    tq2: None,
                     current_pos: 0,
                 })
             }
@@ -151,6 +160,58 @@ impl KvCache {
                     v_cache: vec![0.0f32; 0].into_boxed_slice(),
                     k_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
                     v_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
+                    tq4: None,
+                    tq2: None,
+                    current_pos: 0,
+                })
+            }
+            KvPrecision::TurboQuant4 => {
+                let bytes_per_token = 4 + (kv_dim + 1) / 2;
+                let total_bytes = n_attn
+                    .checked_mul(max_seq_len)
+                    .and_then(|v| v.checked_mul(bytes_per_token))
+                    .ok_or(KvError::AllocationOverflow {
+                        n_layers: n_attn,
+                        max_seq_len,
+                        kv_dim,
+                    })?;
+                Ok(Self {
+                    n_layers,
+                    max_seq_len,
+                    kv_dim,
+                    precision,
+                    layer_map,
+                    k_cache: vec![0.0f32; 0].into_boxed_slice(),
+                    v_cache: vec![0.0f32; 0].into_boxed_slice(),
+                    k_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
+                    v_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
+                    tq4: Some(TurboQuant4Bit::new(kv_dim)),
+                    tq2: None,
+                    current_pos: 0,
+                })
+            }
+            KvPrecision::TurboQuant2 => {
+                let bytes_per_token = 4 + (kv_dim + 3) / 4;
+                let total_bytes = n_attn
+                    .checked_mul(max_seq_len)
+                    .and_then(|v| v.checked_mul(bytes_per_token))
+                    .ok_or(KvError::AllocationOverflow {
+                        n_layers: n_attn,
+                        max_seq_len,
+                        kv_dim,
+                    })?;
+                Ok(Self {
+                    n_layers,
+                    max_seq_len,
+                    kv_dim,
+                    precision,
+                    layer_map,
+                    k_cache: vec![0.0f32; 0].into_boxed_slice(),
+                    v_cache: vec![0.0f32; 0].into_boxed_slice(),
+                    k_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
+                    v_q8_cache: vec![0u8; total_bytes].into_boxed_slice(),
+                    tq4: None,
+                    tq2: Some(TurboQuant2Bit::new(kv_dim)),
                     current_pos: 0,
                 })
             }
@@ -166,6 +227,16 @@ impl KvCache {
     #[inline]
     pub fn precision(&self) -> KvPrecision {
         self.precision
+    }
+
+    #[inline]
+    pub fn tq4(&self) -> Option<&TurboQuant4Bit> {
+        self.tq4.as_ref()
+    }
+
+    #[inline]
+    pub fn tq2(&self) -> Option<&TurboQuant2Bit> {
+        self.tq2.as_ref()
     }
 
     #[inline]
@@ -191,7 +262,9 @@ impl KvCache {
             KvPrecision::F32 => {
                 (self.k_cache.len() + self.v_cache.len()) * std::mem::size_of::<f32>()
             }
-            KvPrecision::Q8_0 => self.k_q8_cache.len() + self.v_q8_cache.len(),
+            KvPrecision::Q8_0 | KvPrecision::TurboQuant4 | KvPrecision::TurboQuant2 => {
+                self.k_q8_cache.len() + self.v_q8_cache.len()
+            }
         }
     }
 
@@ -259,6 +332,39 @@ impl KvCache {
     }
 
     #[inline]
+    fn checked_tq_offset(&self, layer: usize, pos: usize) -> Result<usize> {
+        if layer >= self.n_layers {
+            return Err(KvError::InvalidLayer {
+                layer,
+                max: self.n_layers,
+            });
+        }
+        let cache_layer = if layer < self.layer_map.len() {
+            self.layer_map[layer]
+        } else {
+            layer
+        };
+        if cache_layer == usize::MAX {
+            return Err(KvError::InvalidLayer {
+                layer,
+                max: self.n_layers,
+            });
+        }
+        if pos >= self.max_seq_len {
+            return Err(KvError::ContextOverflow {
+                pos,
+                max: self.max_seq_len,
+            });
+        }
+        let bytes_per_token = match self.precision {
+            KvPrecision::TurboQuant4 => 4 + (self.kv_dim + 1) / 2,
+            KvPrecision::TurboQuant2 => 4 + (self.kv_dim + 3) / 4,
+            _ => return Err(KvError::UnsupportedPrecision(self.precision)),
+        };
+        Ok((cache_layer * self.max_seq_len + pos) * bytes_per_token)
+    }
+
+    #[inline]
     fn validate_dim(&self, slice: &[f32]) -> Result<()> {
         if slice.len() != self.kv_dim {
             return Err(KvError::DimMismatch {
@@ -304,6 +410,32 @@ impl KvCache {
                     );
                 }
             }
+            KvPrecision::TurboQuant4 => {
+                let offset = self.checked_tq_offset(layer, pos)?;
+                let bytes_per_token = 4 + (self.kv_dim + 1) / 2;
+                let tq = self.tq4.as_ref().unwrap();
+
+                let (norm_k, packed_k) = tq.quantize(k);
+                self.k_q8_cache[offset..offset + 4].copy_from_slice(&norm_k.to_le_bytes());
+                self.k_q8_cache[offset + 4..offset + bytes_per_token].copy_from_slice(&packed_k);
+
+                let (norm_v, packed_v) = tq.quantize(v);
+                self.v_q8_cache[offset..offset + 4].copy_from_slice(&norm_v.to_le_bytes());
+                self.v_q8_cache[offset + 4..offset + bytes_per_token].copy_from_slice(&packed_v);
+            }
+            KvPrecision::TurboQuant2 => {
+                let offset = self.checked_tq_offset(layer, pos)?;
+                let bytes_per_token = 4 + (self.kv_dim + 3) / 4;
+                let tq = self.tq2.as_ref().unwrap();
+
+                let (norm_k, packed_k) = tq.quantize(k);
+                self.k_q8_cache[offset..offset + 4].copy_from_slice(&norm_k.to_le_bytes());
+                self.k_q8_cache[offset + 4..offset + bytes_per_token].copy_from_slice(&packed_k);
+
+                let (norm_v, packed_v) = tq.quantize(v);
+                self.v_q8_cache[offset..offset + 4].copy_from_slice(&norm_v.to_le_bytes());
+                self.v_q8_cache[offset + 4..offset + bytes_per_token].copy_from_slice(&packed_v);
+            }
         }
 
         if pos >= self.current_pos {
@@ -311,6 +443,112 @@ impl KvCache {
         }
 
         Ok(())
+    }
+
+    /// Read TurboQuant4 Key packed slice without runtime bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.precision == KvPrecision::TurboQuant4`, `layer` is a valid attention layer, and `pos < max_seq_len`.
+    #[inline]
+    pub unsafe fn get_k_tq4_packed_unchecked(&self, layer: usize, pos: usize) -> (f32, &[u8]) {
+        let cache_layer = *self.layer_map.get_unchecked(layer);
+        let bytes_per_token = 4 + (self.kv_dim + 1) / 2;
+        let offset = (cache_layer * self.max_seq_len + pos) * bytes_per_token;
+        let mut norm_bytes = [0u8; 4];
+        std::ptr::copy_nonoverlapping(
+            self.k_q8_cache.as_ptr().add(offset),
+            norm_bytes.as_mut_ptr(),
+            4,
+        );
+        let norm = f32::from_le_bytes(norm_bytes);
+        let packed = std::slice::from_raw_parts(
+            self.k_q8_cache.as_ptr().add(offset + 4),
+            (self.kv_dim + 1) / 2,
+        );
+        (norm, packed)
+    }
+
+    /// Read and dequantize TurboQuant4 Value vector into `out_v` without runtime bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.precision == KvPrecision::TurboQuant4`, `layer` is a valid attention layer, and `pos < max_seq_len`.
+    #[inline]
+    pub unsafe fn get_v_tq4_dequantized_unchecked(
+        &self,
+        layer: usize,
+        pos: usize,
+        out_v: &mut [f32],
+    ) {
+        let cache_layer = *self.layer_map.get_unchecked(layer);
+        let bytes_per_token = 4 + (self.kv_dim + 1) / 2;
+        let offset = (cache_layer * self.max_seq_len + pos) * bytes_per_token;
+        let mut norm_bytes = [0u8; 4];
+        std::ptr::copy_nonoverlapping(
+            self.v_q8_cache.as_ptr().add(offset),
+            norm_bytes.as_mut_ptr(),
+            4,
+        );
+        let norm = f32::from_le_bytes(norm_bytes);
+        let packed = std::slice::from_raw_parts(
+            self.v_q8_cache.as_ptr().add(offset + 4),
+            (self.kv_dim + 1) / 2,
+        );
+        if let Some(ref tq) = self.tq4 {
+            tq.dequantize(norm, packed, out_v);
+        }
+    }
+
+    /// Read TurboQuant2 Key packed slice without runtime bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.precision == KvPrecision::TurboQuant2`, `layer` is a valid attention layer, and `pos < max_seq_len`.
+    #[inline]
+    pub unsafe fn get_k_tq2_packed_unchecked(&self, layer: usize, pos: usize) -> (f32, &[u8]) {
+        let cache_layer = *self.layer_map.get_unchecked(layer);
+        let bytes_per_token = 4 + (self.kv_dim + 3) / 4;
+        let offset = (cache_layer * self.max_seq_len + pos) * bytes_per_token;
+        let mut norm_bytes = [0u8; 4];
+        std::ptr::copy_nonoverlapping(
+            self.k_q8_cache.as_ptr().add(offset),
+            norm_bytes.as_mut_ptr(),
+            4,
+        );
+        let norm = f32::from_le_bytes(norm_bytes);
+        let packed = std::slice::from_raw_parts(
+            self.k_q8_cache.as_ptr().add(offset + 4),
+            (self.kv_dim + 3) / 4,
+        );
+        (norm, packed)
+    }
+
+    /// Read and dequantize TurboQuant2 Value vector into `out_v` without runtime bounds checks.
+    ///
+    /// # Safety
+    /// Caller must ensure `self.precision == KvPrecision::TurboQuant2`, `layer` is a valid attention layer, and `pos < max_seq_len`.
+    #[inline]
+    pub unsafe fn get_v_tq2_dequantized_unchecked(
+        &self,
+        layer: usize,
+        pos: usize,
+        out_v: &mut [f32],
+    ) {
+        let cache_layer = *self.layer_map.get_unchecked(layer);
+        let bytes_per_token = 4 + (self.kv_dim + 3) / 4;
+        let offset = (cache_layer * self.max_seq_len + pos) * bytes_per_token;
+        let mut norm_bytes = [0u8; 4];
+        std::ptr::copy_nonoverlapping(
+            self.v_q8_cache.as_ptr().add(offset),
+            norm_bytes.as_mut_ptr(),
+            4,
+        );
+        let norm = f32::from_le_bytes(norm_bytes);
+        let packed = std::slice::from_raw_parts(
+            self.v_q8_cache.as_ptr().add(offset + 4),
+            (self.kv_dim + 3) / 4,
+        );
+        if let Some(ref tq) = self.tq2 {
+            tq.dequantize(norm, packed, out_v);
+        }
     }
 
     /// Read Key vector slice for a given layer and position (only available for FP32 precision).
@@ -556,5 +794,69 @@ mod tests {
         let dot = mivi_quant::q8_0::dot_q8_0_f32(&k[0..32], k_block);
         let expected_dot: f32 = k[0..32].iter().map(|x| x * x).sum();
         assert!((dot - expected_dot).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_kv_cache_turboquant4_memory_and_store() {
+        let attention_layers = vec![2, 5, 8, 11, 13, 15];
+        let mut kv = KvCache::try_new_selective_with_precision(
+            16,
+            65536,
+            512,
+            &attention_layers,
+            KvPrecision::TurboQuant4,
+        )
+        .unwrap();
+
+        assert_eq!(kv.precision(), KvPrecision::TurboQuant4);
+        assert_eq!(kv.capacity_tokens(), 65536);
+        // 512 dim / 2 = 256 bytes + 4 bytes norm = 260 bytes per token
+        // 6 layers * 65536 tokens * 260 bytes * 2 (K+V) = 204,472,320 bytes (~204.4 MB vs 1.61 GB in F32)
+        assert_eq!(kv.memory_bytes(), 6 * 65536 * 260 * 2);
+
+        let k = vec![1.2f32; 512];
+        let v = vec![-0.8f32; 512];
+        assert!(kv.store(2, 0, &k, &v).is_ok());
+
+        let (norm_k, packed_k) = unsafe { kv.get_k_tq4_packed_unchecked(2, 0) };
+        assert!(norm_k > 0.0);
+        assert_eq!(packed_k.len(), 256);
+
+        let mut v_dequant = vec![0.0f32; 512];
+        unsafe { kv.get_v_tq4_dequantized_unchecked(2, 0, &mut v_dequant) };
+        let diff = (v_dequant[0] - v[0]).abs();
+        assert!(diff < 0.3, "Dequantized V value diff must be small (got: {diff})");
+    }
+
+    #[test]
+    fn test_kv_cache_turboquant2_memory_and_store() {
+        let attention_layers = vec![2, 5, 8, 11, 13, 15];
+        let mut kv = KvCache::try_new_selective_with_precision(
+            16,
+            65536,
+            512,
+            &attention_layers,
+            KvPrecision::TurboQuant2,
+        )
+        .unwrap();
+
+        assert_eq!(kv.precision(), KvPrecision::TurboQuant2);
+        assert_eq!(kv.capacity_tokens(), 65536);
+        // 512 dim / 4 = 128 bytes + 4 bytes norm = 132 bytes per token
+        // 6 layers * 65536 tokens * 132 bytes * 2 (K+V) = 103,809,024 bytes (~103.8 MB vs 1.61 GB in F32)
+        assert_eq!(kv.memory_bytes(), 6 * 65536 * 132 * 2);
+
+        let k = vec![1.2f32; 512];
+        let v = vec![-0.8f32; 512];
+        assert!(kv.store(2, 0, &k, &v).is_ok());
+
+        let (norm_k, packed_k) = unsafe { kv.get_k_tq2_packed_unchecked(2, 0) };
+        assert!(norm_k > 0.0);
+        assert_eq!(packed_k.len(), 128);
+
+        let mut v_dequant = vec![0.0f32; 512];
+        unsafe { kv.get_v_tq2_dequantized_unchecked(2, 0, &mut v_dequant) };
+        let diff = (v_dequant[0] - v[0]).abs();
+        assert!(diff < 0.5, "Dequantized V value diff must be reasonable (got: {diff})");
     }
 }

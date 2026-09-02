@@ -183,6 +183,86 @@ fn compute_gqa_attention(
                     }
                 }
             }
+            mivi_kv::KvPrecision::TurboQuant4 => {
+                let head_tq = mivi_core::TurboQuant4Bit::new(head_dim);
+                let q_lut = head_tq.build_query_lut(q_head);
+                let head_bytes = head_dim / 2;
+                let head_offset = kv_head * head_bytes;
+                let mut v_buf = [0.0f32; 1024];
+
+                for t in 0..seq_len {
+                    let (norm_k, packed_k) =
+                        unsafe { kv.get_k_tq4_packed_unchecked(layer, t) };
+                    let k_head_packed = &packed_k[head_offset..head_offset + head_bytes];
+                    let score = head_tq.score_query_lut(&q_lut, norm_k, k_head_packed) * scale;
+
+                    unsafe {
+                        kv.get_v_tq4_dequantized_unchecked(
+                            layer,
+                            t,
+                            &mut v_buf[..cfg.kv_dim],
+                        )
+                    };
+                    let v_head = &v_buf[kv_head * head_dim..(kv_head + 1) * head_dim];
+
+                    if score > running_max || running_max == f32::NEG_INFINITY {
+                        let alpha = if running_max == f32::NEG_INFINITY {
+                            0.0
+                        } else {
+                            (running_max - score).exp()
+                        };
+                        running_sum = running_sum * alpha + 1.0;
+                        for i in 0..head_dim {
+                            out_head[i] = out_head[i] * alpha + v_head[i];
+                        }
+                        running_max = score;
+                    } else if score > f32::NEG_INFINITY {
+                        let beta = (score - running_max).exp();
+                        running_sum += beta;
+                        mivi_core::vec_fmadd(out_head, beta, v_head);
+                    }
+                }
+            }
+            mivi_kv::KvPrecision::TurboQuant2 => {
+                let head_tq = mivi_core::TurboQuant2Bit::new(head_dim);
+                let q_lut = head_tq.build_query_lut(q_head);
+                let head_bytes = head_dim / 4;
+                let head_offset = kv_head * head_bytes;
+                let mut v_buf = [0.0f32; 1024];
+
+                for t in 0..seq_len {
+                    let (norm_k, packed_k) =
+                        unsafe { kv.get_k_tq2_packed_unchecked(layer, t) };
+                    let k_head_packed = &packed_k[head_offset..head_offset + head_bytes];
+                    let score = head_tq.score_query_lut(&q_lut, norm_k, k_head_packed) * scale;
+
+                    unsafe {
+                        kv.get_v_tq2_dequantized_unchecked(
+                            layer,
+                            t,
+                            &mut v_buf[..cfg.kv_dim],
+                        )
+                    };
+                    let v_head = &v_buf[kv_head * head_dim..(kv_head + 1) * head_dim];
+
+                    if score > running_max || running_max == f32::NEG_INFINITY {
+                        let alpha = if running_max == f32::NEG_INFINITY {
+                            0.0
+                        } else {
+                            (running_max - score).exp()
+                        };
+                        running_sum = running_sum * alpha + 1.0;
+                        for i in 0..head_dim {
+                            out_head[i] = out_head[i] * alpha + v_head[i];
+                        }
+                        running_max = score;
+                    } else if score > f32::NEG_INFINITY {
+                        let beta = (score - running_max).exp();
+                        running_sum += beta;
+                        mivi_core::vec_fmadd(out_head, beta, v_head);
+                    }
+                }
+            }
         }
 
         if running_sum > 0.0 {

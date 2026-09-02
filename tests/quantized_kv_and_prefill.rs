@@ -34,6 +34,34 @@ fn test_quantized_kv_cache_q8_0_memory_reduction() {
 
     let reduction_ratio = 1.0 - (q8_bytes as f64 / f32_bytes as f64);
     assert!(reduction_ratio > 0.73, "Q8_0 must provide at least 73% memory reduction");
+
+    let kv_tq4 = KvCache::try_new_selective_with_precision(
+        n_layers,
+        max_seq_len,
+        kv_dim,
+        &attention_layers,
+        KvPrecision::TurboQuant4,
+    )
+    .expect("Should allocate TurboQuant4 KV cache");
+
+    let tq4_bytes = kv_tq4.memory_bytes();
+    assert_eq!(tq4_bytes, 204_472_320); // ~204.4 MB
+    let tq4_reduction = 1.0 - (tq4_bytes as f64 / f32_bytes as f64);
+    assert!(tq4_reduction > 0.87, "TurboQuant4 must provide >87% memory reduction (got: {tq4_reduction})");
+
+    let kv_tq2 = KvCache::try_new_selective_with_precision(
+        n_layers,
+        max_seq_len,
+        kv_dim,
+        &attention_layers,
+        KvPrecision::TurboQuant2,
+    )
+    .expect("Should allocate TurboQuant2 KV cache");
+
+    let tq2_bytes = kv_tq2.memory_bytes();
+    assert_eq!(tq2_bytes, 103_809_024); // ~103.8 MB
+    let tq2_reduction = 1.0 - (tq2_bytes as f64 / f32_bytes as f64);
+    assert!(tq2_reduction > 0.93, "TurboQuant2 must provide >93% memory reduction (got: {tq2_reduction})");
 }
 
 #[test]

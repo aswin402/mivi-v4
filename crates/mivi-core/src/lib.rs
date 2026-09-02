@@ -19,4 +19,4 @@ pub use rope::{RopeCache, RopeError};
 pub use simd::{rms_norm_in_place_simd, rms_norm_simd};
 pub use sys::{estimate_process_memory_mb, get_system_page_size};
 pub use tensor::{Tensor, TensorError, TensorShape};
-pub use turboquant::{fwht_in_place, rotate_vector_in_place, TurboQuant4Bit};
+pub use turboquant::{fwht_in_place, rotate_vector_in_place, TurboQuant2Bit, TurboQuant4Bit};
