@@ -201,6 +201,11 @@ impl JsonGrammar {
         }
 
         for ch in chunk.chars() {
+            if self.completed {
+                self.has_error = true;
+                return false;
+            }
+
             if self.escape {
                 self.escape = false;
                 continue;
@@ -268,6 +273,7 @@ impl JsonGrammar {
                         self.expect_value = false;
                         if self.stack_depth == 0 && self.started {
                             self.completed = true;
+                            self.expect_comma_or_close = false;
                         }
                     } else {
                         self.has_error = true;
@@ -293,6 +299,7 @@ impl JsonGrammar {
                         self.expect_value = false;
                         if self.stack_depth == 0 && self.started {
                             self.completed = true;
+                            self.expect_comma_or_close = false;
                         }
                     } else {
                         self.has_error = true;

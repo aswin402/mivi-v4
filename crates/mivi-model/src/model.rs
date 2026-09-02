@@ -670,6 +670,9 @@ impl Model {
             if !decoded_chunk.is_empty() {
                 grammar.feed(&decoded_chunk);
                 full_output.push_str(&decoded_chunk);
+                if grammar.completed {
+                    break;
+                }
             }
 
             let _ = self.forward_step(next_token, pos, true)?;
