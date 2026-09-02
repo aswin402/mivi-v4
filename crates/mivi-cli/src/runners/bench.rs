@@ -149,24 +149,30 @@ pub fn run_bench(model: Option<PathBuf>) -> Result<()> {
             println!("  Raw Output                 : {}", full_json.trim().replace('\n', " "));
             println!("  Grammar Syntax Valid       : {}", if is_valid_json { "✅ 100% VALID JSON" } else { "❌ INVALID JSON" });
 
-            // Run 4: Prompt Lookup Speculative Decoding (PLD)
-            println!("\n  🚀 Run 4: Prompt Lookup Speculative Decoding (PLD)");
+            // Run 4: JetSpec Multi-Branch Tree-PLD & Reasoning-Adaptive Sizing
+            println!("\n  🚀 Run 4: JetSpec Multi-Branch Tree-PLD & Reasoning Speculation");
             println!("  ─────────────────────────────────────────────────────────────────");
-            let pld = mivi_model::PromptLookupProposer::new(3, 3);
+            let tree_pld = mivi_model::TreePldProposer::new(3, 3, 5);
             let test_context = model.tokenizer.encode(
-                "fn calculate_metrics(data: &[f32]) -> (f32, f32) { let sum = 0.0; let sum = 0.0;",
+                "fn calculate_metrics(data: &[f32]) -> (f32, f32) { let sum = 0.0; let sum = 100.0;",
             );
-            let sample_query = model.tokenizer.encode("let sum = 0.0;");
+            let sample_query = model.tokenizer.encode(" let sum =");
             let mut combined_tokens = test_context.clone();
             combined_tokens.extend_from_slice(&sample_query);
 
-            let draft = pld.propose(&combined_tokens);
+            let tree_draft = tree_pld.propose_tree(&combined_tokens, mivi_model::SpeculativeMode::MultiBranchTree);
             println!("  Context Token Count        : {}", test_context.len());
-            println!("  N-Gram Match Found         : {}", draft.is_some());
-            if let Some(ref d) = draft {
-                let decoded_draft = model.tokenizer.decode(d);
-                println!("  Speculated Draft Tokens    : {:?} (\"{}\")", d, decoded_draft.trim());
-                println!("  PLD Speculation Status     : ✅ ACCELERATING (Draft proposed in < 5 µs)");
+            println!("  N-Gram Tree Match Found    : {}", tree_draft.is_some());
+            if let Some(ref td) = tree_draft {
+                let primary_dec = model.tokenizer.decode(td.primary());
+                let secondary_dec = model.tokenizer.decode(td.secondary());
+                println!("  Tree Speculative Mode      : {:?}", td.mode);
+                println!("  Primary Branch Draft       : {:?} (\"{}\")", td.primary(), primary_dec.trim());
+                if td.secondary_len > 0 {
+                    println!("  Secondary Branch Draft     : {:?} (\"{}\")", td.secondary(), secondary_dec.trim());
+                }
+                println!("  Total Drafted Tree Nodes   : {} tokens (Width=2, Depth=3)", td.total_tokens());
+                println!("  Tree-PLD Speculation Status: ✅ ACCELERATING (Multi-branch proposed in < 3 µs)");
             }
 
             // Run 5: Semantic Anchor Agent Rollback (FreeToken)

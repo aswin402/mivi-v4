@@ -28,7 +28,11 @@ pub use grammar::{JsonGrammar, JsonScope, TokenBitMask, ToolCallGrammar};
 pub use loader::safe_f32_slice;
 pub use lora::{ActiveAdapters, LoraAdapter, LoraWeightPair};
 pub use model::{Model, ModelError, Result};
-pub use pld::{PromptLookupProposer, DEFAULT_PLD_DRAFT_SIZE, DEFAULT_PLD_NGRAM_SIZE};
+pub use pld::{
+    PromptLookupProposer, ReasoningSpecRouter, SpeculativeMode, TreeDraftCandidate,
+    TreePldProposer, TreeVerifier, DEFAULT_PLD_DRAFT_SIZE, DEFAULT_PLD_NGRAM_SIZE,
+    MAX_TREE_DEPTH, REASONING_DRAFT_DEPTH,
+};
 pub use sampler::{Sampler, SamplerConfig};
 pub use ssm::{ssm_forward, SsmParams};
 pub use transformer::{attention_forward, AttentionParams};
