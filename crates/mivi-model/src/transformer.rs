@@ -118,14 +118,18 @@ fn compute_gqa_attention(
             let v_cached = unsafe { kv.get_v_unchecked(layer, t) };
             let v_head = &v_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
 
-            if score > running_max {
-                let alpha = (running_max - score).exp();
+            if score > running_max || running_max == f32::NEG_INFINITY {
+                let alpha = if running_max == f32::NEG_INFINITY {
+                    0.0
+                } else {
+                    (running_max - score).exp()
+                };
                 running_sum = running_sum * alpha + 1.0;
                 for i in 0..head_dim {
                     out_head[i] = out_head[i] * alpha + v_head[i];
                 }
                 running_max = score;
-            } else {
+            } else if score > f32::NEG_INFINITY {
                 let beta = (score - running_max).exp();
                 running_sum += beta;
                 mivi_core::vec_fmadd(out_head, beta, v_head);

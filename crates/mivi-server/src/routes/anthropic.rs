@@ -102,10 +102,12 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
             }
             system_text.push_str("Available tools:\n");
             for tool in tools {
+                let schema_str = serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
                 system_text.push_str(&format!(
-                    "- {}: {}\n",
+                    "- {}: {} | parameters: {}\n",
                     tool.name,
-                    tool.description.as_deref().unwrap_or("")
+                    tool.description.as_deref().unwrap_or(""),
+                    schema_str
                 ));
             }
             system_text.push_str("\nTo invoke a tool, output: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
@@ -244,9 +246,13 @@ pub async fn anthropic_messages_handler(
             .to_string(),
         );
 
-        // 2. content_block_delta stream
+        // 2. content_block_delta stream with dynamic token counting
+        let token_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tc_clone = token_counter.clone();
+
         let stream = ReceiverStream::new(stream_rx).map(move |chunk_res| {
             let chunk = chunk_res.unwrap_or_default();
+            tc_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let data = serde_json::json!({
                 "type": "content_block_delta",
                 "index": 0,
@@ -259,6 +265,7 @@ pub async fn anthropic_messages_handler(
         });
 
         // 3. content_block_stop, message_delta, and message_stop
+        let tc_final = token_counter.clone();
         let block_stop_event = Event::default().event("content_block_stop").data(
             serde_json::json!({
                 "type": "content_block_stop",
@@ -267,14 +274,18 @@ pub async fn anthropic_messages_handler(
             .to_string(),
         );
 
-        let msg_delta_event = Event::default().event("message_delta").data(
-            serde_json::json!({
-                "type": "message_delta",
-                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
-                "usage": { "output_tokens": 10 }
-            })
-            .to_string(),
-        );
+        let msg_delta_stream = futures::stream::once(async move {
+            let out_tokens = tc_final.load(std::sync::atomic::Ordering::Relaxed).max(1);
+            let msg_delta_event = Event::default().event("message_delta").data(
+                serde_json::json!({
+                    "type": "message_delta",
+                    "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                    "usage": { "output_tokens": out_tokens }
+                })
+                .to_string(),
+            );
+            Ok::<Event, Infallible>(msg_delta_event)
+        });
 
         let msg_stop_event = Event::default().event("message_stop").data(
             serde_json::json!({
@@ -290,7 +301,9 @@ pub async fn anthropic_messages_handler(
         .chain(stream)
         .chain(futures::stream::iter(vec![
             Ok(block_stop_event),
-            Ok(msg_delta_event),
+        ]))
+        .chain(msg_delta_stream)
+        .chain(futures::stream::iter(vec![
             Ok(msg_stop_event),
         ]));
 
@@ -309,6 +322,10 @@ pub async fn anthropic_messages_handler(
                 let has_tools = !parsed_tools.is_empty();
                 let content_blocks = if has_tools {
                     let mut blocks = Vec::new();
+                    let clean_text = mivi_tools::strip_tool_calls(&output_text);
+                    if !clean_text.is_empty() {
+                        blocks.push(AnthropicContentBlock::Text { text: clean_text });
+                    }
                     for tool in parsed_tools {
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: format!("toolu_{}", uuid::Uuid::new_v4().simple()),

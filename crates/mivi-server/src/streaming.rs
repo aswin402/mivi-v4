@@ -100,11 +100,48 @@ pub fn create_chunk_event(
     Event::default().data(data)
 }
 
-/// Create an SSE Event containing an error chunk wrapped in XML error tags.
+/// Create the initial SSE Event establishing choices[0].delta.role = "assistant".
 #[inline]
-pub fn create_error_chunk_event(id: &str, model: &str, error: &str) -> Event {
-    let msg = format!("<error>{}</error>", error);
-    create_content_chunk_event(id, model, &msg)
+pub fn create_initial_chunk_event(id: &str, model: &str) -> Event {
+    let chunk = ChatCompletionChunkBorrow {
+        id,
+        object: OPENAI_CHUNK_OBJECT,
+        created: chrono::Utc::now().timestamp() as u64,
+        model,
+        choices: [ChunkChoiceBorrow {
+            index: 0,
+            delta: ChunkDeltaBorrow {
+                role: Some(ROLE_ASSISTANT),
+                content: Some(""),
+                thinking: None,
+            },
+            finish_reason: None,
+        }],
+    };
+
+    let data = match serde_json::to_string(&chunk) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize SSE chunk: {}", e);
+            "{}".to_string()
+        }
+    };
+
+    Event::default().data(data)
+}
+
+/// Create an SSE error event adhering to standard OpenAI error format.
+#[inline]
+pub fn create_error_chunk_event(_id: &str, _model: &str, error: &str) -> Event {
+    let payload = serde_json::json!({
+        "error": {
+            "message": error,
+            "type": "api_error",
+            "param": null,
+            "code": "inference_error"
+        }
+    });
+    Event::default().data(payload.to_string())
 }
 
 /// Create an SSE Event containing a content delta chunk without allocating extra strings.
@@ -199,7 +236,7 @@ pub fn create_done_event() -> Event {
     Event::default().data(SSE_DONE_MARKER)
 }
 
-/// Helper to send standard sequence: thinking event -> content chunks -> stop chunk -> done event.
+/// Helper to send standard sequence: initial chunk -> thinking event -> content chunks -> stop chunk -> done event.
 pub async fn send_sse_sequence<F, Fut>(
     tx: &tokio::sync::mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
     id: &str,
@@ -210,6 +247,11 @@ pub async fn send_sse_sequence<F, Fut>(
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    // Send initial assistant role chunk
+    if tx.send(Ok(create_initial_chunk_event(id, model))).await.is_err() {
+        return;
+    }
+
     if let Some(msg) = thinking_msg {
         if tx
             .send(Ok(create_thinking_chunk_event(id, model, msg)))

@@ -57,6 +57,12 @@ pub fn extract_thinking(text: &str) -> Option<String> {
         .map(|m| m.as_str().trim().to_string())
 }
 
+/// Strip <tool_call>...</tool_call> tags from text.
+pub fn strip_tool_calls(text: &str) -> String {
+    let without_calls = TOOL_CALL_RE.replace_all(text, "");
+    without_calls.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -133,6 +133,16 @@ pub fn load_from_disk(
     let conv_len = reader.read_u32::<LittleEndian>()? as usize;
     let ssm_len = reader.read_u32::<LittleEndian>()? as usize;
 
+    let file_meta = file_path.metadata()?;
+    let file_len = file_meta.len() as usize;
+    let expected_payload_bytes = (n_tokens * 4) + (k_len + v_len + conv_len + ssm_len) * 4;
+    if expected_payload_bytes > file_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Cache header sizes ({expected_payload_bytes} bytes) exceed file size ({file_len} bytes)"),
+        ));
+    }
+
     // 3. Read tokens
     let mut tokens = Vec::with_capacity(n_tokens);
     for _ in 0..n_tokens {

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.7] - 2026-09-02
+
+### FlashDecoding Numerical Hardening, YaRN RoPE Math Correction, API Protocol Compliance & Agent Oscillation Protection
+
+#### 💡 Ideas, Inspirations & Sources
+- **FlashDecoding Online Softmax Numerical Hardening (`mivi-model::transformer`)**:
+  - *Zero-NaN Guarantees on Masked Sequences*: Fixed an IEEE-754 `-Inf - (-Inf) = NaN` subtraction bug in online softmax accumulation when the initial cached token was masked out. Hardened `mivi-core::math::softmax` against `+Inf` and `NaN` logit inputs.
+- **YaRN (Yet another RoPE extensioN, `arXiv:2309.00071`) Parameter Utilization (`mivi-core::rope`)**:
+  - *Accurate Frequency Boundaries*: Corrected the YaRN frequency ramp divisor and wavelength interpolation to scale properly with `beta_fast`, `beta_slow`, and `orig_max_seq_len` on 64K/128K sequences.
+- **OpenAI & Anthropic SSE Protocol Compliance (`mivi-server`)**:
+  - *Standard Chunk Lifecycle*: Emitted initial `choices[0].delta = {"role": "assistant"}` chunk on stream start and formatted errors as standard JSON error events rather than `<error>` text tags.
+  - *Dynamic Anthropic Telemetry*: Implemented dynamic output token counting in `message_delta` (eliminating hardcoded `output_tokens: 10`), preserved conversational text preceding `tool_use` blocks, and included `input_schema` in ChatML tool definitions.
+  - *Worker Actor Panic Recovery*: Wrapped engine actor execution in `std::panic::catch_unwind` to prevent worker thread panics from permanently halting the server.
+- **Agent Loop Oscillation Stagnation Guard (`mivi-agent`)**:
+  - *Periodic Cycle Detection*: Added $N$-cycle periodic oscillation detection (e.g. A $\to$ B $\to$ A $\to$ B) to terminate oscillating tool loops safely before exhausting step budgets.
+- **CLI Chat REPL Dynamic History (`mivi-cli`)**:
+  - *Full Context Retention*: Removed the artificial 3-turn limit in `chat.rs`, allowing full conversation history to be retained within the model's sequence length budget.
+
+---
+
 ## [v0.2.6] - 2026-09-02
 
 ### 64K/128K Long-Context Scaling, YaRN NTK-Aware RoPE Extrapolation, Selective KV Memory Telemetry & NIAH Test Suite

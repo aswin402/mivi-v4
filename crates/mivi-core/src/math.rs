@@ -33,14 +33,14 @@ pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
-    let mut max_val = x[0];
-    for &v in x.iter().skip(1) {
-        if v > max_val {
+    let mut max_val = f32::NEG_INFINITY;
+    for &v in x.iter() {
+        if v.is_finite() && v > max_val {
             max_val = v;
         }
     }
 
-    if max_val == f32::NEG_INFINITY {
+    if !max_val.is_finite() {
         let uniform = 1.0 / x.len() as f32;
         for v in x.iter_mut() {
             *v = uniform;
@@ -50,14 +50,23 @@ pub fn softmax(x: &mut [f32]) {
 
     let mut sum = 0.0f32;
     for v in x.iter_mut() {
-        *v = (*v - max_val).exp();
-        sum += *v;
+        if v.is_finite() {
+            *v = (*v - max_val).exp();
+            sum += *v;
+        } else {
+            *v = 0.0;
+        }
     }
 
     if sum > 0.0 {
         let inv_sum = 1.0 / sum;
         for v in x.iter_mut() {
             *v *= inv_sum;
+        }
+    } else {
+        let uniform = 1.0 / x.len() as f32;
+        for v in x.iter_mut() {
+            *v = uniform;
         }
     }
 }
@@ -199,6 +208,14 @@ mod tests {
         assert!(!x[0].is_nan());
         assert_eq!(x[0], 0.25);
         assert!((x.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_softmax_overflow_infinity_and_nan() {
+        let mut x = vec![f32::INFINITY, f32::NAN, 5.0, 10.0];
+        softmax(&mut x);
+        assert!(x.iter().all(|v| v.is_finite()));
+        assert!((x.iter().sum::<f32>() - 1.0).abs() < 1e-5);
     }
 
     #[test]

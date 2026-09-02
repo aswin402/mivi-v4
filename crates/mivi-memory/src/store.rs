@@ -96,3 +96,32 @@ impl MemoryStore {
         Ok(paths)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MemoryRecord, MemoryType};
+
+    #[test]
+    fn test_memory_store_save_and_load_with_horizontal_rules() {
+        let temp_dir = std::env::temp_dir().join(format!("mivi_mem_test_{}", uuid::Uuid::new_v4()));
+        let store = MemoryStore::new(&temp_dir);
+
+        let content = "# Markdown Header\n\n---\n\nBody below rule\n---\nAnother rule";
+        let record = MemoryRecord::new(
+            MemoryType::Semantic,
+            "Test Horizontal Rule Note",
+            content,
+            vec!["test".to_string()],
+        );
+
+        let path = store.save_record(&record).expect("Should save record");
+        let loaded = store.load_record(&path).expect("Should load record");
+
+        assert_eq!(loaded.id, record.id);
+        assert_eq!(loaded.r#type, record.r#type);
+        assert_eq!(loaded.content, record.content);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

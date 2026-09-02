@@ -120,17 +120,12 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
             name: None,
         });
 
-        // 1. Extract active conversational context (System + recent turns) for model prompting
-        const MAX_ACTIVE_HISTORY_TURNS: usize = 3;
-        let active_context =
-            get_active_chat_context(&conversation_history, MAX_ACTIVE_HISTORY_TURNS);
-
-        // 2. Format ChatML prompt string
+        // 1. Format ChatML prompt from full conversation history
         let mut full_prompt =
-            mivi_tokenizer::format_chatml(&active_context, None, thinking_enabled);
+            mivi_tokenizer::format_chatml(&conversation_history, None, thinking_enabled);
         let mut prompt_tokens = m.tokenizer.encode(&full_prompt);
 
-        // 3. Sliding window context eviction if approaching max_seq_len
+        // 2. Sliding window context eviction if approaching max_seq_len
         let max_ctx = m.config.max_seq_len;
         if prompt_tokens.len() + max_tokens >= max_ctx {
             let mut trimmed_any = false;
@@ -142,12 +137,8 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
                     if idx < conversation_history.len().saturating_sub(1) {
                         conversation_history.remove(idx);
                         trimmed_any = true;
-                        let active = get_active_chat_context(
-                            &conversation_history,
-                            MAX_ACTIVE_HISTORY_TURNS,
-                        );
                         full_prompt =
-                            mivi_tokenizer::format_chatml(&active, None, thinking_enabled);
+                            mivi_tokenizer::format_chatml(&conversation_history, None, thinking_enabled);
                         prompt_tokens = m.tokenizer.encode(&full_prompt);
                     } else {
                         break;
@@ -158,7 +149,7 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
             }
             if trimmed_any {
                 println!(
-                    "  \x1b[33m⚠ Context window near capacity: trimmed older messages.\x1b[0m"
+                    "\n\x1b[33m[Context Window Managed: Trimmed oldest turns to fit {max_ctx} token budget]\x1b[0m"
                 );
                 m.reset_context();
                 cached_tokens.clear();
@@ -446,6 +437,7 @@ fn handle_slash_command(
 }
 
 /// Helper to extract valid conversational context (System + complete user-assistant pairs + current user prompt).
+#[allow(dead_code)]
 fn get_active_chat_context(
     history: &[mivi_tokenizer::ChatMessage],
     max_history_turns: usize,

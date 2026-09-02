@@ -69,20 +69,31 @@ impl<'a> AgentLoop<'a> {
             return TASK_COMPLETED_MSG.to_string();
         }
 
-        // Stagnation detection: track repeated identical calls
+        // Stagnation detection: track repeated single actions and 2-cycle oscillations
         let call_signature = format!("{:?}", calls);
         self.recent_actions.push_back(call_signature.clone());
-        if self.recent_actions.len() > STAGNATION_WINDOW_SIZE {
+        if self.recent_actions.len() > 6 {
             self.recent_actions.pop_front();
         }
-        if self.recent_actions.len() == STAGNATION_WINDOW_SIZE
-            && self.recent_actions.iter().all(|a| a == &call_signature)
-        {
+
+        let is_1_cycle = self.recent_actions.len() >= STAGNATION_WINDOW_SIZE
+            && self
+                .recent_actions
+                .iter()
+                .rev()
+                .take(STAGNATION_WINDOW_SIZE)
+                .all(|a| a == &call_signature);
+
+        let is_2_cycle = self.recent_actions.len() == 6
+            && self.recent_actions[0] == self.recent_actions[2]
+            && self.recent_actions[2] == self.recent_actions[4]
+            && self.recent_actions[1] == self.recent_actions[3]
+            && self.recent_actions[3] == self.recent_actions[5]
+            && self.recent_actions[0] != self.recent_actions[1];
+
+        if is_1_cycle || is_2_cycle {
             self.state.phase = AgentPhase::Failed;
-            return format!(
-                "<warning>Agent stagnation detected: repeated same tool call {} times. Terminating loop safely.</warning>",
-                STAGNATION_WINDOW_SIZE
-            );
+            return "<warning>Agent stagnation detected: repeated or oscillating tool calls detected. Terminating loop safely.</warning>".to_string();
         }
 
         self.state.phase = AgentPhase::Acting;

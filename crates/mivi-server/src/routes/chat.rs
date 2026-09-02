@@ -222,6 +222,17 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                 (None, "stop")
             };
 
+            let content = if tool_calls.is_some() {
+                let cleaned = mivi_tools::strip_tool_calls(&output);
+                if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(cleaned)
+                }
+            } else {
+                Some(output)
+            };
+
             let response = ChatCompletionResponse {
                 id: ctx.completion_id,
                 object: OPENAI_COMPLETION_OBJECT.to_string(),
@@ -231,7 +242,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                     index: 0,
                     message: MessageDto {
                         role: ROLE_ASSISTANT.to_string(),
-                        content: Some(output),
+                        content,
                         name: None,
                         thinking,
                         tool_calls,

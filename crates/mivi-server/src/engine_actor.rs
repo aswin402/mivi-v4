@@ -180,42 +180,50 @@ impl EngineActor {
             .spawn(move || {
                 let mut rx = rx;
                 while let Some(cmd) = rx.blocking_recv() {
-                    match cmd {
-                        EngineCommand::Generate {
-                            prompt,
-                            max_tokens,
-                            temperature,
-                            top_p,
-                            responder,
-                        } => {
-                            handle_generate(
-                                &mut model,
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match cmd {
+                            EngineCommand::Generate {
                                 prompt,
                                 max_tokens,
                                 temperature,
                                 top_p,
                                 responder,
-                            );
-                        }
-                        EngineCommand::GenerateStream {
-                            prompt,
-                            max_tokens,
-                            temperature,
-                            top_p,
-                            responder,
-                        } => {
-                            handle_generate_stream(
-                                &mut model,
+                            } => {
+                                handle_generate(
+                                    &mut model,
+                                    prompt,
+                                    max_tokens,
+                                    temperature,
+                                    top_p,
+                                    responder,
+                                );
+                            }
+                            EngineCommand::GenerateStream {
                                 prompt,
                                 max_tokens,
                                 temperature,
                                 top_p,
                                 responder,
-                            );
+                            } => {
+                                handle_generate_stream(
+                                    &mut model,
+                                    prompt,
+                                    max_tokens,
+                                    temperature,
+                                    top_p,
+                                    responder,
+                                );
+                            }
+                            EngineCommand::Encode { text, responder } => {
+                                handle_encode(&model, text, responder);
+                            }
                         }
-                        EngineCommand::Encode { text, responder } => {
-                            handle_encode(&model, text, responder);
-                        }
+                    }));
+                    if let Err(panic_err) = res {
+                        tracing::error!(
+                            "Engine actor caught panic during command execution: {:?}",
+                            panic_err
+                        );
                     }
                 }
             })?;

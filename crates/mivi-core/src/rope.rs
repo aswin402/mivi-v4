@@ -75,7 +75,7 @@ impl RopeCache {
                     }
                     RopeScaling::YaRN {
                         scale,
-                        orig_max_seq_len: _,
+                        orig_max_seq_len,
                         extrapolation_factor: _,
                         attn_factor: _,
                         beta_fast,
@@ -84,12 +84,22 @@ impl RopeCache {
                         if scale <= 1.0 {
                             base_freq
                         } else {
-                            // YaRN ramp: interpolate between unscaled high-freq and scaled low-freq
-                            let low_rot = 2.0 * std::f32::consts::PI;
-                            let high_rot = 2.0 * std::f32::consts::PI;
+                            // YaRN ramp: smooth frequency interpolation across wavelength boundaries
+                            let orig_len = orig_max_seq_len.max(1) as f32;
+                            let low_rot = orig_len / beta_slow.max(0.01);
+                            let high_rot = orig_len / beta_fast.max(0.01);
                             let wavelength = 2.0 * std::f32::consts::PI / base_freq;
-                            let r = (wavelength - low_rot) / (high_rot - low_rot).max(1.0);
-                            let ramp = (r.clamp(0.0, 1.0) * (beta_slow - beta_fast) + beta_fast).clamp(0.0, 1.0);
+
+                            let ramp = if high_rot >= low_rot {
+                                if wavelength < high_rot { 0.0 } else { 1.0 }
+                            } else if wavelength < high_rot {
+                                0.0
+                            } else if wavelength > low_rot {
+                                1.0
+                            } else {
+                                (wavelength - high_rot) / (low_rot - high_rot)
+                            };
+
                             let scaled_freq = base_freq / scale;
                             (1.0 - ramp) * base_freq + ramp * scaled_freq
                         }
