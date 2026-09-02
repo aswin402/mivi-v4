@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.9] - 2026-09-02
+
+### TurboQuant 4-bit Vector Quantization, Orthogonal Block-Hadamard Transforms & Compact Semantic Memory Search
+
+#### 💡 Ideas, Inspirations & Sources
+- **TurboQuant (Data-Oblivious Vector Quantization, `arXiv:2504.19874`, Google Research & NYU, ICLR 2026)**:
+  - *Deterministic Orthogonal Block-Hadamard Transform (`mivi-core::turboquant`)*: Implemented in-place Fast Walsh-Hadamard Transform (`fwht_in_place`) combined with deterministic SplitMix64 coordinate permutation and sign-flips. Universally maps arbitrary embedding vectors to symmetric Gaussian/Beta coordinate distributions.
+  - *Analytical 4-Bit Lloyd-Max Quantizer*: Quantizes coordinates into 4-bit nibbles (2 coordinates per byte, achieving 16x memory compression) using analytical Beta distribution decision boundaries with **zero training data or codebook clustering**.
+  - *Asymmetric Query LUT Scoring*: Fast cosine similarity estimation via query look-up tables directly in CPU registers.
+- **`turbovec` (`RyanCodrai/turbovec`) & `turboquant-pytorch` (`tonbistudio/turboquant-pytorch`)**:
+  - *Ultra-Compact `TurboMemoryIndex` (`mivi-memory`)*: Stored 4-bit compressed episodic and semantic agent memories, allowing 100,000 vectors to fit in only **38 MB of RAM** with sub-millisecond similarity recall.
+  - *Semantic Context VM Retrieval (`mivi-context`)*: Added `ContextStore::search_semantic` enabling dense semantic similarity search across loaded workspace code blocks and conversation histories.
+
+---
+
 ## [v0.2.8] - 2026-09-02
 
 ### Quantized KV Cache (`Q8_0`), Fused SIMD FlashDecoding Attention & High-Throughput Chunked Prefill

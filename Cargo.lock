@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "mivi"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-agent"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "chrono",
  "mivi-tools",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-cli"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-context"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "mivi-core",
  "mivi-tokenizer",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "rayon",
  "serde",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-kv"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "byteorder",
  "half",
@@ -791,10 +791,12 @@ dependencies = [
 
 [[package]]
 name = "mivi-memory"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "chrono",
+ "mivi-core",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "thiserror",
  "uuid",
@@ -802,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-model"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -817,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-quant"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "byteorder",
  "half",
@@ -829,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-router"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "regex",
  "serde",
@@ -838,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-server"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "chrono",
@@ -861,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-tokenizer"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "mivi-core",
  "regex",
@@ -873,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-tools"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "regex",
  "serde",
