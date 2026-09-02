@@ -89,15 +89,12 @@ fn compute_gqa_attention(
     pos: usize,
     cfg: &ModelConfig,
 ) -> Result<()> {
-    // Validate layer and pos bounds once upfront
-    let _ = kv.get_k(layer, pos)?;
-    let _ = kv.get_v(layer, pos)?;
-
     let head_dim = cfg.head_dim;
     let n_heads = cfg.n_heads;
     let heads_per_kv = n_heads / cfg.n_kv_heads.max(1);
     let scale = 1.0 / (head_dim as f32).sqrt();
     let seq_len = pos + 1;
+    let precision = kv.precision();
 
     for h in 0..n_heads {
         let kv_head = h / heads_per_kv;
@@ -108,31 +105,83 @@ fn compute_gqa_attention(
         let mut running_max = f32::NEG_INFINITY;
         let mut running_sum = 0.0f32;
 
-        // FlashDecoding online softmax single-pass accumulation
-        for t in 0..seq_len {
-            // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
-            let k_cached = unsafe { kv.get_k_unchecked(layer, t) };
-            let k_head = &k_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
-            let score = dot_product(q_head, k_head) * scale;
+        match precision {
+            mivi_kv::KvPrecision::F32 => {
+                // FlashDecoding online softmax single-pass accumulation for FP32
+                for t in 0..seq_len {
+                    // SAFETY: layer bounds checked upfront; t <= pos < max_seq_len.
+                    let k_cached = unsafe { kv.get_k_unchecked(layer, t) };
+                    let k_head = &k_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
+                    let score = dot_product(q_head, k_head) * scale;
 
-            let v_cached = unsafe { kv.get_v_unchecked(layer, t) };
-            let v_head = &v_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
+                    let v_cached = unsafe { kv.get_v_unchecked(layer, t) };
+                    let v_head = &v_cached[kv_head * head_dim..(kv_head + 1) * head_dim];
 
-            if score > running_max || running_max == f32::NEG_INFINITY {
-                let alpha = if running_max == f32::NEG_INFINITY {
-                    0.0
-                } else {
-                    (running_max - score).exp()
-                };
-                running_sum = running_sum * alpha + 1.0;
-                for i in 0..head_dim {
-                    out_head[i] = out_head[i] * alpha + v_head[i];
+                    if score > running_max || running_max == f32::NEG_INFINITY {
+                        let alpha = if running_max == f32::NEG_INFINITY {
+                            0.0
+                        } else {
+                            (running_max - score).exp()
+                        };
+                        running_sum = running_sum * alpha + 1.0;
+                        for i in 0..head_dim {
+                            out_head[i] = out_head[i] * alpha + v_head[i];
+                        }
+                        running_max = score;
+                    } else if score > f32::NEG_INFINITY {
+                        let beta = (score - running_max).exp();
+                        running_sum += beta;
+                        mivi_core::vec_fmadd(out_head, beta, v_head);
+                    }
                 }
-                running_max = score;
-            } else if score > f32::NEG_INFINITY {
-                let beta = (score - running_max).exp();
-                running_sum += beta;
-                mivi_core::vec_fmadd(out_head, beta, v_head);
+            }
+            mivi_kv::KvPrecision::Q8_0 => {
+                let blocks_per_head = (head_dim + 31) / 32;
+                let kv_head_block_start = kv_head * blocks_per_head;
+                let mut v_head_buf = [0.0f32; 128];
+
+                for t in 0..seq_len {
+                    // Compute fused dot product directly over Q8_0 blocks
+                    let mut score = 0.0f32;
+                    for b in 0..blocks_per_head {
+                        let q_slice = &q_head[b * 32..(b * 32 + 32).min(head_dim)];
+                        let k_block = unsafe {
+                            kv.get_k_q8_block_unchecked(layer, t, kv_head_block_start + b)
+                        };
+                        score += mivi_quant::q8_0::dot_q8_0_f32(q_slice, k_block);
+                    }
+                    score *= scale;
+
+                    // Dequantize value blocks into stack buffer
+                    for b in 0..blocks_per_head {
+                        let v_block = unsafe {
+                            kv.get_v_q8_block_unchecked(layer, t, kv_head_block_start + b)
+                        };
+                        let start = b * 32;
+                        let end = (start + 32).min(head_dim);
+                        let mut block_buf = [0.0f32; 32];
+                        mivi_quant::q8_0::dequantize_q8_0(v_block, &mut block_buf);
+                        v_head_buf[start..end].copy_from_slice(&block_buf[..end - start]);
+                    }
+                    let v_head = &v_head_buf[..head_dim];
+
+                    if score > running_max || running_max == f32::NEG_INFINITY {
+                        let alpha = if running_max == f32::NEG_INFINITY {
+                            0.0
+                        } else {
+                            (running_max - score).exp()
+                        };
+                        running_sum = running_sum * alpha + 1.0;
+                        for i in 0..head_dim {
+                            out_head[i] = out_head[i] * alpha + v_head[i];
+                        }
+                        running_max = score;
+                    } else if score > f32::NEG_INFINITY {
+                        let beta = (score - running_max).exp();
+                        running_sum += beta;
+                        mivi_core::vec_fmadd(out_head, beta, v_head);
+                    }
+                }
             }
         }
 

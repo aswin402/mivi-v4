@@ -5,7 +5,7 @@ pub mod disk;
 pub mod prefix;
 pub mod semantic;
 
-pub use cache::{KvCache, KvError, Result};
+pub use cache::{KvCache, KvError, KvPrecision, Result};
 pub use disk::{
     clear_cache_dir, default_cache_dir, ensure_cache_dir, list_cached_files, load_from_disk,
     save_to_disk, CacheFileInfo, DEFAULT_CACHE_DIR, KVC_MAGIC,

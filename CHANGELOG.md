@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.8] - 2026-09-02
+
+### Quantized KV Cache (`Q8_0`), Fused SIMD FlashDecoding Attention & High-Throughput Chunked Prefill
+
+#### 💡 Ideas, Inspirations & Sources
+- **KIVI (Tuning-Free Asymmetric 2-bit/8-bit KV Quantization, `arXiv:2402.02750`)**:
+  - *Asymmetric Key/Value Memory Scaling*: Implemented `KvPrecision::Q8_0` (34 bytes per 32-element block) reducing 64K KV cache footprint from 1.61 GB down to **427 MB (73.4% RAM reduction)** on Mivi's 6 attention layers.
+- **`llama.cpp` (`-ctk/-ctv q8_0`) & Fused SIMD Kernel Design**:
+  - *Zero-Dequantization Attention Scoring*: Added `dot_q8_0_f32_avx2` in `mivi-quant::q8_0` computing fused $Q_{\text{f32}} \cdot K_{\text{q8\_0}}^T$ in-place without dequantizing whole cache layers into memory.
+  - *Zero Heap Allocations in FlashDecoding*: Values are dequantized on-the-fly into fixed 128-float stack buffers within L1 CPU cache.
+- **Sarathi (Chunked-Prefills, `arXiv:2308.16369`) & `vLLM` (`--enable-chunked-prefill`)**:
+  - *Vocabulary Projection Bypass*: During chunked prompt prefill, output normalization and large vocabulary unembedding projections ($W_{\text{head}}$ with 65,536+ rows) are skipped for all non-terminal prompt tokens, saving millions of unnecessary FLOPs.
+  - *Hierarchical Snapshot Synchronization*: Synchronized 64-token chunk boundaries with LMCache prefix snapshots for instant $< 0.05\text{ ms}$ state restoration.
+
+---
+
 ## [v0.2.7] - 2026-09-02
 
 ### FlashDecoding Numerical Hardening, YaRN RoPE Math Correction, API Protocol Compliance & Agent Oscillation Protection

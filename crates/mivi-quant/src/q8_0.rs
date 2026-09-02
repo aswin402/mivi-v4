@@ -54,16 +54,70 @@ pub fn quantize_f32_to_q8_0_block(src: &[f32], dst_block: &mut [u8]) {
     }
 }
 
-/// Compute scalar dot product between f32 Query block and Q8_0 Key block.
+/// Compute dot product between f32 Query block (length = 32) and Q8_0 Key block (34 bytes: f16 scale + 32 i8 values).
 #[inline]
 pub fn dot_q8_0_f32(q: &[f32], k_block: &[u8]) -> f32 {
     let d = f16::from_le_bytes([k_block[0], k_block[1]]).to_f32();
+
+    #[cfg(target_arch = "x86_64")]
+    if *mivi_core::simd::HAS_AVX2_FMA && q.len() >= Q8_0_BLOCK_SIZE && k_block.len() >= Q8_0_BYTES {
+        unsafe {
+            return dot_q8_0_f32_avx2(q, k_block, d);
+        }
+    }
+
     let mut sum = 0.0f32;
-    for i in 0..Q8_0_BLOCK_SIZE {
+    for i in 0..Q8_0_BLOCK_SIZE.min(q.len()) {
         let k_val = (k_block[2 + i] as i8) as f32;
         sum += q[i] * k_val;
     }
     sum * d
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q8_0_f32_avx2(q: &[f32], k_block: &[u8], d: f32) -> f32 {
+    let q_ptr = q.as_ptr();
+    let k_ptr = k_block.as_ptr().add(2); // Skip 2 bytes of f16 scale
+
+    // Load 32 i8 elements into two 128-bit registers (16 bytes each)
+    let k_vec_16_0 = _mm_loadu_si128(k_ptr as *const __m128i);
+    let k_vec_16_1 = _mm_loadu_si128(k_ptr.add(16) as *const __m128i);
+
+    // Sign extend i8 -> i32 in chunks of 8
+    let k_i32_0 = _mm256_cvtepi8_epi32(k_vec_16_0);
+    let k_i32_1 = _mm256_cvtepi8_epi32(_mm_srli_si128(k_vec_16_0, 8));
+    let k_i32_2 = _mm256_cvtepi8_epi32(k_vec_16_1);
+    let k_i32_3 = _mm256_cvtepi8_epi32(_mm_srli_si128(k_vec_16_1, 8));
+
+    // Convert i32 -> f32
+    let k_f32_0 = _mm256_cvtepi32_ps(k_i32_0);
+    let k_f32_1 = _mm256_cvtepi32_ps(k_i32_1);
+    let k_f32_2 = _mm256_cvtepi32_ps(k_i32_2);
+    let k_f32_3 = _mm256_cvtepi32_ps(k_i32_3);
+
+    // Load f32 query values
+    let q_0 = _mm256_loadu_ps(q_ptr);
+    let q_1 = _mm256_loadu_ps(q_ptr.add(8));
+    let q_2 = _mm256_loadu_ps(q_ptr.add(16));
+    let q_3 = _mm256_loadu_ps(q_ptr.add(24));
+
+    // Fused multiply-add
+    let mut acc = _mm256_mul_ps(q_0, k_f32_0);
+    acc = _mm256_fmadd_ps(q_1, k_f32_1, acc);
+    acc = _mm256_fmadd_ps(q_2, k_f32_2, acc);
+    acc = _mm256_fmadd_ps(q_3, k_f32_3, acc);
+
+    // Horizontal sum of acc
+    let hi128 = _mm256_extractf128_ps(acc, 1);
+    let lo128 = _mm256_castps256_ps128(acc);
+    let sum128 = _mm_add_ps(lo128, hi128);
+    let shuf = _mm_movehl_ps(sum128, sum128);
+    let sum64 = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_shuffle_ps(sum64, sum64, 1);
+    let sum32 = _mm_add_ss(sum64, shuf2);
+
+    _mm_cvtss_f32(sum32) * d
 }
 
 /// Checked matvec for Q8_0 weights returning QuantError on dimension mismatch.
