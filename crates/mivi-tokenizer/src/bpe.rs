@@ -145,16 +145,71 @@ impl Tokenizer {
             return vec![id];
         }
 
-        let mut out = Vec::new();
-        crate::turbo::IntrusiveBpeMerger::encode_piece_zero_alloc(
-            piece,
-            &self.vocab,
-            &self.merges,
-            &mut out,
-        );
-        if out.is_empty() {
-            out.push(crate::special::UNK_TOKEN_ID);
+        // 2. Convert UTF-8 bytes to GPT-2 unicode symbols
+        let mut symbols: Vec<String> = piece
+            .as_bytes()
+            .iter()
+            .map(|&b| {
+                if let Some(&c) = BYTE_TO_UNICODE.get(&b) {
+                    c.to_string()
+                } else {
+                    (b as char).to_string()
+                }
+            })
+            .collect();
+
+        if symbols.len() <= 1 {
+            if let Some(s) = symbols.first() {
+                if let Some(id) = self.vocab.get_id(s) {
+                    return vec![id];
+                }
+            }
+            return vec![crate::special::UNK_TOKEN_ID];
         }
+
+        // 3. Iterative BPE pair merging using lowest rank in self.merges
+        while symbols.len() >= 2 {
+            let mut best_pair_idx = None;
+            let mut min_rank = u32::MAX;
+
+            for i in 0..symbols.len() - 1 {
+                let pair = (symbols[i].clone(), symbols[i + 1].clone());
+                if let Some(&rank) = self.merges.get(&pair) {
+                    if rank < min_rank {
+                        min_rank = rank;
+                        best_pair_idx = Some(i);
+                    }
+                }
+            }
+
+            let Some(idx) = best_pair_idx else {
+                break;
+            };
+
+            // Merge symbols[idx] and symbols[idx+1]
+            let next_sym = symbols.remove(idx + 1);
+            symbols[idx].push_str(&next_sym);
+        }
+
+        // 4. Map merged symbols to vocabulary IDs
+        let mut out = Vec::with_capacity(symbols.len());
+        for sym in &symbols {
+            if let Some(id) = self.vocab.get_id(sym) {
+                out.push(id);
+            } else {
+                // Fallback to byte tokens
+                for c in sym.chars() {
+                    let b = UNICODE_TO_BYTE.get(&c).copied().unwrap_or(c as u8);
+                    let hex = format!("<0x{:02X}>", b);
+                    out.push(
+                        self.vocab
+                            .get_id(&hex)
+                            .unwrap_or(crate::special::UNK_TOKEN_ID),
+                    );
+                }
+            }
+        }
+
         out
     }
 
