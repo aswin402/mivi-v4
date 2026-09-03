@@ -242,6 +242,13 @@ pub fn create_done_event() -> Event {
     Event::default().data(SSE_DONE_MARKER)
 }
 
+/// Create an SSE keepalive comment event (`: keep-alive\n\n`).
+/// Ignored by client parsers but keeps the TCP connection alive during prefill.
+#[inline]
+pub fn create_keepalive_event() -> Event {
+    Event::default().comment("keep-alive")
+}
+
 /// Helper to send standard sequence: initial chunk -> thinking event -> content chunks -> stop chunk -> done event.
 pub async fn send_sse_sequence<F, Fut>(
     tx: &tokio::sync::mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,

@@ -39,6 +39,9 @@ pub enum Commands {
         /// KV Cache precision mode: f32, q8_0, tq4 (TurboQuant 4-bit), tq2 (TurboQuant 2-bit)
         #[arg(long)]
         kv_precision: Option<String>,
+        /// Maximum context window in tokens (defaults to 16384, max 65536)
+        #[arg(short = 'c', long)]
+        ctx_size: Option<usize>,
     },
     /// Interactive terminal chat with local model
     Chat {

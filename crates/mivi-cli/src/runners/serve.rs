@@ -16,6 +16,7 @@ pub struct ServeArgs {
     pub warn_memory: f32,
     pub no_safelock: bool,
     pub kv_precision: Option<String>,
+    pub ctx_size: Option<usize>,
 }
 
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -31,7 +32,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             anyhow::bail!("Model file does not exist: {:?}", p);
         }
         let precision = crate::commands::parse_kv_precision(args.kv_precision.as_deref());
-        Some(mivi_model::Model::load_with_options(p, None, precision)?)
+        Some(mivi_model::Model::load_with_options(p, args.ctx_size, precision)?)
     } else {
         None
     };

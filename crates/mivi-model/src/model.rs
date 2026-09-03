@@ -96,9 +96,10 @@ impl Model {
             config.n_layers, attn_count, ssm_count, precision
         );
 
-        // Cap working context length to limit memory usage on low-resource systems.
-        const DEFAULT_WORKING_CTX: usize = 4096;
-        let ctx_cap = max_ctx.unwrap_or(DEFAULT_WORKING_CTX);
+        // Working context length configuration (defaults to 16k, capped at 64k max).
+        pub const DEFAULT_WORKING_CTX: usize = 16384;
+        pub const MAX_SUPPORTED_CTX: usize = 65536;
+        let ctx_cap = max_ctx.unwrap_or(DEFAULT_WORKING_CTX).min(MAX_SUPPORTED_CTX);
         let working_seq_len = config.max_seq_len.min(ctx_cap);
 
         let arena_cfg = ArenaConfig {
@@ -420,6 +421,12 @@ impl Model {
         };
 
         let n_prompt = prompt_tokens.len();
+        if start_pos + n_prompt > self.config.max_seq_len {
+            return Err(ModelError::ContextOverflow {
+                pos: start_pos + n_prompt,
+                max: self.config.max_seq_len,
+            });
+        }
 
         // 1. Check hierarchical prefix cache if starting from sequence position 0
         let mut start_prefill_idx = 0;

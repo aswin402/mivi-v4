@@ -158,28 +158,42 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
             {
                 Ok(mut stream_rx) => {
                     let mut assembled = String::new();
-                    while let Some(chunk_res) = stream_rx.recv().await {
-                        match chunk_res {
-                            Ok(word) => {
-                                assembled.push_str(&word);
-                                if tx
-                                    .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
+                    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(2));
+                    keepalive.tick().await;
+
+                    loop {
+                        tokio::select! {
+                            chunk_res = stream_rx.recv() => {
+                                match chunk_res {
+                                    Some(Ok(word)) => {
+                                        assembled.push_str(&word);
+                                        if tx
+                                            .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Some(Err(err_msg)) => {
+                                        tracing::error!("Inference stream error: {}", err_msg);
+                                        let _ = tx
+                                            .send(Ok(create_error_chunk_event(
+                                                &cid,
+                                                &mname,
+                                                &format!("Inference error: {err_msg}"),
+                                            )))
+                                            .await;
+                                        break;
+                                    }
+                                    None => break,
                                 }
                             }
-                            Err(err_msg) => {
-                                tracing::error!("Inference stream error: {}", err_msg);
-                                let _ = tx
-                                    .send(Ok(create_error_chunk_event(
-                                        &cid,
-                                        &mname,
-                                        "Internal inference error occurred.",
-                                    )))
-                                    .await;
-                                break;
+                            _ = keepalive.tick() => {
+                                // Emit SSE comment heartbeat to keep client socket active during CPU prefill
+                                if tx.send(Ok(create_keepalive_event())).await.is_err() {
+                                    break;
+                                }
                             }
                         }
                     }

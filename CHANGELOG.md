@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.25] - 2026-09-03
+
+### 64K Max Context Scaling, Fail-Fast Token-0 Validation & SSE Keep-Alive Heartbeats
+
+#### 💡 Ideas, Inspirations & Sources
+- **64K Context Support & CLI `--ctx-size` Flag (`mivi-model::model`, `mivi-cli::commands`)**:
+  - *Inspiration*: [llama.cpp `-c / --ctx-size` context sizing & Ollama `num_ctx` configuration].
+  - *Problem Fixed*: Mivi had hardcoded `DEFAULT_WORKING_CTX: usize = 4096;` in `model.rs` and had no `--ctx-size` flag in `serve`. When coding agents (Cline, Roo Code, Continue) sent prompts with 14,635 tokens, Mivi crashed with `Context overflow: current pos 4096 >= max_seq_len 4096`.
+  - *Solution*: Elevated default working context to 16,384 tokens, added full support for up to 65,536 (64K) max context with automatic YaRN RoPE frequency scaling, added `--ctx-size` (`-c`) to `mivi serve`, and updated `justfile` serve recipe to default to `--ctx-size 65536`.
+- **Fail-Fast Context Validation at Token 0 (`mivi-model::model`)**:
+  - *Problem Fixed*: When a prompt exceeded context capacity, Mivi computed thousands of tokens sequentially on CPU before erroring out at token 4096 (wasting minutes of 100% CPU).
+  - *Solution*: Added an immediate check `start_pos + n_prompt > self.config.max_seq_len` at token 0, returning an immediate error in 0 milliseconds before running any forward steps.
+- **SSE Keep-Alive Stream Heartbeats (`mivi-server::streaming`, `mivi-server::routes::chat`)**:
+  - *Inspiration*: [vLLM `with_sse_keep_alive` wrapper & standard SSE comment specifications].
+  - *Problem Fixed*: During CPU prefill of large prompts, no bytes were sent across the SSE stream for tens of seconds, causing AI agent HTTP clients (Cline / Roo Code) to drop the connection due to idle socket timeouts and re-send the request 4 times concurrently.
+  - *Solution*: Added a 2-second keep-alive loop emitting `: keep-alive\n\n` comments during prefill. This keeps the client socket active, resets idle timers, and prevents client drops or retry storms.
+
+---
+
 ## [v0.2.24] - 2026-09-03
 
 ### Prefix Snapshot Allocation Bounds & Long Prompt Prefill Visibility

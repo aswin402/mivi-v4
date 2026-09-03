@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
             warn_memory,
             no_safelock,
             kv_precision,
+            ctx_size,
         } => {
             mivi_cli::run_serve(mivi_cli::ServeArgs {
                 port,
@@ -45,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
                 warn_memory,
                 no_safelock,
                 kv_precision,
+                ctx_size,
             })
             .await?;
         }
