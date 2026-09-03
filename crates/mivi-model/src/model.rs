@@ -532,7 +532,10 @@ impl Model {
                 .sampler
                 .sample(&mut self.state.logits_scratch, recent_slice);
 
-            if next_token == eos_token_id {
+            if next_token == eos_token_id
+                || Some(next_token) == im_end_id
+                || Some(next_token) == endoftext_id
+            {
                 break;
             }
 

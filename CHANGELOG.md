@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.22] - 2026-09-03
+
+### Live Request Arrival Logging, Immediate Terminal Feedback & Direct Stop Tokens
+
+#### 💡 Ideas, Inspirations & Sources
+- **Immediate Prompt Arrival & Inference Notification (`mivi-server::logging`, `print_incoming_prompt`)**:
+  - *Inspiration*: [FastAPI / Uvicorn real-time access logging & Hono HTTP lifecycle].
+  - *Problem Fixed*: Previously, HTTP middleware only logged *after* inference completed (`next.run().await`). When an AI agent sent a request with system prompts and tools, CPU spiked to 100% computing prefill and forward passes on CPU, but the terminal showed zero output until the entire generation finished (or timed out).
+  - *Solution*: Added instantaneous arrival logging (`→ POST /v1/chat/completions`) and immediate prompt display (`┌─ user › "hii" | ⏳ prefilling & generating on CPU...`) the millisecond the request reaches the server, followed by clean completion boxes upon finish.
+- **Direct Integer Loop Stop Tokens (`mivi-model::model`)**:
+  - *Problem Fixed*: Model generation loop only checked `next_token == eos_token_id`, relying on subsequent UTF-8 decoding and string suffix matching for `<|im_end|>` and `<|endoftext|>`. This could cause excess token generation cycles before stopping.
+  - *Solution*: Added direct integer checks `next_token == eos_token_id || Some(next_token) == im_end_id || Some(next_token) == endoftext_id` right after sampling for instant zero-overhead loop exit.
+- **Explicit `stdout.flush()` Across All Loggers**:
+  - Ensured all terminal output flushes immediately, eliminating any libc block-buffering in background terminal tasks.
+
+---
+
 ## [v0.2.21] - 2026-09-03
 
 ### Universal AI Agent API Compatibility & Dual-Stack Host Binding

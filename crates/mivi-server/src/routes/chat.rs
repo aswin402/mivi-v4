@@ -51,9 +51,13 @@ pub async fn chat_completions(
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == "user")
+        .find(|m| m.role.eq_ignore_ascii_case("user") || m.role.eq_ignore_ascii_case("developer"))
         .and_then(|m| m.content.as_deref())
-        .map(|s| crate::logging::summarize_prompt(s, 40));
+        .map(|s| crate::logging::summarize_prompt(s, 140));
+
+    if let Some(prompt_text) = &last_user_prompt {
+        crate::logging::print_incoming_prompt(prompt_text, false);
+    }
 
     let model_name = state.model_name.clone();
 
@@ -82,7 +86,6 @@ pub async fn chat_completions(
             model_name,
             engine: state.engine.clone(),
             channel_capacity: state.config.channel_capacity,
-            last_user_prompt: last_user_prompt.clone(),
         };
         let mut resp = handle_chat_streaming(ctx);
         let log_meta = crate::logging::LogMetadata {
@@ -101,7 +104,6 @@ pub async fn chat_completions(
             completion_id,
             model_name,
             engine: &state.engine,
-            last_user_prompt,
         };
         handle_chat_blocking(ctx).await
     }
@@ -116,7 +118,6 @@ struct ChatStreamContext {
     model_name: String,
     engine: EngineHandle,
     channel_capacity: usize,
-    last_user_prompt: Option<String>,
 }
 
 struct ChatBlockingContext<'a> {
@@ -127,7 +128,6 @@ struct ChatBlockingContext<'a> {
     completion_id: String,
     model_name: String,
     engine: &'a EngineHandle,
-    last_user_prompt: Option<String>,
 }
 
 pub const THINKING_INIT_MSG: &str = "Generating completion with Mivi engine...";
@@ -142,7 +142,6 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let max_tokens = ctx.max_tokens;
     let temperature = ctx.temperature;
     let top_p = ctx.top_p;
-    let user_prompt = ctx.last_user_prompt;
 
     tokio::spawn(async move {
         send_sse_sequence(&tx, &cid, &mname, None, || async {
@@ -182,12 +181,10 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                         let clean_reply = mivi_tools::strip_thinking(&assembled);
                         let tool_calls = mivi_tools::extract_tool_calls(&assembled);
                         let tc_names: Vec<String> = tool_calls.into_iter().map(|tc| format!("{}(...)", tc.name)).collect();
-                        crate::logging::print_interaction_box(
-                            user_prompt.as_deref(),
+                        crate::logging::print_completion_response_box(
                             thinking.as_deref(),
                             if tc_names.is_empty() { None } else { Some(&tc_names) },
                             Some(&clean_reply),
-                            false,
                         );
                     }
                 }
@@ -277,23 +274,25 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
 
             let mut resp = Json(response).into_response();
             let reply_preview = mivi_tools::strip_thinking(&output);
-            let mut log_meta = crate::logging::LogMetadata {
-                prompt_summary: ctx.last_user_prompt,
+            let tc_names: Vec<String> = tool_calls_extracted
+                .into_iter()
+                .map(|tc| format!("{}(...)", tc.name))
+                .collect();
+            crate::logging::print_completion_response_box(
+                thinking.as_deref(),
+                if tc_names.is_empty() { None } else { Some(&tc_names) },
+                Some(&reply_preview),
+            );
+            let log_meta = crate::logging::LogMetadata {
+                prompt_summary: None,
                 response_summary: Some(reply_preview),
                 thinking_summary: thinking,
                 tokens_prompt: Some(p_tokens),
                 tokens_completion: Some(c_tokens),
                 finish_reason: Some(finish_reason.to_string()),
+                tool_calls: if tc_names.is_empty() { None } else { Some(tc_names) },
                 ..Default::default()
             };
-            if !tool_calls_extracted.is_empty() {
-                log_meta.tool_calls = Some(
-                    tool_calls_extracted
-                        .into_iter()
-                        .map(|tc| format!("{}(...)", tc.name))
-                        .collect(),
-                );
-            }
             resp.extensions_mut().insert(log_meta);
             resp
         }

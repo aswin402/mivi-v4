@@ -213,6 +213,10 @@ pub async fn anthropic_messages_handler(
             _ => None,
         });
 
+    if let Some(prompt_text) = &last_user_prompt {
+        crate::logging::print_incoming_prompt(prompt_text, false);
+    }
+
     if req.stream {
         // SSE streaming response
         let stream_rx = match state
@@ -407,18 +411,22 @@ pub async fn anthropic_messages_handler(
 
                 let mut resp_obj = Json(resp).into_response();
                 let reply_preview = if clean_text.is_empty() { output_text.clone() } else { clean_text };
-                let mut log_meta = crate::logging::LogMetadata {
-                    prompt_summary: last_user_prompt,
+                let tc_names: Vec<String> = parsed_tools.iter().map(|t| format!("{}(...)", t.name)).collect();
+                crate::logging::print_completion_response_box(
+                    thinking.as_deref(),
+                    if tc_names.is_empty() { None } else { Some(&tc_names) },
+                    Some(&reply_preview),
+                );
+                let log_meta = crate::logging::LogMetadata {
+                    prompt_summary: None,
                     response_summary: Some(reply_preview),
                     thinking_summary: thinking,
                     tokens_prompt: Some(prompt_tokens),
                     tokens_completion: Some(completion_tokens),
                     finish_reason: stop_reason,
+                    tool_calls: if tc_names.is_empty() { None } else { Some(tc_names) },
                     ..Default::default()
                 };
-                if has_tools {
-                    log_meta.tool_calls = Some(parsed_tools.into_iter().map(|t| format!("{}(...)", t.name)).collect());
-                }
                 resp_obj.extensions_mut().insert(log_meta);
                 resp_obj
             }

@@ -38,6 +38,80 @@ pub struct LogMetadata {
     pub finish_reason: Option<String>,
 }
 
+/// Print live incoming prompt notification immediately when HTTP body arrives.
+pub fn print_incoming_prompt(prompt: &str, is_agent: bool) {
+    use std::io::Write;
+    let label = if is_agent { "user (agent)" } else { "user" };
+    println!(
+        "    {}┌─{} {}{}{} › \"{}\"",
+        ansi::DIM,
+        ansi::RESET,
+        ansi::BOLD_CYAN,
+        label,
+        ansi::RESET,
+        summarize_prompt(prompt, 140)
+    );
+    println!(
+        "    {}│  ⏳ prefilling & generating on CPU...{}",
+        ansi::DIM,
+        ansi::RESET
+    );
+    let _ = std::io::stdout().flush();
+}
+
+/// Print completion response items (thinking, tools, final SLM answer) upon inference completion.
+pub fn print_completion_response_box(
+    thinking: Option<&str>,
+    tools: Option<&[String]>,
+    assistant_reply: Option<&str>,
+) {
+    use std::io::Write;
+    if let Some(think) = thinking {
+        if !think.trim().is_empty() {
+            println!(
+                "    {}│  💭 thinking{} › \"{}\"",
+                ansi::DIM,
+                ansi::RESET,
+                summarize_prompt(think, 160)
+            );
+        }
+    }
+    if let Some(tool_list) = tools {
+        for tool in tool_list {
+            println!(
+                "    {}│  🔧 tool call{} › {}{}{}",
+                ansi::DIM,
+                ansi::RESET,
+                ansi::YELLOW,
+                tool,
+                ansi::RESET
+            );
+        }
+    }
+    if let Some(reply) = assistant_reply {
+        if !reply.trim().is_empty() {
+            println!(
+                "    {}└─{} {}{}{} › \"{}\"",
+                ansi::DIM,
+                ansi::RESET,
+                ansi::BOLD_GREEN,
+                "mivi",
+                ansi::RESET,
+                summarize_prompt(reply, 180)
+            );
+        } else if thinking.is_some() {
+            println!(
+                "    {}└─{} {}(thinking complete){}",
+                ansi::DIM,
+                ansi::RESET,
+                ansi::DIM,
+                ansi::RESET
+            );
+        }
+    }
+    let _ = std::io::stdout().flush();
+}
+
 /// Print structured, beautiful multi-line box for user prompt, thinking tokens, and SLM output.
 pub fn print_interaction_box(
     user_prompt: Option<&str>,
@@ -46,6 +120,7 @@ pub fn print_interaction_box(
     assistant_reply: Option<&str>,
     is_agent: bool,
 ) {
+    use std::io::Write;
     if user_prompt.is_none() && assistant_reply.is_none() && thinking.is_none() {
         return;
     }
@@ -110,14 +185,38 @@ pub fn print_interaction_box(
             );
         }
     }
+    let _ = std::io::stdout().flush();
 }
 
 /// Axum middleware for minimal, beautiful Hono-style request/response logging.
 pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
+    use std::io::Write;
     let start = Instant::now();
     let method = req.method().clone();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
+
+    let is_inference_route = path.ends_with("/chat/completions")
+        || path.ends_with("/messages")
+        || path.ends_with("/agent");
+
+    if is_inference_route {
+        let method_str = match method.as_str() {
+            "GET" => format!("{}{}{}", ansi::GREEN, method, ansi::RESET),
+            "POST" => format!("{}{}{}", ansi::BOLD_CYAN, method, ansi::RESET),
+            _ => format!("{}{}{}", ansi::WHITE, method, ansi::RESET),
+        };
+        println!(
+            "  {} {} {:<24} {}{}{}",
+            format!("{}→{}", ansi::BOLD_CYAN, ansi::RESET),
+            method_str,
+            path,
+            ansi::DIM,
+            "[inference started]",
+            ansi::RESET
+        );
+        let _ = std::io::stdout().flush();
+    }
 
     let response = next.run(req).await;
     let elapsed = start.elapsed();
@@ -228,7 +327,7 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
     );
 
     if let Some(meta) = &meta {
-        if !meta.is_streaming {
+        if !meta.is_streaming && meta.prompt_summary.is_some() {
             print_interaction_box(
                 meta.prompt_summary.as_deref(),
                 meta.thinking_summary.as_deref(),
