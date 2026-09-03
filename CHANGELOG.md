@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.24] - 2026-09-03
+
+### Prefix Snapshot Allocation Bounds & Long Prompt Prefill Visibility
+
+#### 💡 Ideas, Inspirations & Sources
+- **PrefixCache Chunk Allocation Bounding (`mivi-model::model`)**:
+  - *Problem Fixed*: When an AI coding agent sent a long prompt (e.g. 7,082 tokens with all workspace tools and files), `model.rs` triggered full state export snapshots every 64 tokens (110 times), cloning gigabytes of memory on the heap despite the cache capacity being capped at 32 chunks (32 MB).
+  - *Solution*: Added a strict pre-condition check `(cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS` preventing wasteful memory allocation during massive prompt processing.
+- **Live Prefill Progress Milestones (`mivi-model::model`)**:
+  - Added periodic prefill percentage progress logging every 500 tokens (`│ ⏳ prefill progress: [1000/7082] (14%)`) to provide clear visual feedback during large prompt processing on CPU.
+
+---
+
 ## [v0.2.23] - 2026-09-03
 
 ### Opt-In Thinking Control & 25x Chat Latency Acceleration

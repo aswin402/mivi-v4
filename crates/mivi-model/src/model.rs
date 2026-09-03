@@ -455,8 +455,24 @@ impl Model {
             let is_last = i + 1 == n_prompt;
             let _ = self.forward_step(tok, cur_pos, is_last)?;
 
+            if n_prompt >= 500 && (i + 1) % 500 == 0 {
+                use std::io::Write;
+                let pct = ((i + 1) * 100) / n_prompt;
+                println!(
+                    "    \x1b[2m│  ⏳ prefill progress: [{}/{}] ({}%)\x1b[0m",
+                    i + 1,
+                    n_prompt,
+                    pct
+                );
+                let _ = std::io::stdout().flush();
+            }
+
             // If we reached a chunk boundary (e.g. 64, 128, 192), record a snapshot into PrefixCache
-            if start_pos == 0 && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0 {
+            // Only snapshot within the prefix cache's maximum chunk capacity to avoid wasteful allocations
+            if start_pos == 0
+                && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0
+                && (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
+            {
                 let chunk_idx = (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE - 1;
                 let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
