@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.23] - 2026-09-03
+
+### Opt-In Thinking Control & 25x Chat Latency Acceleration
+
+#### 💡 Ideas, Inspirations & Sources
+- **Opt-In Thinking Control (`mivi-server::routes::chat`, `ChatCompletionRequest::reasoning_effort`)**:
+  - *Inspiration*: [OpenAI API reasoning_effort specification & standard Instruct SLM prompt formats].
+  - *Problem Fixed*: Previously, `enable_thinking = true` was hardcoded for all `/v1/chat/completions` requests, injecting a default system prompt instructing the model to think inside `<think>...</think>`. For simple greetings like `"hii"`, the model was forced to produce a 200–300 token internal thinking monologue taking 25–40 seconds on CPU. This caused AI agent HTTP clients (with 30s timeouts) to abort and fail with `ReadTimeout`.
+  - *Solution*: Made thinking strictly opt-in based on `req.reasoning_effort`. For standard chat/agent interactions with `LFM2.5-1.2B-Instruct`, the model now responds directly in 1.9 seconds (9 tokens, 4.7 tok/s) without wasting CPU cycles on unnecessary thinking blocks.
+- **Live Prompt Token Sizing in Terminal (`mivi-server::logging`)**:
+  - `print_incoming_prompt` now displays the exact prompt token count (`⏳ prefilling 13 prompt tokens & generating on CPU...`), giving users immediate visibility into request size and progress.
+
+---
+
 ## [v0.2.22] - 2026-09-03
 
 ### Live Request Arrival Logging, Immediate Terminal Feedback & Direct Stop Tokens

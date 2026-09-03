@@ -214,7 +214,8 @@ pub async fn anthropic_messages_handler(
         });
 
     if let Some(prompt_text) = &last_user_prompt {
-        crate::logging::print_incoming_prompt(prompt_text, false);
+        let approx_tokens = (prompt.len() / 4).max(1);
+        crate::logging::print_incoming_prompt(prompt_text, Some(approx_tokens), false);
     }
 
     if req.stream {

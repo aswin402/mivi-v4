@@ -55,10 +55,6 @@ pub async fn chat_completions(
         .and_then(|m| m.content.as_deref())
         .map(|s| crate::logging::summarize_prompt(s, 140));
 
-    if let Some(prompt_text) = &last_user_prompt {
-        crate::logging::print_incoming_prompt(prompt_text, false);
-    }
-
     let model_name = state.model_name.clone();
 
     let chat_messages: Vec<mivi_tokenizer::ChatMessage> =
@@ -74,7 +70,18 @@ pub async fn chat_completions(
                 None
             }
         });
-    let prompt = mivi_tokenizer::format_chatml(&chat_messages, tools_json.as_deref(), true);
+
+    let enable_thinking = req
+        .reasoning_effort
+        .as_deref()
+        .map(|r| r != "none")
+        .unwrap_or(false);
+    let prompt = mivi_tokenizer::format_chatml(&chat_messages, tools_json.as_deref(), enable_thinking);
+
+    if let Some(prompt_text) = &last_user_prompt {
+        let approx_tokens = (prompt.len() / 4).max(1);
+        crate::logging::print_incoming_prompt(prompt_text, Some(approx_tokens), false);
+    }
 
     if is_streaming {
         let ctx = ChatStreamContext {

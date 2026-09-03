@@ -39,7 +39,7 @@ pub struct LogMetadata {
 }
 
 /// Print live incoming prompt notification immediately when HTTP body arrives.
-pub fn print_incoming_prompt(prompt: &str, is_agent: bool) {
+pub fn print_incoming_prompt(prompt: &str, prompt_tokens: Option<usize>, is_agent: bool) {
     use std::io::Write;
     let label = if is_agent { "user (agent)" } else { "user" };
     println!(
@@ -51,9 +51,15 @@ pub fn print_incoming_prompt(prompt: &str, is_agent: bool) {
         ansi::RESET,
         summarize_prompt(prompt, 140)
     );
+    let token_info = if let Some(n) = prompt_tokens {
+        format!("{n} prompt tokens")
+    } else {
+        "prompt".to_string()
+    };
     println!(
-        "    {}│  ⏳ prefilling & generating on CPU...{}",
+        "    {}│  ⏳ prefilling {} & generating on CPU...{}",
         ansi::DIM,
+        token_info,
         ansi::RESET
     );
     let _ = std::io::stdout().flush();
