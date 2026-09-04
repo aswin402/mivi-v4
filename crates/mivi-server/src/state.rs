@@ -3,6 +3,7 @@
 use crate::config::ServerConfig;
 use crate::engine_actor::EngineHandle;
 use mivi_tools::ToolBroker;
+use std::path::PathBuf;
 use std::time::Instant;
 
 pub struct AppState {
@@ -11,6 +12,7 @@ pub struct AppState {
     pub broker: ToolBroker,
     pub engine: EngineHandle,
     pub api_key: Option<String>,
+    pub workspace: PathBuf,
     pub config: ServerConfig,
 }
 
@@ -37,7 +39,13 @@ impl AppState {
             broker,
             engine,
             api_key,
+            workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config,
         }
+    }
+
+    pub fn with_workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
+        self.workspace = workspace.into();
+        self
     }
 }

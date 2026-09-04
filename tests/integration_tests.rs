@@ -6,7 +6,9 @@ use http_body_util::BodyExt;
 use mivi_agent::{AgentLoop, AgentPhase, AgentState};
 use mivi_context::{ContextOp, ContextStore, ContextVm};
 use mivi_router::{IntentClassifier, TaskFamily};
-use mivi_server::{create_router, AppState, ChatCompletionRequest, MessageDto};
+use mivi_server::{
+    create_router, AppState, ChatCompletionRequest, EngineCommand, EngineHandle, MessageDto,
+};
 use mivi_tools::{get_builtin_tool_definitions, register_builtin_tools, ToolBroker, ToolCall};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -171,7 +173,7 @@ async fn test_agent_tool_failure_propagation() {
 #[tokio::test]
 async fn test_http_server_endpoints() {
     let broker = ToolBroker::new();
-    let engine = mivi_server::EngineActor::spawn(None);
+    let engine = mivi_server::EngineActor::spawn_mock();
     let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
     let app = create_router(state);
 
@@ -200,7 +202,7 @@ async fn test_http_server_endpoints() {
 
     // 3. POST /v1/chat/completions (JSON mode)
     let chat_req = ChatCompletionRequest {
-        model: "mivi-v4-test".to_string(),
+        model: Some("mivi-v4-test".to_string()),
         messages: vec![MessageDto {
             role: "user".to_string(),
             content: Some("Hello".to_string()),
@@ -210,10 +212,20 @@ async fn test_http_server_endpoints() {
         }],
         temperature: Some(0.7),
         top_p: Some(0.9),
+        top_k: None,
+        min_p: None,
         max_tokens: Some(64),
         stream: Some(false),
         tools: None,
         tool_choice: None,
+        frequency_penalty: None,
+        repetition_penalty: None,
+        presence_penalty: None,
+        stop: None,
+        response_format: None,
+        seed: None,
+        user: None,
+        reasoning_effort: None,
     };
 
     let req = Request::builder()
@@ -303,7 +315,7 @@ async fn test_http_server_endpoints() {
 #[tokio::test]
 async fn test_http_server_error_responses() {
     let broker = ToolBroker::new();
-    let engine = mivi_server::EngineActor::spawn(None);
+    let engine = mivi_server::EngineActor::spawn_mock();
     let state = Arc::new(AppState::new(
         "mivi-v4-test",
         broker,
@@ -351,6 +363,120 @@ async fn test_http_server_error_responses() {
 }
 
 #[tokio::test]
+async fn test_http_api_key_protects_openai_and_anthropic_streams() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn_mock();
+    let state = Arc::new(AppState::new(
+        "mivi-v4-test",
+        broker,
+        engine,
+        Some("my-secret-key".to_string()),
+    ));
+    let app = create_router(state);
+
+    let openai = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let openai_response = app.clone().oneshot(openai).await.unwrap();
+    assert_eq!(openai_response.status(), StatusCode::UNAUTHORIZED);
+
+    let anthropic = Request::builder()
+        .uri("/v1/messages")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let anthropic_response = app.oneshot(anthropic).await.unwrap();
+    assert_eq!(anthropic_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_http_rejects_invalid_generation_options() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn_mock();
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+
+    for body in [
+        serde_json::json!({
+            "model": "mivi-v4-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": -0.1
+        }),
+        serde_json::json!({
+            "model": "mivi-v4-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stop": [""]
+        }),
+        serde_json::json!({
+            "model": "mivi-v4-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {"type": "json_schema"}
+        }),
+        serde_json::json!({
+            "model": "unknown-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }),
+    ] {
+        let request = Request::builder()
+            .uri("/v1/chat/completions")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn test_json_object_response_mode_returns_valid_json() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn_mock();
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+    let request = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "return json"}],
+                "response_format": {"type": "json_object"}
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("JSON response content");
+    assert!(serde_json::from_str::<serde_json::Value>(content).is_ok());
+}
+
+#[tokio::test]
 async fn test_http_server_with_real_model() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let model_path = manifest_dir.join("models/mivi-tiny-test.gguf");
@@ -368,7 +494,7 @@ async fn test_http_server_with_real_model() {
     let app = create_router(state);
 
     let chat_req = ChatCompletionRequest {
-        model: "mivi-tiny-test".to_string(),
+        model: Some("mivi-tiny-test".to_string()),
         messages: vec![MessageDto {
             role: "user".to_string(),
             content: Some("hello".to_string()),
@@ -378,10 +504,20 @@ async fn test_http_server_with_real_model() {
         }],
         temperature: Some(0.0),
         top_p: Some(1.0),
+        top_k: None,
+        min_p: None,
         max_tokens: Some(4),
         stream: Some(false),
         tools: None,
         tool_choice: None,
+        frequency_penalty: None,
+        repetition_penalty: None,
+        presence_penalty: None,
+        stop: None,
+        response_format: None,
+        seed: None,
+        user: None,
+        reasoning_effort: None,
     };
 
     let req = Request::builder()
@@ -502,7 +638,7 @@ fn test_lfm2_350m_model_load_and_forward() {
 #[tokio::test]
 async fn test_chat_completion_with_custom_sampling_params() {
     let broker = ToolBroker::new();
-    let engine = mivi_server::EngineActor::spawn(None);
+    let engine = mivi_server::EngineActor::spawn_mock();
     let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
     let app = create_router(state);
 
@@ -547,7 +683,7 @@ fn test_special_token_decoding_comprehensive() {
 #[tokio::test]
 async fn test_server_blocking_chat_with_tool_calls_extraction() {
     let broker = ToolBroker::new();
-    let engine = mivi_server::EngineActor::spawn(None);
+    let engine = mivi_server::EngineActor::spawn_mock();
     let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
     let app = create_router(state);
 
@@ -573,6 +709,59 @@ async fn test_server_blocking_chat_with_tool_calls_extraction() {
         .unwrap();
     let json_res: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(json_res["choices"][0]["finish_reason"], "stop");
+}
+
+#[tokio::test]
+async fn test_openai_named_tool_choice_filters_prompt_tools() {
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(2);
+    let engine = EngineHandle::new(command_tx, true);
+    tokio::spawn(async move {
+        if let Some(EngineCommand::Generate {
+            prompt, responder, ..
+        }) = command_rx.recv().await
+        {
+            assert!(prompt.contains("read_file"));
+            assert!(!prompt.contains("list_dir"));
+            let _ = responder.send(Ok((
+                "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}</tool_call>".to_string(),
+                3,
+                4,
+            )));
+        }
+    });
+
+    let state = Arc::new(AppState::new("mivi-v4-test", ToolBroker::new(), engine, None));
+    let app = create_router(state);
+    let request = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "read a file"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+                    {"type": "function", "function": {"name": "list_dir", "parameters": {}}}
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "read_file"}
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(
+        json["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+        "read_file"
+    );
 }
 
 #[test]
@@ -611,6 +800,7 @@ fn test_disk_kvc_persistence_integration() {
     let tokens: Vec<u32> = (1..=128).collect();
     let snapshot = mivi_kv::HybridStateSnapshot::new(
         128,
+        0,
         vec![1.0; 128 * 4],
         vec![2.0; 128 * 4],
         vec![0.5; 32],
@@ -643,7 +833,7 @@ fn test_disk_kvc_persistence_integration() {
 #[test]
 fn test_semantic_anchor_checkpointing_and_rollback() {
     let mut cache = mivi_kv::SemanticAnchorCache::new(16);
-    let mock_snapshot = mivi_kv::HybridStateSnapshot::new(32, vec![0.1; 64], vec![0.2; 64], vec![0.3; 16], vec![]);
+    let mock_snapshot = mivi_kv::HybridStateSnapshot::new(32, 0, vec![0.1; 64], vec![0.2; 64], vec![0.3; 16], vec![]);
 
     let prompt_tokens: Vec<u32> = (1..=32).collect();
     cache.insert_anchor(
@@ -666,7 +856,7 @@ fn test_semantic_anchor_checkpointing_and_rollback() {
 #[tokio::test]
 async fn test_anthropic_messages_endpoint() {
     let broker = ToolBroker::new();
-    let engine = mivi_server::EngineActor::spawn(None);
+    let engine = mivi_server::EngineActor::spawn_mock();
     let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
     let app = create_router(state);
 
@@ -696,6 +886,94 @@ async fn test_anthropic_messages_endpoint() {
     assert!(json["content"].is_array());
 }
 
+#[tokio::test]
+async fn test_anthropic_stream_usage_uses_engine_token_counts() {
+    let broker = ToolBroker::new();
+    let engine = mivi_server::EngineActor::spawn_mock();
+    let state = Arc::new(AppState::new("mivi-v4-test", broker, engine, None));
+    let app = create_router(state);
+    let request = Request::builder()
+        .uri("/v1/messages")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("\"input_tokens\":3"));
+    assert!(body.contains("\"output_tokens\":3"));
+}
+
+#[tokio::test]
+async fn test_anthropic_stream_emits_structured_tool_use_blocks() {
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
+    let engine = EngineHandle::new(command_tx, true);
+    tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                EngineCommand::Encode { responder, .. } => {
+                    let _ = responder.send(vec![1, 2, 3]);
+                }
+                EngineCommand::GenerateStream { responder, .. } => {
+                    let _ = responder
+                        .send(Ok(
+                            "<tool_call>{\"name\":\"read_file\",\"arguments\":{"
+                                .to_string(),
+                        ))
+                        .await;
+                    let _ = responder
+                        .send(Ok("\"path\":\"README.md\"}}</tool_call>".to_string()))
+                        .await;
+                    break;
+                }
+                EngineCommand::Generate { responder, .. } => {
+                    let _ = responder.send(Err("unexpected blocking generation".to_string()));
+                }
+            }
+        }
+    });
+
+    let state = Arc::new(AppState::new("mivi-v4-test", ToolBroker::new(), engine, None));
+    let app = create_router(state);
+    let request = Request::builder()
+        .uri("/v1/messages")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "model": "mivi-v4-test",
+                "messages": [{"role": "user", "content": "read the README"}],
+                "tools": [{
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "input_schema": {"type": "object"}
+                }],
+                "stream": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("\"type\":\"tool_use\""));
+    assert!(body.contains("\"type\":\"input_json_delta\""));
+    assert!(body.contains("\"stop_reason\":\"tool_use\""));
+    assert!(!body.contains("<tool_call>"));
+}
+
 #[test]
 fn test_elastic_memory_pruning_under_pressure() {
     let mut cache = mivi_kv::PrefixCache::new(10, 64);
@@ -703,6 +981,7 @@ fn test_elastic_memory_pruning_under_pressure() {
         let chunk_tokens: Vec<u32> = (i * 64..(i + 1) * 64).collect();
         let snapshot = mivi_kv::HybridStateSnapshot::new(
             64,
+            0,
             vec![1.0; 1000],
             vec![2.0; 1000],
             vec![0.5; 100],

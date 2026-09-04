@@ -2,6 +2,39 @@
 
 use serde::{Deserialize, Serialize};
 
+fn render_tool_calls(tool_calls: Option<&[serde_json::Value]>) -> Option<String> {
+    let tool_calls = tool_calls?;
+    if tool_calls.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::new();
+    for call in tool_calls {
+        let payload = call
+            .get("function")
+            .and_then(|function| {
+                let name = function.get("name")?.as_str()?;
+                let arguments = function.get("arguments")?;
+                let arguments = match arguments {
+                    serde_json::Value::String(raw) => {
+                        serde_json::from_str(raw).unwrap_or_else(|_| arguments.clone())
+                    }
+                    value => value.clone(),
+                };
+                Some(serde_json::json!({"name": name, "arguments": arguments}))
+            })
+            .unwrap_or_else(|| call.clone());
+
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str("<tool_call>");
+        rendered.push_str(&payload.to_string());
+        rendered.push_str("</tool_call>");
+    }
+    Some(rendered)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     #[serde(default)]
@@ -11,6 +44,10 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub min_p: Option<f32>,
     #[serde(default, alias = "max_completion_tokens")]
     pub max_tokens: Option<usize>,
     #[serde(default)]
@@ -21,6 +58,8 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
     #[serde(default)]
     pub presence_penalty: Option<f32>,
     #[serde(default)]
@@ -77,9 +116,15 @@ impl From<&MessageDto> for mivi_tokenizer::ChatMessage {
             tracing::warn!("Unrecognized role '{}', defaulting to User", m.role);
             mivi_tokenizer::Role::User
         });
+        let tool_calls = render_tool_calls(m.tool_calls.as_deref());
+        let content = match (&m.content, tool_calls) {
+            (Some(content), Some(tool_calls)) => Some(format!("{content}\n{tool_calls}")),
+            (None, Some(tool_calls)) => Some(tool_calls),
+            (content, None) => content.clone(),
+        };
         Self {
             role,
-            content: m.content.clone(),
+            content,
             name: m.name.clone(),
         }
     }
@@ -87,12 +132,39 @@ impl From<&MessageDto> for mivi_tokenizer::ChatMessage {
 
 impl From<MessageDto> for mivi_tokenizer::ChatMessage {
     fn from(m: MessageDto) -> Self {
-        let role = m.role.parse().unwrap_or(mivi_tokenizer::Role::User);
-        Self {
-            role,
-            content: m.content,
-            name: m.name,
-        }
+        (&m).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_tool_calls_are_preserved_as_model_markup() {
+        let message = MessageDto {
+            role: "assistant".to_string(),
+            content: None,
+            name: None,
+            thinking: None,
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            })]),
+        };
+
+        let chat_message: mivi_tokenizer::ChatMessage = (&message).into();
+
+        let content = chat_message.content.expect("tool call content");
+        assert!(content.starts_with("<tool_call>") && content.ends_with("</tool_call>"));
+        let payload = &content["<tool_call>".len()..content.len() - "</tool_call>".len()];
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["name"], "read_file");
+        assert_eq!(payload["arguments"]["path"], "README.md");
     }
 }
 
@@ -173,6 +245,8 @@ pub enum AppError {
     InvalidRequest(String),
     #[error("Inference failed: {0}")]
     InferenceError(String),
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
     #[error("Internal server error: {0}")]
     Internal(String),
 }
@@ -196,6 +270,12 @@ impl axum::response::IntoResponse for AppError {
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
                 Some("inference_error"),
+                m,
+            ),
+            AppError::ServiceUnavailable(m) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                Some("service_unavailable"),
                 m,
             ),
             AppError::Internal(m) => (

@@ -155,9 +155,9 @@ Total Peak RAM RSS              ~260 MB              < 300 MB (Full Engine + Mod
 git clone https://github.com/aswin402/mivi-v4.git
 cd mivi-v4
 
-# Build release binary (uses low-memory 3 concurrent jobs)
+# Build release binary (uses low-memory 2 concurrent jobs)
 just build-release
-# Or: cargo build --release --jobs 3
+# Or: cargo build --release --jobs 2
 ```
 
 ### 3. System Diagnostics (`doctor`)
@@ -209,7 +209,10 @@ def is_prime(n):
 
 ```bash
 just serve
-# Or: cargo run --release -- serve --model models/mivi-v4-q4_k_m.gguf --port 8080
+# Or: cargo run --release -- serve --model models/mivi-v4-q4_k_m.gguf --port 8080 --workspace .
+# Public binds (for example --host 0.0.0.0) require MIVI_API_KEY.
+# Optional browser access: repeat --cors-origin for each exact allowed origin.
+# Example: --cors-origin http://localhost:3000
 ```
 
 ```text
@@ -228,6 +231,19 @@ just serve
   │                                                          │
   ╰──────────────────────────────────────────────────────────╯
 ```
+
+Inference endpoints require a loaded GGUF model; otherwise they return `503 Service Unavailable`.
+The default server does not enable cross-origin browser requests. Configure an explicit deployment
+proxy/allowlist if a browser client is required.
+
+OpenAI-compatible requests support validated sampling parameters (`temperature`, `top_p`, `top_k`, `min_p`,
+`repetition_penalty`, presence/frequency penalties, and `seed`), custom stop sequences, `none`/`auto`/
+named tool choice, and non-streaming `response_format: {"type":"json_object"}`. JSON Schema responses,
+JSON streaming, and forced `tool_choice: "required"` are currently rejected explicitly. Anthropic
+`/v1/messages` supports validated sampling, `stop_sequences`, and structured streaming tool-use blocks.
+
+Agent context documents must be relative to the configured `--workspace` and are size-bounded before being
+added to the prompt.
 
 ---
 
@@ -314,7 +330,7 @@ Run the test suite:
 
 ```bash
 just test
-# Or: cargo test --workspace --jobs 3
+# Or: cargo test --workspace --jobs 2
 ```
 
 ```text
@@ -332,7 +348,7 @@ test result: ok. 84 passed; 0 failed; finished in 100% success!
 
 | Command | Description |
 |---|---|
-| `just build` | Compile workspace in debug mode (max 3 jobs) |
+| `just build` | Compile workspace in debug mode (max 2 jobs) |
 | `just build-release` | Compile optimized release binary |
 | `just test` | Run complete 84-test suite |
 | `just clippy` | Run Clippy linter with `-D warnings` |

@@ -1,6 +1,11 @@
 //! Chat completions HTTP endpoint with blocking and SSE streaming modes.
 
 use crate::engine_actor::EngineHandle;
+use crate::generation::{
+    filter_tools_for_choice, parse_response_mode, parse_stop_sequences, parse_tool_choice,
+    validate_additional_sampling_parameters, validate_sampling_parameters, GenerationOptions,
+    ResponseMode, ToolChoice,
+};
 use crate::state::AppState;
 use crate::streaming::*;
 use crate::types::*;
@@ -40,13 +45,72 @@ pub async fn chat_completions(
         ))
         .into_response();
     }
+    if !state.engine.has_model() {
+        return AppError::ServiceUnavailable("No model is loaded".to_string()).into_response();
+    }
+    if !crate::model_matches(req.model.as_deref(), &state.model_name) {
+        return AppError::InvalidRequest(format!(
+            "Unknown model '{}'; loaded model is '{}'",
+            req.model.as_deref().unwrap_or_default(),
+            state.model_name
+        ))
+        .into_response();
+    }
+
+    if let Err(message) = validate_sampling_parameters(
+        req.temperature,
+        req.top_p,
+        req.presence_penalty,
+        req.frequency_penalty,
+    ) {
+        return AppError::InvalidRequest(message).into_response();
+    }
+    if let Err(message) = validate_additional_sampling_parameters(
+        req.top_k,
+        req.min_p,
+        req.repetition_penalty,
+    ) {
+        return AppError::InvalidRequest(message).into_response();
+    }
+    let response_mode = match parse_response_mode(req.response_format.as_ref()) {
+        Ok(mode) => mode,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    let is_streaming = req.stream.unwrap_or(false);
+    if is_streaming && response_mode == ResponseMode::JsonObject {
+        return AppError::InvalidRequest(
+            "json_object response format is not supported for streaming".to_string(),
+        )
+        .into_response();
+    }
+    let tool_choice = match parse_tool_choice(req.tools.as_deref(), req.tool_choice.as_ref()) {
+        Ok(choice) => choice,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    let tools = filter_tools_for_choice(req.tools.clone(), &tool_choice);
+    let tool_calls_enabled = tool_choice.allows_tool_calls(tools.as_deref());
+    let stop_tokens = match parse_stop_sequences(req.stop.as_ref()) {
+        Ok(stops) => stops,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    let options = GenerationOptions {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        top_k: req.top_k,
+        min_p: req.min_p,
+        repetition_penalty: req.repetition_penalty,
+        presence_penalty: req.presence_penalty,
+        frequency_penalty: req.frequency_penalty,
+        seed: req.seed,
+        stop_tokens,
+        response_mode,
+    };
 
     let max_tokens = req
         .max_tokens
         .unwrap_or(state.config.default_max_tokens)
         .min(state.config.max_allowed_tokens);
     let completion_id = format!("{}{}", mivi_core::CHATCMPL_ID_PREFIX, uuid::Uuid::new_v4());
-    let is_streaming = req.stream.unwrap_or(false);
     let last_user_prompt = req
         .messages
         .iter()
@@ -60,8 +124,7 @@ pub async fn chat_completions(
     let chat_messages: Vec<mivi_tokenizer::ChatMessage> =
         req.messages.iter().map(Into::into).collect();
 
-    let tools_json = req
-        .tools
+    let tools_json = tools
         .as_ref()
         .and_then(|t| match serde_json::to_string(t) {
             Ok(json) => Some(json),
@@ -87,8 +150,9 @@ pub async fn chat_completions(
         let ctx = ChatStreamContext {
             prompt,
             max_tokens,
-            temperature: req.temperature,
-            top_p: req.top_p,
+            options,
+            tool_choice,
+            tool_calls_enabled,
             completion_id,
             model_name,
             engine: state.engine.clone(),
@@ -106,8 +170,9 @@ pub async fn chat_completions(
         let ctx = ChatBlockingContext {
             prompt: &prompt,
             max_tokens,
-            temperature: req.temperature,
-            top_p: req.top_p,
+            options,
+            tool_choice,
+            tool_calls_enabled,
             completion_id,
             model_name,
             engine: &state.engine,
@@ -119,8 +184,9 @@ pub async fn chat_completions(
 struct ChatStreamContext {
     prompt: String,
     max_tokens: usize,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
+    options: GenerationOptions,
+    tool_choice: ToolChoice,
+    tool_calls_enabled: bool,
     completion_id: String,
     model_name: String,
     engine: EngineHandle,
@@ -130,8 +196,9 @@ struct ChatStreamContext {
 struct ChatBlockingContext<'a> {
     prompt: &'a str,
     max_tokens: usize,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
+    options: GenerationOptions,
+    tool_choice: ToolChoice,
+    tool_calls_enabled: bool,
     completion_id: String,
     model_name: String,
     engine: &'a EngineHandle,
@@ -147,13 +214,14 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let engine = ctx.engine;
     let prompt = ctx.prompt;
     let max_tokens = ctx.max_tokens;
-    let temperature = ctx.temperature;
-    let top_p = ctx.top_p;
+    let options = ctx.options;
+    let tool_choice = ctx.tool_choice;
+    let tool_calls_enabled = ctx.tool_calls_enabled;
 
     tokio::spawn(async move {
-        send_sse_sequence(&tx, &cid, &mname, None, || async {
+        send_sse_sequence_with_finish(&tx, &cid, &mname, None, || async {
             match engine
-                .generate_stream_with_params(&prompt, max_tokens, temperature, top_p)
+                .generate_stream_with_options(&prompt, max_tokens, options)
                 .await
             {
                 Ok(mut stream_rx) => {
@@ -167,12 +235,14 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 match chunk_res {
                                     Some(Ok(word)) => {
                                         assembled.push_str(&word);
-                                        if tx
-                                            .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
+                                        if !tool_calls_enabled {
+                                            if tx
+                                                .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
                                         }
                                     }
                                     Some(Err(err_msg)) => {
@@ -200,13 +270,33 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                     if !assembled.is_empty() {
                         let thinking = mivi_tools::extract_thinking(&assembled);
                         let clean_reply = mivi_tools::strip_thinking(&assembled);
-                        let tool_calls = mivi_tools::extract_tool_calls(&assembled);
+                        let tool_calls = extract_tool_calls_for_choice(&assembled, &tool_choice);
                         let tc_names: Vec<String> = tool_calls.into_iter().map(|tc| format!("{}(...)", tc.name)).collect();
+                        if tool_calls_enabled {
+                            if !tc_names.is_empty() {
+                                let values = tool_call_values(&assembled, &tool_choice);
+                                let _ = tx
+                                    .send(Ok(create_tool_calls_chunk_event(&cid, &mname, &values)))
+                                    .await;
+                            } else {
+                                let clean_reply = mivi_tools::strip_tool_calls(&clean_reply);
+                                if !clean_reply.is_empty() {
+                                    let _ = tx
+                                        .send(Ok(create_content_chunk_event(&cid, &mname, &clean_reply)))
+                                        .await;
+                                }
+                            }
+                        }
                         crate::logging::print_completion_response_box(
                             thinking.as_deref(),
                             if tc_names.is_empty() { None } else { Some(&tc_names) },
                             Some(&clean_reply),
                         );
+                        return if tool_calls_enabled && !tc_names.is_empty() {
+                            "tool_calls"
+                        } else {
+                            "stop"
+                        };
                     }
                 }
                 Err(e) => {
@@ -218,8 +308,10 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                             "Failed to initialize streaming.",
                         )))
                         .await;
+                    return "error";
                 }
             }
+            "stop"
         })
         .await;
     });
@@ -230,12 +322,12 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
 async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
     match ctx
         .engine
-        .generate_with_params(ctx.prompt, ctx.max_tokens, ctx.temperature, ctx.top_p)
+        .generate_with_options(ctx.prompt, ctx.max_tokens, ctx.options.clone())
         .await
     {
         Ok((output, p_tokens, c_tokens)) => {
             let thinking = mivi_tools::extract_thinking(&output);
-            let tool_calls_extracted = mivi_tools::extract_tool_calls(&output);
+            let tool_calls_extracted = extract_tool_calls_for_choice(&output, &ctx.tool_choice);
 
             let (tool_calls, finish_reason) = if !tool_calls_extracted.is_empty() {
                 let tc_vals: Vec<serde_json::Value> = tool_calls_extracted
@@ -259,7 +351,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                 (None, "stop")
             };
 
-            let content = if tool_calls.is_some() {
+            let content = if tool_calls.is_some() || !ctx.tool_calls_enabled {
                 let cleaned = mivi_tools::strip_tool_calls(&output);
                 if cleaned.is_empty() {
                     None
@@ -319,4 +411,41 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
         }
         Err(e) => AppError::InferenceError(e).into_response(),
     }
+}
+
+fn extract_tool_calls_for_choice(
+    output: &str,
+    choice: &ToolChoice,
+) -> Vec<mivi_tools::ToolCall> {
+    if matches!(choice, ToolChoice::Disabled) {
+        return Vec::new();
+    }
+    mivi_tools::extract_tool_calls(output)
+        .into_iter()
+        .filter(|call| match choice {
+            ToolChoice::Named(name) => {
+                call.name == name.as_str() || call.name == mivi_tools::PARSE_ERROR_TOOL_NAME
+            }
+            ToolChoice::Auto => true,
+            ToolChoice::Disabled => false,
+        })
+        .collect()
+}
+
+fn tool_call_values(output: &str, choice: &ToolChoice) -> Vec<serde_json::Value> {
+    extract_tool_calls_for_choice(output, choice)
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| {
+            serde_json::json!({
+                "index": index,
+                "id": format!("call_{}", uuid::Uuid::new_v4().simple()),
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": call.arguments.to_string(),
+                }
+            })
+        })
+        .collect()
 }

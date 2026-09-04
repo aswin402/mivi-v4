@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Explicit browser origins allowed to access the HTTP API. Empty means disabled.
+    pub cors_allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
     pub max_messages: usize,
     pub max_allowed_tokens: usize,
@@ -24,6 +26,7 @@ pub const DEFAULT_MAX_PORT_ATTEMPTS: u16 = 20;
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            cors_allowed_origins: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_messages: DEFAULT_MAX_MESSAGES,
             max_allowed_tokens: DEFAULT_MAX_ALLOWED_TOKENS,

@@ -179,6 +179,31 @@ pub fn create_content_chunk_event(id: &str, model: &str, content: &str) -> Event
     Event::default().data(data)
 }
 
+/// Create an SSE event containing structured OpenAI tool-call deltas.
+pub fn create_tool_calls_chunk_event(
+    id: &str,
+    model: &str,
+    tool_calls: &[serde_json::Value],
+) -> Event {
+    let chunk = ChatCompletionChunk {
+        id: id.to_string(),
+        object: OPENAI_CHUNK_OBJECT.to_string(),
+        created: chrono::Utc::now().timestamp() as u64,
+        model: model.to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                role: None,
+                content: None,
+                thinking: None,
+                tool_calls: Some(tool_calls.to_vec()),
+            },
+            finish_reason: None,
+        }],
+    };
+    Event::default().data(serde_json::to_string(&chunk).unwrap_or_else(|_| "{}".to_string()))
+}
+
 /// Create an SSE Event containing a thinking delta chunk.
 #[inline]
 pub fn create_thinking_chunk_event(id: &str, model: &str, thinking: &str) -> Event {
@@ -277,6 +302,40 @@ pub async fn send_sse_sequence<F, Fut>(
     body().await;
     if tx
         .send(Ok(create_done_chunk_event(id, model, FINISH_REASON_STOP)))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = tx.send(Ok(create_done_event())).await;
+}
+
+/// Same as `send_sse_sequence`, but lets the body report the actual finish reason.
+pub async fn send_sse_sequence_with_finish<F, Fut>(
+    tx: &tokio::sync::mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
+    id: &str,
+    model: &str,
+    thinking_msg: Option<&str>,
+    body: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = &'static str>,
+{
+    if tx.send(Ok(create_initial_chunk_event(id, model))).await.is_err() {
+        return;
+    }
+    if let Some(msg) = thinking_msg {
+        if tx
+            .send(Ok(create_thinking_chunk_event(id, model, msg)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let finish_reason = body().await;
+    if tx
+        .send(Ok(create_done_chunk_event(id, model, finish_reason)))
         .await
         .is_err()
     {

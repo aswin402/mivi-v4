@@ -24,3 +24,6 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 subtle.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

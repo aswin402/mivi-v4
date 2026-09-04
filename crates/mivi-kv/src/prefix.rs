@@ -98,6 +98,14 @@ pub struct PrefixChunk {
     pub state: HybridStateSnapshot,
 }
 
+impl PrefixChunk {
+    fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.tokens.capacity() * std::mem::size_of::<u32>()
+            + self.state.memory_bytes()
+    }
+}
+
 /// In-memory LRU prefix cache manager for hybrid SLM states.
 #[derive(Debug)]
 pub struct PrefixCache {
@@ -216,22 +224,22 @@ impl PrefixCache {
                 if let Some(evicted_chunk) = self.chunks.remove(&oldest_hash) {
                     self.total_memory_bytes = self
                         .total_memory_bytes
-                        .saturating_sub(evicted_chunk.state.memory_bytes());
+                        .saturating_sub(evicted_chunk.memory_bytes());
                 }
             }
         }
 
-        let chunk_mem = state.memory_bytes();
         let chunk = PrefixChunk {
             chunk_index,
             hash,
             tokens: tokens.to_vec(),
             state,
         };
+        let chunk_mem = chunk.memory_bytes();
 
         self.chunks.insert(hash, chunk);
         self.lru_order.push_back(hash);
-        self.total_memory_bytes += chunk_mem;
+        self.total_memory_bytes = self.total_memory_bytes.saturating_add(chunk_mem);
         self.prune_to_bytes(self.max_memory_bytes);
         hash
     }
@@ -251,7 +259,7 @@ impl PrefixCache {
                 if let Some(removed) = self.chunks.remove(&oldest_hash) {
                     self.total_memory_bytes = self
                         .total_memory_bytes
-                        .saturating_sub(removed.state.memory_bytes());
+                        .saturating_sub(removed.memory_bytes());
                     evicted += 1;
                 }
             }
@@ -269,6 +277,8 @@ impl PrefixCache {
     /// Search cached chunks for a suffix match at `start_pos`.
     ///
     /// Returns `None` if no cached state matches the suffix.
+    /// This identifies matching token bytes only; callers must separately verify
+    /// that restoring the snapshot is valid for the complete preceding context.
     /// Returns `Some((suffix_len, match_pos, chunk))` where:
     ///   - `suffix_len`: number of tokens to skip (matched suffix length)
     ///   - `match_pos`: absolute position where the cached KV was originally computed
@@ -306,11 +316,27 @@ impl PrefixCache {
             let suffix_tokens = &tokens[suffix_start..n];
             let suffix_hash = compute_chunk_hash(0, suffix_tokens);
 
-            if let Some(chunk) = self.chunks.get(&suffix_hash) {
-                let state_pos = chunk.state.pos;
-                let matched = chunk.clone();
-                self.touch(&suffix_hash);
-                return Some((suffix_len, state_pos, matched));
+            let match_hash = self
+                .chunks
+                .iter()
+                .find(|(_, chunk)| {
+                    if chunk.tokens.len() != suffix_len {
+                        return false;
+                    }
+                    let standalone_hash = chunk.state.standalone_hash;
+                    standalone_hash == suffix_hash
+                        || (standalone_hash == 0
+                            && compute_chunk_hash(0, &chunk.tokens) == suffix_hash)
+                })
+                .map(|(hash, _)| *hash);
+
+            if let Some(match_hash) = match_hash {
+                if let Some(chunk) = self.chunks.get(&match_hash) {
+                    let state_pos = chunk.state.pos;
+                    let matched = chunk.clone();
+                    self.touch(&match_hash);
+                    return Some((suffix_len, state_pos, matched));
+                }
             }
         }
 
@@ -464,6 +490,53 @@ mod tests {
         assert!(result.is_some());
         let (_, _, matched) = result.unwrap();
         assert_eq!(matched.hash, hash2);
+    }
+
+    #[test]
+    fn test_suffix_match_finds_chunk_stored_under_chained_hash() {
+        let mut cache = PrefixCache::new(5, 64);
+        let chunk0: Vec<u32> = (0..64).collect();
+        let chunk1: Vec<u32> = (1000..1064).collect();
+        let state0 = HybridStateSnapshot::new(
+            64,
+            compute_chunk_hash(0, &chunk0),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let state1 = HybridStateSnapshot::new(
+            128,
+            compute_chunk_hash(0, &chunk1),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let h0 = cache.insert_chunk(0, &chunk0, 0, state0);
+        let h1 = cache.insert_chunk(h0, &chunk1, 1, state1);
+        assert_ne!(h1, compute_chunk_hash(0, &chunk1));
+
+        let history: Vec<u32> = (500..564).collect();
+        let step2: Vec<u32> = history.iter().chain(chunk1.iter()).cloned().collect();
+
+        let result = cache.find_longest_suffix_match(64, &step2);
+        assert!(result.is_some());
+        let (_, _, matched) = result.unwrap();
+        assert_eq!(matched.hash, h1);
+    }
+
+    #[test]
+    fn test_memory_usage_includes_cached_tokens() {
+        let mut cache = PrefixCache::new(2, 64);
+        let tokens: Vec<u32> = (0..64).collect();
+        let state = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
+        let state_bytes = state.memory_bytes();
+        let token_bytes = tokens.capacity() * std::mem::size_of::<u32>();
+
+        cache.insert_chunk(0, &tokens, 0, state);
+
+        assert!(cache.memory_usage_bytes() >= state_bytes + token_bytes);
     }
 
 }

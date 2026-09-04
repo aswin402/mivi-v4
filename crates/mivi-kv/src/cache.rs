@@ -804,9 +804,23 @@ impl KvCache {
     ) -> Result<()> {
         let n_alloc = self.n_allocated_layers();
 
+        if target_pos > self.max_seq_len || pos > self.max_seq_len - target_pos {
+            return Err(KvError::ContextOverflow {
+                pos: target_pos.saturating_add(pos),
+                max: self.max_seq_len,
+            });
+        }
+
         match self.precision {
             KvPrecision::F32 => {
-                let expected_elements = n_alloc * pos * self.kv_dim;
+                let expected_elements = n_alloc
+                    .checked_mul(pos)
+                    .and_then(|elements| elements.checked_mul(self.kv_dim))
+                    .ok_or(KvError::AllocationOverflow {
+                        n_layers: n_alloc,
+                        max_seq_len: pos,
+                        kv_dim: self.kv_dim,
+                    })?;
                 if k_data.len() != expected_elements || v_data.len() != expected_elements {
                     return Err(KvError::DimMismatch {
                         expected: expected_elements,
@@ -828,7 +842,14 @@ impl KvCache {
             KvPrecision::Q8_0 | KvPrecision::TurboQuant4 | KvPrecision::TurboQuant2 => {
                 let bpt = self.bytes_per_token();
                 let f32_per_token = (bpt + 3) / 4;
-                let expected_elements = n_alloc * pos * f32_per_token;
+                let expected_elements = n_alloc
+                    .checked_mul(pos)
+                    .and_then(|elements| elements.checked_mul(f32_per_token))
+                    .ok_or(KvError::AllocationOverflow {
+                        n_layers: n_alloc,
+                        max_seq_len: pos,
+                        kv_dim: bpt,
+                    })?;
 
                 if k_data.len() != expected_elements || v_data.len() != expected_elements {
                     return Err(KvError::DimMismatch {
@@ -880,6 +901,17 @@ mod tests {
             err,
             Err(KvError::ContextOverflow { pos: 2, max: 2 })
         ));
+    }
+
+    #[test]
+    fn test_import_state_at_rejects_destination_overflow() {
+        let mut kv = KvCache::new(1, 4, 2);
+        let k = vec![1.0; 2 * 2];
+        let v = vec![2.0; 2 * 2];
+
+        let result = kv.import_state_at(3, 2, &k, &v);
+
+        assert!(matches!(result, Err(KvError::ContextOverflow { .. })));
     }
 
     #[test]

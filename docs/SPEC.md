@@ -395,9 +395,10 @@ Transitions:
 
 ```rust
 pub struct ServerConfig {
-    pub host: String,           // default: "0.0.0.0"
+    pub host: String,           // default: "127.0.0.1"; public binds require MIVI_API_KEY
     pub port: u16,              // default: 8080
-    pub model_path: PathBuf,    // required
+    pub cors_allowed_origins: Vec<String>, // default: empty; exact browser origins only
+    pub model_path: Option<PathBuf>, // optional; inference is unavailable until a model is loaded
     pub lora_paths: Vec<PathBuf>, // optional
     pub max_context: usize,     // default: 2048
     pub n_threads: usize,       // default: num_cpus
@@ -425,13 +426,15 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub tools: Option<Vec<Tool>>,
     #[serde(default = "default_auto")]
-    pub tool_choice: ToolChoice,  // "auto" | "none" | {"name": "..."}
+    pub tool_choice: ToolChoice,  // "auto" | "none" | {"type":"function","function":{"name":"..."}}
     #[serde(default = "default_temp")]
     pub temperature: f32,         // 0.0 - 2.0, default 0.7
     #[serde(default)]
     pub top_p: Option<f32>,       // 0.0 - 1.0
     #[serde(default)]
     pub top_k: Option<usize>,     // 1 - vocab_size
+    #[serde(default)]
+    pub min_p: Option<f32>,       // 0.0 - 1.0 (Mivi extension)
     #[serde(default)]
     pub max_tokens: Option<usize>,// max generation length
     #[serde(default)]
@@ -442,6 +445,14 @@ pub struct ChatCompletionRequest {
     pub stop: Option<Vec<String>>,// custom stop sequences
     #[serde(default)]
     pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +476,10 @@ pub struct FunctionDef {
     pub parameters: serde_json::Value, // JSON Schema
 }
 ```
+
+The server currently accepts `tool_choice` values `auto`, `none`, and a named function. It rejects
+`tool_choice: "required"`, JSON Schema response formats, and JSON streaming with an explicit invalid
+request error. `response_format: {"type":"json_object"}` is supported for non-streaming requests.
 
 ### 6.4 Streaming Response Chunks
 

@@ -1,3 +1,6 @@
+use crate::generation::{
+    validate_sampling_parameters, validate_stop_sequences, GenerationOptions, ResponseMode,
+};
 use crate::state::AppState;
 use axum::{
     extract::State,
@@ -38,6 +41,8 @@ pub struct AnthropicRequest {
     pub max_tokens: Option<usize>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     pub stream: bool,
     pub tools: Option<Vec<AnthropicTool>>,
@@ -170,6 +175,14 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
 }
 
 /// POST /v1/messages route handler.
+pub const DEFAULT_ANTHROPIC_MAX_TOKENS: usize = 2048;
+
+fn bounded_max_tokens(requested: Option<usize>, max_allowed: usize) -> usize {
+    requested
+        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+        .min(max_allowed)
+}
+
 pub async fn anthropic_messages_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AnthropicRequest>,
@@ -184,16 +197,43 @@ pub async fn anthropic_messages_handler(
         )
             .into_response();
     }
+    if !state.engine.has_model() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "type": "error",
+                "error": { "type": "api_error", "message": "No model is loaded" }
+            })),
+        )
+            .into_response();
+    }
+    if !crate::model_matches(Some(req.model.as_str()), &state.model_name) {
+        return anthropic_invalid_request(format!(
+            "Unknown model '{}'; loaded model is '{}'",
+            req.model, state.model_name
+        ));
+    }
+
+    if let Err(message) = validate_sampling_parameters(req.temperature, req.top_p, None, None) {
+        return anthropic_invalid_request(message);
+    }
+    if let Some(stop_sequences) = req.stop_sequences.as_deref() {
+        if let Err(message) = validate_stop_sequences(stop_sequences) {
+            return anthropic_invalid_request(message);
+        }
+    }
 
     let prompt = convert_anthropic_to_chatml(&req);
-    let max_tokens = req.max_tokens.unwrap_or(2048);
-    let temperature = req.temperature;
-    let top_p = req.top_p;
-    let model_name = if req.model.is_empty() {
-        state.model_name.clone()
-    } else {
-        req.model.clone()
+    let max_tokens = bounded_max_tokens(req.max_tokens, state.config.max_allowed_tokens);
+    let options = GenerationOptions {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stop_tokens: req.stop_sequences.clone(),
+        response_mode: ResponseMode::Text,
+        ..GenerationOptions::default()
     };
+    let tools_enabled = req.tools.as_ref().is_some_and(|tools| !tools.is_empty());
+    let model_name = state.model_name.clone();
     let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
     let last_user_prompt = req
@@ -222,7 +262,7 @@ pub async fn anthropic_messages_handler(
         // SSE streaming response
         let stream_rx = match state
             .engine
-            .generate_stream_with_params(&prompt, max_tokens, temperature, top_p)
+            .generate_stream_with_options(&prompt, max_tokens, options.clone())
             .await
         {
             Ok(rx) => rx,
@@ -240,7 +280,7 @@ pub async fn anthropic_messages_handler(
 
         let mid = message_id.clone();
         let mname = model_name.clone();
-        let input_tokens = (prompt.len() / 4).max(1);
+        let input_tokens = state.engine.encode(&prompt).await.len().max(1);
 
         // 1. message_start and content_block_start
         let msg_start_event = Event::default().event("message_start").data(
@@ -269,65 +309,139 @@ pub async fn anthropic_messages_handler(
         );
 
         // 2. content_block_delta stream with dynamic token counting
-        let token_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tc_clone = token_counter.clone();
         let assembled_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let text_accum = assembled_text.clone();
 
-        let stream = ReceiverStream::new(stream_rx).map(move |chunk_res| {
-            let chunk = chunk_res.unwrap_or_default();
-            tc_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stream = ReceiverStream::new(stream_rx).filter_map(move |chunk_res| {
+            let chunk = match chunk_res {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let data = serde_json::json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": error }
+                    })
+                    .to_string();
+                    return futures::future::ready(Some(Ok::<Event, Infallible>(
+                        Event::default().event("error").data(data),
+                    )));
+                }
+            };
             if let Ok(mut guard) = text_accum.lock() {
                 guard.push_str(&chunk);
             }
-            let data = serde_json::json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {
-                    "type": "text_delta",
-                    "text": chunk
-                }
+            futures::future::ready(if tools_enabled {
+                None
+            } else {
+                let data = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": chunk
+                    }
+                })
+                .to_string();
+                Some(Ok::<Event, Infallible>(
+                    Event::default().event("content_block_delta").data(data),
+                ))
             })
-            .to_string();
-            Ok::<Event, Infallible>(Event::default().event("content_block_delta").data(data))
         });
 
-        // 3. content_block_stop, message_delta, and message_stop
-        let tc_final = token_counter.clone();
+        // 3. Close the text block, optionally emit structured tool-use blocks, and finish.
+        let token_engine = state.engine.clone();
         let prompt_log_clone = last_user_prompt.clone();
         let text_final = assembled_text.clone();
-        let block_stop_event = Event::default().event("content_block_stop").data(
-            serde_json::json!({
-                "type": "content_block_stop",
-                "index": 0
-            })
-            .to_string(),
-        );
+        let post_generation_stream = futures::stream::once(async move {
+            let output = text_final
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            let out_tokens = token_engine.encode(&output).await.len().max(1);
+            let thinking = mivi_tools::extract_thinking(&output);
+            let clean = if tools_enabled {
+                mivi_tools::strip_tool_calls(&mivi_tools::strip_thinking(&output))
+            } else {
+                mivi_tools::strip_thinking(&output)
+            };
+            let parsed_tools = if tools_enabled {
+                mivi_tools::extract_tool_calls(&output)
+            } else {
+                Vec::new()
+            };
+            let has_tools = !parsed_tools.is_empty();
+            let mut events = Vec::new();
 
-        let msg_delta_stream = futures::stream::once(async move {
-            let out_tokens = tc_final.load(std::sync::atomic::Ordering::Relaxed).max(1);
-            if let Ok(guard) = text_final.lock() {
-                if !guard.is_empty() {
-                    let thinking = mivi_tools::extract_thinking(&guard);
-                    let clean = mivi_tools::strip_thinking(&guard);
-                    crate::logging::print_interaction_box(
-                        prompt_log_clone.as_deref(),
-                        thinking.as_deref(),
-                        None,
-                        Some(&clean),
-                        false,
-                    );
+            if tools_enabled && !clean.is_empty() {
+                let data = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": clean }
+                })
+                .to_string();
+                events.push(Ok::<Event, Infallible>(
+                    Event::default().event("content_block_delta").data(data),
+                ));
+            }
+            events.push(Ok(Event::default().event("content_block_stop").data(
+                serde_json::json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+            )));
+
+            if tools_enabled {
+                for (index, tool) in parsed_tools.iter().enumerate() {
+                    let tool_index = index + 1;
+                    let tool_id = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+                    events.push(Ok(Event::default().event("content_block_start").data(
+                        serde_json::json!({
+                            "type": "content_block_start",
+                            "index": tool_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": tool.name,
+                                "input": {}
+                            }
+                        })
+                        .to_string(),
+                    )));
+                    events.push(Ok(Event::default().event("content_block_delta").data(
+                        serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": tool_index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": tool.arguments.to_string()
+                            }
+                        })
+                        .to_string(),
+                    )));
+                    events.push(Ok(Event::default().event("content_block_stop").data(
+                        serde_json::json!({ "type": "content_block_stop", "index": tool_index })
+                            .to_string(),
+                    )));
                 }
             }
-            let msg_delta_event = Event::default().event("message_delta").data(
+
+            if !output.is_empty() {
+                crate::logging::print_interaction_box(
+                    prompt_log_clone.as_deref(),
+                    thinking.as_deref(),
+                    None,
+                    Some(&clean),
+                    false,
+                );
+            }
+            events.push(Ok(Event::default().event("message_delta").data(
                 serde_json::json!({
                     "type": "message_delta",
-                    "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                    "delta": {
+                        "stop_reason": if has_tools { "tool_use" } else { "end_turn" },
+                        "stop_sequence": null
+                    },
                     "usage": { "output_tokens": out_tokens }
                 })
                 .to_string(),
-            );
-            Ok::<Event, Infallible>(msg_delta_event)
+            )));
+            events
         });
 
         let msg_stop_event = Event::default().event("message_stop").data(
@@ -342,10 +456,7 @@ pub async fn anthropic_messages_handler(
             Ok(block_start_event),
         ])
         .chain(stream)
-        .chain(futures::stream::iter(vec![
-            Ok(block_stop_event),
-        ]))
-        .chain(msg_delta_stream)
+        .chain(post_generation_stream.flat_map(futures::stream::iter))
         .chain(futures::stream::iter(vec![
             Ok(msg_stop_event),
         ]));
@@ -364,13 +475,21 @@ pub async fn anthropic_messages_handler(
         // Non-streaming JSON response
         match state
             .engine
-            .generate_with_params(&prompt, max_tokens, temperature, top_p)
+            .generate_with_options(&prompt, max_tokens, options)
             .await
         {
             Ok((output_text, prompt_tokens, completion_tokens)) => {
-                let parsed_tools = mivi_tools::extract_tool_calls(&output_text);
+                let parsed_tools = if tools_enabled {
+                    mivi_tools::extract_tool_calls(&output_text)
+                } else {
+                    Vec::new()
+                };
                 let has_tools = !parsed_tools.is_empty();
-                let clean_text = mivi_tools::strip_tool_calls(&output_text);
+                let clean_text = if tools_enabled {
+                    mivi_tools::strip_tool_calls(&output_text)
+                } else {
+                    output_text.clone()
+                };
                 let thinking = mivi_tools::extract_thinking(&output_text);
                 let content_blocks = if has_tools {
                     let mut blocks = Vec::new();
@@ -443,9 +562,27 @@ pub async fn anthropic_messages_handler(
     }
 }
 
+fn anthropic_invalid_request(message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "type": "error",
+            "error": { "type": "invalid_request_error", "message": message }
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_max_tokens_is_capped_by_server_limit() {
+        assert_eq!(bounded_max_tokens(Some(100), 32), 32);
+        assert_eq!(bounded_max_tokens(None, 32), 32);
+        assert_eq!(bounded_max_tokens(Some(16), 32), 16);
+    }
 
     #[test]
     fn test_convert_anthropic_to_chatml() {
@@ -459,6 +596,7 @@ mod tests {
             max_tokens: Some(128),
             temperature: Some(0.7),
             top_p: None,
+            stop_sequences: None,
             stream: false,
             tools: None,
         };

@@ -11,6 +11,8 @@ use tokio::sync::watch;
 pub struct ServeArgs {
     pub port: u16,
     pub host: String,
+    pub workspace: PathBuf,
+    pub cors_origins: Vec<String>,
     pub model: Option<PathBuf>,
     pub max_memory: f32,
     pub warn_memory: f32,
@@ -19,12 +21,40 @@ pub struct ServeArgs {
     pub ctx_size: Option<usize>,
 }
 
+fn validate_bind_security(ip: std::net::IpAddr, api_key: Option<&str>) -> Result<()> {
+    if !ip.is_loopback() && api_key.is_none_or(|key| key.trim().is_empty()) {
+        anyhow::bail!(
+            "Refusing to bind to non-loopback address {} without MIVI_API_KEY; set the environment variable or use --host 127.0.0.1",
+            ip
+        );
+    }
+    Ok(())
+}
+
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
     let start_time = Instant::now();
-    let model_name = mivi_core::DEFAULT_MODEL_ID.to_string();
+    let ip: std::net::IpAddr = args
+        .host
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid host address '{}': {}", args.host, e))?;
+    let api_key = std::env::var(mivi_core::ENV_API_KEY)
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+    validate_bind_security(ip, api_key.as_deref())?;
+
+    let workspace = std::fs::canonicalize(&args.workspace).map_err(|e| {
+        anyhow::anyhow!(
+            "Workspace path does not exist or is not accessible '{}': {}",
+            args.workspace.display(),
+            e
+        )
+    })?;
+    if !workspace.is_dir() {
+        anyhow::bail!("Workspace path is not a directory: {:?}", workspace);
+    }
 
     let broker = mivi_tools::ToolBroker::new();
-    mivi_tools::register_builtin_tools(&broker, std::path::Path::new(".")).await;
+    mivi_tools::register_builtin_tools(&broker, &workspace).await;
     let tool_count = mivi_tools::get_builtin_tool_definitions().len();
 
     let loaded_model = if let Some(p) = args.model.as_ref() {
@@ -32,21 +62,30 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             anyhow::bail!("Model file does not exist: {:?}", p);
         }
         let precision = crate::commands::parse_kv_precision(args.kv_precision.as_deref());
-        Some(mivi_model::Model::load_with_options(p, args.ctx_size, precision)?)
+        Some(mivi_model::Model::load_with_options(
+            p,
+            args.ctx_size,
+            precision,
+        )?)
     } else {
         None
     };
 
-    let engine = mivi_server::EngineActor::spawn(loaded_model);
-    let api_key = std::env::var(mivi_core::ENV_API_KEY).ok();
+    let model_name = loaded_model
+        .as_ref()
+        .map(|model| model.config.name.clone())
+        .unwrap_or_else(|| mivi_core::DEFAULT_MODEL_ID.to_string());
 
-    let state = Arc::new(AppState::new(model_name.clone(), broker, engine, api_key));
+    let engine = mivi_server::EngineActor::spawn(loaded_model);
+
+    let mut server_config = mivi_server::ServerConfig::default();
+    server_config.cors_allowed_origins = args.cors_origins;
+    let state = Arc::new(
+        AppState::with_config(model_name.clone(), broker, engine, api_key, server_config)
+            .with_workspace(workspace),
+    );
 
     let app = create_router(state.clone());
-    let ip: std::net::IpAddr = args
-        .host
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid host address '{}': {}", args.host, e))?;
 
     let (listener, actual_addr) =
         mivi_server::bind_with_fallback(ip, args.port, state.config.max_port_attempts).await?;
@@ -76,6 +115,26 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bind_security;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn loopback_bind_does_not_require_an_api_key() {
+        assert!(validate_bind_security(IpAddr::V4(Ipv4Addr::LOCALHOST), None).is_ok());
+        assert!(validate_bind_security(IpAddr::V6(Ipv6Addr::LOCALHOST), None).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_a_non_empty_api_key() {
+        let public_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        assert!(validate_bind_security(public_ip, None).is_err());
+        assert!(validate_bind_security(public_ip, Some("   ")).is_err());
+        assert!(validate_bind_security(public_ip, Some("test-key")).is_ok());
+    }
 }
 
 fn print_startup_banner(

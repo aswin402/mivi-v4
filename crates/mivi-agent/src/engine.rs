@@ -1,7 +1,7 @@
 use crate::state::{AgentPhase, AgentState};
 use crate::xml_utils::{escape_xml_attr, escape_xml_content};
 use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolResult};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
@@ -15,6 +15,7 @@ pub struct AgentLoop<'a> {
     pub state: AgentState,
     pub broker: &'a ToolBroker,
     pub tool_timeout: Duration,
+    allowed_tools: Option<HashSet<String>>,
     recent_actions: VecDeque<String>,
 }
 
@@ -24,12 +25,19 @@ impl<'a> AgentLoop<'a> {
             state,
             broker,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
+            allowed_tools: None,
             recent_actions: VecDeque::with_capacity(STAGNATION_WINDOW_SIZE + 1),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
+        self
+    }
+
+    /// Restrict this run to the named tools. `None` keeps the broker's registered tools available.
+    pub fn with_allowed_tools(mut self, allowed_tools: Option<Vec<String>>) -> Self {
+        self.allowed_tools = allowed_tools.map(|tools| tools.into_iter().collect());
         self
     }
 
@@ -98,18 +106,32 @@ impl<'a> AgentLoop<'a> {
 
         self.state.phase = AgentPhase::Acting;
         let mut results_str = String::new();
+        let mut timed_out = false;
 
         for call in &calls {
-            let res = match tokio::time::timeout(self.tool_timeout, self.broker.execute(call)).await
+            let res = if self
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&call.name))
             {
-                Ok(result) => result,
-                Err(_) => ToolResult::err(
+                ToolResult::err(
                     call.name.clone(),
-                    format!(
-                        "Tool '{}' timed out after {:?}",
-                        call.name, self.tool_timeout
-                    ),
-                ),
+                    format!("Tool '{}' is not allowed for this agent run", call.name),
+                )
+            } else {
+                match tokio::time::timeout(self.tool_timeout, self.broker.execute(call)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        timed_out = true;
+                        ToolResult::err(
+                            call.name.clone(),
+                            format!(
+                                "Tool '{}' timed out after {:?}; side-effect status is unknown",
+                                call.name, self.tool_timeout
+                            ),
+                        )
+                    }
+                }
             };
 
             let body = if res.success {
@@ -127,7 +149,11 @@ impl<'a> AgentLoop<'a> {
             ));
         }
 
-        self.state.phase = AgentPhase::Observing;
+        self.state.phase = if timed_out {
+            AgentPhase::Failed
+        } else {
+            AgentPhase::Observing
+        };
         results_str
     }
 }
@@ -155,5 +181,59 @@ mod tests {
             agent.state.memory.back().unwrap(),
             &format!("{}{}", THINKING_PREFIX, "Thought 149")
         );
+    }
+
+    #[tokio::test]
+    async fn disallowed_tools_are_not_executed() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let broker = ToolBroker::new();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_by_tool = Arc::clone(&executed);
+        broker
+            .register(
+                "secret_tool",
+                Arc::new(move |_| {
+                    executed_by_tool.store(true, Ordering::SeqCst);
+                    ToolResult::ok("secret_tool", "should not run")
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let mut agent =
+            AgentLoop::new(state, &broker).with_allowed_tools(Some(vec!["safe_tool".to_string()]));
+        let result = agent
+            .step(r#"<tool_call>{"name":"secret_tool","arguments":{}}</tool_call>"#)
+            .await;
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert!(result.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_tool_fails_agent_to_prevent_ambiguous_retries() {
+        let broker = ToolBroker::new();
+        broker
+            .register(
+                "slow_tool",
+                std::sync::Arc::new(|_| {
+                    std::thread::sleep(Duration::from_millis(25));
+                    ToolResult::ok("slow_tool", "finished")
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let mut agent = AgentLoop::new(state, &broker).with_timeout(Duration::from_millis(1));
+        let result = agent
+            .step(r#"<tool_call>{"name":"slow_tool","arguments":{}}</tool_call>"#)
+            .await;
+
+        assert!(result.contains("timed out"));
+        assert_eq!(agent.state.phase, AgentPhase::Failed);
     }
 }

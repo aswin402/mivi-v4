@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod config;
 pub mod engine_actor;
+pub mod generation;
 pub mod grammar;
 pub mod logging;
 pub mod routes;
@@ -14,14 +15,16 @@ pub mod watchdog;
 
 pub use auth::require_api_key;
 pub use config::ServerConfig;
-pub use engine_actor::{EngineActor, EngineHandle};
+pub use engine_actor::{EngineActor, EngineCommand, EngineHandle};
+pub use generation::{GenerationOptions, ResponseMode, ToolChoice};
 pub use grammar::{JsonConstraintState, ResponseFormat};
 pub use logging::{mivi_log_middleware, summarize_prompt, LogMetadata};
 pub use routes::create_router;
 pub use state::AppState;
 pub use streaming::{
     create_chunk_event, create_content_chunk_event, create_done_chunk_event, create_done_event,
-    create_thinking_chunk_event, send_sse_sequence, ChatCompletionChunk, ChunkChoice, ChunkDelta,
+    create_thinking_chunk_event, create_tool_calls_chunk_event, send_sse_sequence,
+    send_sse_sequence_with_finish, ChatCompletionChunk, ChunkChoice, ChunkDelta,
 };
 pub use types::{
     AgentRunRequest, AppError, ChatCompletionRequest, ChatCompletionResponse, ChoiceDto,
@@ -29,6 +32,15 @@ pub use types::{
 };
 pub use ui::serve_embedded_ui;
 pub use watchdog::{ResourceWatchdog, WatchdogConfig};
+
+/// Return whether a request names the loaded model or the stable default alias.
+#[inline]
+pub(crate) fn model_matches(requested: Option<&str>, loaded: &str) -> bool {
+    match requested.filter(|name| !name.is_empty()) {
+        None => true,
+        Some(name) => name == loaded || name == mivi_core::DEFAULT_MODEL_ID,
+    }
+}
 
 /// Attempts to bind a TcpListener to the given IP and port.
 ///

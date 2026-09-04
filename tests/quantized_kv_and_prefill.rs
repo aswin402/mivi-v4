@@ -97,8 +97,22 @@ fn test_chunked_prefix_caching_multi_chunk_chain() {
     let chunk_1_tokens: Vec<u32> = (0..PREFIX_CHUNK_SIZE as u32).collect();
     let chunk_2_tokens: Vec<u32> = (PREFIX_CHUNK_SIZE as u32..2 * PREFIX_CHUNK_SIZE as u32).collect();
 
-    let snap_1 = HybridStateSnapshot::new(PREFIX_CHUNK_SIZE, vec![1.0; 64], vec![2.0; 64], vec![0.1; 16], vec![0.2; 16]);
-    let snap_2 = HybridStateSnapshot::new(2 * PREFIX_CHUNK_SIZE, vec![1.1; 64], vec![2.1; 64], vec![0.11; 16], vec![0.21; 16]);
+    let snap_1 = HybridStateSnapshot::new(
+        PREFIX_CHUNK_SIZE,
+        0,
+        vec![1.0; 64],
+        vec![2.0; 64],
+        vec![0.1; 16],
+        vec![0.2; 16],
+    );
+    let snap_2 = HybridStateSnapshot::new(
+        2 * PREFIX_CHUNK_SIZE,
+        0,
+        vec![1.1; 64],
+        vec![2.1; 64],
+        vec![0.11; 16],
+        vec![0.21; 16],
+    );
 
     let hash_1 = prefix_cache.insert_chunk(0, &chunk_1_tokens, 0, snap_1);
     assert_ne!(hash_1, 0);

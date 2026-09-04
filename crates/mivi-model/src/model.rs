@@ -421,12 +421,7 @@ impl Model {
         };
 
         let n_prompt = prompt_tokens.len();
-        if start_pos + n_prompt > self.config.max_seq_len {
-            return Err(ModelError::ContextOverflow {
-                pos: start_pos + n_prompt,
-                max: self.config.max_seq_len,
-            });
-        }
+        let context_end = checked_context_end(start_pos, n_prompt, self.config.max_seq_len)?;
 
         // 1. Check hierarchical prefix cache if starting from sequence position 0
         let mut start_prefill_idx = 0;
@@ -449,24 +444,9 @@ impl Model {
             }
         }
 
-        // Continuation path (start_pos > 0): reuse cached KV from prior agent steps.
-        if start_pos > 0 {
-            if let Some((skip_tokens, match_pos, chunk)) =
-                self.prefix_cache.find_longest_suffix_match(start_pos, prompt_tokens)
-            {
-                if self
-                    .kv_cache
-                    .import_state_at(match_pos, skip_tokens, &chunk.state.k_cache, &chunk.state.v_cache)
-                    .is_ok()
-                {
-                    self.state.import_ssm_states(
-                        &chunk.state.ssm_conv_states,
-                        &chunk.state.ssm_hidden_states,
-                    );
-                    start_prefill_idx = skip_tokens;
-                    }
-            }
-        }
+        // Suffix snapshots are not reused here. A hybrid KV/SSM state depends on the
+        // complete preceding context, so matching token bytes alone cannot establish
+        // that a snapshot is causally valid for this continuation.
 
         // If the entire prompt matched the prefix cache, we only need to compute the last token's forward step
         // to populate the logits for the initial generation step.
@@ -503,24 +483,8 @@ impl Model {
                 let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
-                // For chunk 0: strip BOS so stored hash matches continuation path.
-                let (cached_tokens, cached_standalone_hash) = if chunk_idx == 0 {
-                    let bos_id = self
-                        .gguf
-                        .metadata
-                        .get("tokenizer.ggml.bos_token_id")
-                        .and_then(|v| v.as_usize().map(|u| u as u32))
-                        .unwrap_or(1);
-                    let cached = if !chunk_tokens.is_empty() && chunk_tokens[0] == bos_id {
-                        chunk_tokens[1..].to_vec()
-                    } else {
-                        chunk_tokens.to_vec()
-                    };
-                    let cached_hash = compute_chunk_hash(0, &cached);
-                    (cached, cached_hash)
-                } else {
-                    (chunk_tokens.to_vec(), compute_chunk_hash(0, chunk_tokens))
-                };
+                // Hash and retain exactly the same token chunk used by prefix lookup.
+                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
 
                 if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
                     let (conv_exp, ssm_exp) = self.state.export_ssm_states();
@@ -542,7 +506,7 @@ impl Model {
                 }
             }
         }
-        let mut pos = start_pos + n_prompt;
+        let mut pos = context_end;
 
         let mut generated_ids = Vec::new();
         let mut recent_tokens = VecDeque::with_capacity(RECENT_TOKENS_WINDOW + 1);
@@ -777,6 +741,27 @@ fn longest_stop_prefix_len(text: &str, stop_tokens: &[String]) -> usize {
     max_match
 }
 
+#[inline]
+fn cache_chunk_tokens(tokens: &[u32]) -> (Vec<u32>, u64) {
+    (tokens.to_vec(), compute_chunk_hash(0, tokens))
+}
+
+fn checked_context_end(start_pos: usize, token_count: usize, max_seq_len: usize) -> Result<usize> {
+    let end = start_pos
+        .checked_add(token_count)
+        .ok_or(ModelError::ContextOverflow {
+            pos: usize::MAX,
+            max: max_seq_len,
+        })?;
+    if end > max_seq_len {
+        return Err(ModelError::ContextOverflow {
+            pos: end,
+            max: max_seq_len,
+        });
+    }
+    Ok(end)
+}
+
 /// Helper to check if `text` ends with any full stop sequence, returning the matched length.
 fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> {
     for st in stop_tokens {
@@ -790,6 +775,15 @@ fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> 
 #[cfg(test)]
 mod prefix_cache_integration_tests {
     use super::*;
+
+    #[test]
+    fn prefix_cache_chunk_hash_uses_the_complete_token_chunk() {
+        let chunk = vec![1u32, 10, 20, 30];
+        let (stored_tokens, stored_hash) = cache_chunk_tokens(&chunk);
+
+        assert_eq!(stored_tokens, chunk);
+        assert_eq!(stored_hash, compute_chunk_hash(0, &chunk));
+    }
 
     /// Direct unit test: suffix matching using only public PrefixCache APIs.
     #[test]
@@ -816,12 +810,20 @@ mod prefix_cache_integration_tests {
         assert_eq!(pos, 64, "match at position 64");
     }
 
-    /// Integration test with real model: verify suffix match fires on continuation.
+    #[test]
+    fn incremental_context_position_overflow_is_rejected() {
+        assert!(checked_context_end(usize::MAX, 1, usize::MAX).is_err());
+        assert_eq!(checked_context_end(4, 3, 8).unwrap(), 7);
+    }
+
+    /// Integration test with real model: verify continuation preserves the prefix cache.
+    /// Suffix snapshots are intentionally not restored because token-byte matching
+    /// alone cannot prove that the cached hybrid state has the same causal context.
     /// Requires GGUF model. Run with:
-    ///   MIVI_TEST_MODEL=/path/to/model.gguf cargo test -p mivi-model test_suffix_match_e2e -- --ignored
+    ///   MIVI_TEST_MODEL=/path/to/model.gguf cargo test -p mivi-model test_incremental_continuation_preserves_prefix_cache -- --ignored
     #[test]
     #[ignore]
-    fn test_suffix_match_e2e() {
+    fn test_incremental_continuation_preserves_prefix_cache() {
         let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
         let mut model = Model::load_with_options(&std::path::Path::new(&model_path), None, None)
             .expect("failed to load model");
@@ -841,7 +843,7 @@ mod prefix_cache_integration_tests {
         }
         assert!(cached > 0, "expected >=1 chunk after step 0");
 
-        // Step 1: same system prompt — suffix should hit the cache.
+        // Step 1: continuation must remain correct while retaining the cache.
         let step1_pos_before = model.current_pos();
         let step1 = format!("{}\nUser: hello", system);
         let _ = model.generate_streaming_incremental(&step1, step1_pos_before, 5, |_tok, _text| false);
@@ -850,4 +852,3 @@ mod prefix_cache_integration_tests {
         assert!(model.prefix_cache.len() >= cached, "cache should persist");
     }
 }
-

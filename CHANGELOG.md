@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.26] - 2026-09-05
+
+### API Contract Hardening, Generation Controls & Workspace Security
+
+- **Request-scoped generation controls**: Added validated `temperature`, `top_p`, `top_k`, `min_p`, repetition/presence/frequency penalties, `seed`, and stop sequences for OpenAI-compatible requests, with sampler state and RNG restored after each request.
+- **Structured output and tool compatibility**: Added non-streaming JSON-object generation, explicit unsupported-format errors, named tool-choice filtering, assistant tool-call history preservation, and structured Anthropic `tool_use` streaming with accurate tokenizer-based usage counts.
+- **Server safety**: Added explicit no-model readiness/errors, model ID validation, loopback-by-default binding, API-key protection for public binds, closed-by-default CORS with an explicit allowlist, and bounded workspace context documents.
+- **Agent and filesystem hardening**: Enforced agent tool allowlists, fail-closed handling for timed-out tools, and Unix descriptor-relative atomic workspace writes that do not follow swapped symlinks.
+- **Inference and cache reliability**: Added explicit mock-engine mode, context-position overflow checks, safer hybrid prefix/suffix cache handling, and quantized KV/prefill coverage.
+- **Documentation and regression coverage**: Updated the API/specification and low-resource operating guidance, and added targeted tests for authentication, generation validation, JSON output, tool routing, Anthropic streaming, CORS, no-model behavior, and filesystem safety.
+
 ## [v0.2.25] - 2026-09-03
 
 ### 64K Max Context Scaling, Fail-Fast Token-0 Validation & SSE Keep-Alive Heartbeats

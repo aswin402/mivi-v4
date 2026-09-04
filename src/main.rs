@@ -11,15 +11,15 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
-    // Initialize Rayon thread pool (respects MIVI_THREADS/RAYON_NUM_THREADS or clamps available CPU cores to [1, 8])
+    // Initialize Rayon thread pool (respects MIVI_THREADS/RAYON_NUM_THREADS or defaults to at most 2).
     let num_threads = std::env::var("MIVI_THREADS")
         .or_else(|_| std::env::var("RAYON_NUM_THREADS"))
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| n.get().max(1))
-                .unwrap_or(4)
+                .map(|n| n.get().clamp(1, 2))
+                .unwrap_or(2)
         });
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve {
             port,
             host,
+            workspace,
+            cors_origins,
             model,
             max_memory,
             warn_memory,
@@ -41,6 +43,8 @@ async fn main() -> anyhow::Result<()> {
             mivi_cli::run_serve(mivi_cli::ServeArgs {
                 port,
                 host,
+                workspace,
+                cors_origins,
                 model,
                 max_memory,
                 warn_memory,

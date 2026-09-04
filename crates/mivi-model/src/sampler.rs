@@ -55,6 +55,16 @@ impl Sampler {
         self.rng_state = if seed == 0 { FALLBACK_RNG_SEED } else { seed };
     }
 
+    /// Return the current RNG state so a request-scoped seed can be restored.
+    pub fn rng_state(&self) -> u64 {
+        self.rng_state
+    }
+
+    /// Restore a previously captured RNG state.
+    pub fn restore_rng_state(&mut self, state: u64) {
+        self.rng_state = if state == 0 { FALLBACK_RNG_SEED } else { state };
+    }
+
     /// Fast stateful xorshift64* pseudo-random number generator producing a float in [0.0, 1.0).
     #[inline]
     pub fn random_f32(&mut self) -> f32 {
@@ -86,7 +96,8 @@ impl Sampler {
 
         // 1. Penalties (repetition, presence, frequency)
         if !recent_tokens.is_empty()
-            && (self.config.repetition_penalty > 1.0
+            && (self.config.repetition_penalty > 0.0
+                && self.config.repetition_penalty != 1.0
                 || self.config.presence_penalty != 0.0
                 || self.config.frequency_penalty != 0.0)
         {
@@ -215,7 +226,7 @@ fn apply_penalties(
             let count = recent_tokens.iter().filter(|&&t| t == tok).count();
 
             // 1. Multiplicative Repetition Penalty
-            if rep_penalty > 1.0 {
+            if rep_penalty > 0.0 && rep_penalty != 1.0 {
                 if logits[idx] > 0.0 {
                     logits[idx] /= rep_penalty;
                 } else {

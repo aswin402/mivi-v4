@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 pub const DEFAULT_SERVE_PORT_STR: &str = "8080";
-pub const DEFAULT_SERVE_HOST: &str = "0.0.0.0";
+pub const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -25,6 +25,12 @@ pub enum Commands {
         port: u16,
         #[arg(short = 'H', long, default_value = DEFAULT_SERVE_HOST)]
         host: String,
+        /// Root directory exposed to built-in filesystem tools (default: current directory)
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Browser origin allowed to access the HTTP API; may be repeated (default: disabled)
+        #[arg(long = "cors-origin", value_name = "ORIGIN")]
+        cors_origins: Vec<String>,
         #[arg(short, long)]
         model: Option<PathBuf>,
         /// Maximum RSS memory in MB before triggering safety shutdown (default: 3000 MB)

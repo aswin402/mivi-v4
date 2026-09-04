@@ -387,7 +387,7 @@ enum Cli {
         model: PathBuf,
         #[arg(long, default_value = "8080")]
         port: u16,
-        #[arg(long, default_value = "0.0.0.0")]
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
     /// Interactive chat in terminal

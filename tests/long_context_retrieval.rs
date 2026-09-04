@@ -104,6 +104,7 @@ fn test_long_context_prefix_caching_64k_chaining() {
 
         let state = HybridStateSnapshot::new(
             (chunk_idx + 1) * 64,
+            0,
             vec![1.0f32; 100],
             vec![2.0f32; 100],
             vec![0.5f32; 50],
