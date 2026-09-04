@@ -20,6 +20,9 @@ pub const DEFAULT_MAX_PREFIX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub struct HybridStateSnapshot {
     /// Token position reached at this snapshot boundary.
     pub pos: usize,
+    /// Standalone hash of the chunk tokens (prev_hash=0).
+    /// Used by suffix matching to locate this chunk without chaining context.
+    pub standalone_hash: u64,
     /// Key cache elements up to `pos` across all allocated attention layers.
     pub k_cache: Vec<f32>,
     /// Value cache elements up to `pos` across all allocated attention layers.
@@ -34,6 +37,7 @@ impl HybridStateSnapshot {
     /// Create a new hybrid state snapshot.
     pub fn new(
         pos: usize,
+        standalone_hash: u64,
         k_cache: Vec<f32>,
         v_cache: Vec<f32>,
         ssm_conv_states: Vec<f32>,
@@ -41,6 +45,7 @@ impl HybridStateSnapshot {
     ) -> Self {
         Self {
             pos,
+            standalone_hash,
             k_cache,
             v_cache,
             ssm_conv_states,
@@ -261,6 +266,57 @@ impl PrefixCache {
             self.lru_order.push_back(*hash);
         }
     }
+    /// Search cached chunks for a suffix match at `start_pos`.
+    ///
+    /// Returns `None` if no cached state matches the suffix.
+    /// Returns `Some((suffix_len, match_pos, chunk))` where:
+    ///   - `suffix_len`: number of tokens to skip (matched suffix length)
+    ///   - `match_pos`: absolute position where the cached KV was originally computed
+    ///   - `chunk`: the matched PrefixChunk with KV data
+    pub fn find_longest_suffix_match(
+        &mut self,
+        start_pos: usize,
+        tokens: &[u32],
+    ) -> Option<(usize, usize, PrefixChunk)> {
+        if tokens.len() < self.chunk_size || self.chunks.is_empty() {
+            return None;
+        }
+
+        let n = tokens.len();
+        let abs_offset = start_pos;
+        // Use saturating_sub to prevent underflow when start_pos > tokens.len()
+        // (can happen in continuation paths where start_pos is the absolute model position)
+        let max_k = n.saturating_sub(abs_offset) / self.chunk_size;
+        if max_k == 0 {
+            return None;
+        }
+
+        for k in (1..=max_k).rev() {
+            let suffix_len = k * self.chunk_size;
+            let suffix_start = n.saturating_sub(suffix_len);
+            if suffix_start < abs_offset {
+                continue;
+            }
+
+            let suffix_abs_pos = abs_offset + suffix_start;
+            if suffix_abs_pos % self.chunk_size != 0 {
+                continue;
+            }
+
+            let suffix_tokens = &tokens[suffix_start..n];
+            let suffix_hash = compute_chunk_hash(0, suffix_tokens);
+
+            if let Some(chunk) = self.chunks.get(&suffix_hash) {
+                let state_pos = chunk.state.pos;
+                let matched = chunk.clone();
+                self.touch(&suffix_hash);
+                return Some((suffix_len, state_pos, matched));
+            }
+        }
+
+        None
+    }
+
 }
 
 #[cfg(test)]
@@ -292,6 +348,7 @@ mod tests {
 
         let state_0 = HybridStateSnapshot::new(
             64,
+            0,
             vec![1.0; 64 * 8],
             vec![2.0; 64 * 8],
             vec![0.5; 16],
@@ -300,6 +357,7 @@ mod tests {
 
         let state_1 = HybridStateSnapshot::new(
             128,
+            0,
             vec![1.5; 128 * 8],
             vec![2.5; 128 * 8],
             vec![0.7; 16],
@@ -343,7 +401,7 @@ mod tests {
         let c1: Vec<u32> = vec![2; 64];
         let c2: Vec<u32> = vec![3; 64];
 
-        let state = HybridStateSnapshot::new(64, vec![], vec![], vec![], vec![]);
+        let state = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
 
         let h0 = cache.insert_chunk(0, &c0, 0, state.clone());
         let _h1 = cache.insert_chunk(0, &c1, 0, state.clone());
@@ -354,4 +412,58 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(!cache.chunks.contains_key(&h0));
     }
+    #[test]
+    fn test_suffix_match_finds_cached_chunk() {
+        let mut cache = PrefixCache::new(2, 64);
+        let chunk_tokens: Vec<u32> = (0..64).collect();
+        let state = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
+        let hash = cache.insert_chunk(0, &chunk_tokens, 0, state.clone());
+        assert_eq!(cache.len(), 1);
+
+        // Step 2 prompt: history (64 tokens) + same chunk suffix (64 tokens)
+        let history: Vec<u32> = (100..164).collect();
+        let step2: Vec<u32> = history.iter().chain(chunk_tokens.iter()).cloned().collect();
+
+        let result = cache.find_longest_suffix_match(64, &step2);
+        assert!(result.is_some(), "Should find suffix match");
+        let (skip, pos, matched) = result.unwrap();
+        assert_eq!(skip, 64);
+        assert_eq!(pos, 64);
+        assert_eq!(matched.hash, hash);
+    }
+
+    #[test]
+    fn test_suffix_match_no_match_on_different_content() {
+        let mut cache = PrefixCache::new(2, 64);
+        let chunk_tokens: Vec<u32> = (0..64).collect();
+        let state = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
+        cache.insert_chunk(0, &chunk_tokens, 0, state);
+
+        let different: Vec<u32> = (200..264).collect();
+        let history: Vec<u32> = (100..164).collect();
+        let step2: Vec<u32> = history.iter().chain(different.iter()).cloned().collect();
+
+        let result = cache.find_longest_suffix_match(64, &step2);
+        assert!(result.is_none(), "No match when content differs");
+    }
+
+    #[test]
+    fn test_suffix_match_returns_correct_chunk() {
+        let mut cache = PrefixCache::new(5, 64);
+        let chunk0: Vec<u32> = (0..64).collect();
+        let chunk1: Vec<u32> = (1000..1064).collect();
+        let state0 = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
+        let state1 = HybridStateSnapshot::new(128, 0, vec![], vec![], vec![], vec![]);
+        let _h0 = cache.insert_chunk(0, &chunk0, 0, state0);
+        let hash2 = cache.insert_chunk(0, &chunk1, 0, state1);
+
+        let history: Vec<u32> = (500..564).collect();
+        let step2: Vec<u32> = history.iter().chain(chunk1.iter()).cloned().collect();
+
+        let result = cache.find_longest_suffix_match(64, &step2);
+        assert!(result.is_some());
+        let (_, _, matched) = result.unwrap();
+        assert_eq!(matched.hash, hash2);
+    }
+
 }

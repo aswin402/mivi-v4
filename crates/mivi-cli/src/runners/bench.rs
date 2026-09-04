@@ -193,6 +193,7 @@ pub fn run_bench(model: Option<PathBuf>, kv_precision: Option<String>) -> Result
             let (conv_exp, ssm_exp) = model.state.export_ssm_states();
             let anchor_snapshot = mivi_kv::HybridStateSnapshot::new(
                 anchor_tokens.len(),
+                0,
                 k_exp,
                 v_exp,
                 conv_exp,

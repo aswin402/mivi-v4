@@ -174,7 +174,7 @@ pub fn load_from_disk(
         ssm_hidden_states.push(reader.read_f32::<LittleEndian>()?);
     }
 
-    let snapshot = HybridStateSnapshot::new(pos, k_cache, v_cache, ssm_conv_states, ssm_hidden_states);
+    let snapshot = HybridStateSnapshot::new(pos, 0, k_cache, v_cache, ssm_conv_states, ssm_hidden_states);
     Ok((tokens, snapshot))
 }
 
@@ -247,6 +247,7 @@ mod tests {
         let tokens = vec![1, 100, 200, 300, 400];
         let original_snapshot = HybridStateSnapshot::new(
             5,
+            0,
             vec![1.1, 2.2, 3.3],
             vec![4.4, 5.5, 6.6],
             vec![0.1, 0.2],

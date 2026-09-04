@@ -789,6 +789,77 @@ impl KvCache {
             }
         }
     }
+
+
+    /// Import KV cache data at a specific absolute position without resetting current_pos.
+    ///
+    /// Copies `pos` tokens of cached KV data into the active KV cache at `target_pos`.
+    /// Does NOT update current_pos. Used for continuation KV reuse across agent steps.
+    pub fn import_state_at(
+        &mut self,
+        target_pos: usize,
+        pos: usize,
+        k_data: &[f32],
+        v_data: &[f32],
+    ) -> Result<()> {
+        let n_alloc = self.n_allocated_layers();
+
+        match self.precision {
+            KvPrecision::F32 => {
+                let expected_elements = n_alloc * pos * self.kv_dim;
+                if k_data.len() != expected_elements || v_data.len() != expected_elements {
+                    return Err(KvError::DimMismatch {
+                        expected: expected_elements,
+                        got: k_data.len(),
+                    });
+                }
+
+                for cache_layer in 0..n_alloc {
+                    let dst_start = cache_layer * self.max_seq_len * self.kv_dim + target_pos * self.kv_dim;
+                    let dst_end = dst_start + pos * self.kv_dim;
+                    let src_start = cache_layer * pos * self.kv_dim;
+                    let src_end = src_start + pos * self.kv_dim;
+
+                    self.k_cache[dst_start..dst_end].copy_from_slice(&k_data[src_start..src_end]);
+                    self.v_cache[dst_start..dst_end].copy_from_slice(&v_data[src_start..src_end]);
+                }
+                Ok(())
+            }
+            KvPrecision::Q8_0 | KvPrecision::TurboQuant4 | KvPrecision::TurboQuant2 => {
+                let bpt = self.bytes_per_token();
+                let f32_per_token = (bpt + 3) / 4;
+                let expected_elements = n_alloc * pos * f32_per_token;
+
+                if k_data.len() != expected_elements || v_data.len() != expected_elements {
+                    return Err(KvError::DimMismatch {
+                        expected: expected_elements,
+                        got: k_data.len(),
+                    });
+                }
+
+                let k_src_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(k_data.as_ptr() as *const u8, k_data.len() * 4)
+                };
+                let v_src_bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(v_data.as_ptr() as *const u8, v_data.len() * 4)
+                };
+
+                for cache_layer in 0..n_alloc {
+                    let dst_start = cache_layer * self.max_seq_len * bpt + target_pos * bpt;
+                    let dst_end = dst_start + pos * bpt;
+                    let src_start = cache_layer * pos * bpt;
+                    let src_end = src_start + pos * bpt;
+
+                    if dst_end <= self.k_q8_cache.len() {
+                        self.k_q8_cache[dst_start..dst_end].copy_from_slice(&k_src_bytes[src_start..src_end]);
+                        self.v_q8_cache[dst_start..dst_end].copy_from_slice(&v_src_bytes[src_start..src_end]);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]

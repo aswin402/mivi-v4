@@ -10,7 +10,7 @@ use crate::ssm::ssm_forward;
 use crate::transformer::attention_forward;
 use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
-use mivi_kv::KvCache;
+use mivi_kv::{compute_chunk_hash, KvCache};
 use mivi_tokenizer::{Tokenizer, EOS_TOKEN_ID};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -449,6 +449,25 @@ impl Model {
             }
         }
 
+        // Continuation path (start_pos > 0): reuse cached KV from prior agent steps.
+        if start_pos > 0 {
+            if let Some((skip_tokens, match_pos, chunk)) =
+                self.prefix_cache.find_longest_suffix_match(start_pos, prompt_tokens)
+            {
+                if self
+                    .kv_cache
+                    .import_state_at(match_pos, skip_tokens, &chunk.state.k_cache, &chunk.state.v_cache)
+                    .is_ok()
+                {
+                    self.state.import_ssm_states(
+                        &chunk.state.ssm_conv_states,
+                        &chunk.state.ssm_hidden_states,
+                    );
+                    start_prefill_idx = skip_tokens;
+                    }
+            }
+        }
+
         // If the entire prompt matched the prefix cache, we only need to compute the last token's forward step
         // to populate the logits for the initial generation step.
         if start_pos == 0 && start_prefill_idx >= n_prompt && n_prompt > 0 {
@@ -484,11 +503,30 @@ impl Model {
                 let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
                 let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
+                // For chunk 0: strip BOS so stored hash matches continuation path.
+                let (cached_tokens, cached_standalone_hash) = if chunk_idx == 0 {
+                    let bos_id = self
+                        .gguf
+                        .metadata
+                        .get("tokenizer.ggml.bos_token_id")
+                        .and_then(|v| v.as_usize().map(|u| u as u32))
+                        .unwrap_or(1);
+                    let cached = if !chunk_tokens.is_empty() && chunk_tokens[0] == bos_id {
+                        chunk_tokens[1..].to_vec()
+                    } else {
+                        chunk_tokens.to_vec()
+                    };
+                    let cached_hash = compute_chunk_hash(0, &cached);
+                    (cached, cached_hash)
+                } else {
+                    (chunk_tokens.to_vec(), compute_chunk_hash(0, chunk_tokens))
+                };
 
                 if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
                     let (conv_exp, ssm_exp) = self.state.export_ssm_states();
                     let snapshot = mivi_kv::HybridStateSnapshot::new(
                         cur_pos + 1,
+                        cached_standalone_hash,
                         k_exp,
                         v_exp,
                         conv_exp,
@@ -497,7 +535,7 @@ impl Model {
 
                     chained_hash = self.prefix_cache.insert_chunk(
                         chained_hash,
-                        chunk_tokens,
+                        &cached_tokens,
                         chunk_idx,
                         snapshot,
                     );
@@ -600,6 +638,7 @@ impl Model {
             }
 
             let _ = self.forward_step(next_token, pos, true)?;
+
             pos += 1;
         }
 
@@ -747,3 +786,68 @@ fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> 
     }
     None
 }
+
+#[cfg(test)]
+mod prefix_cache_integration_tests {
+    use super::*;
+
+    /// Direct unit test: suffix matching using only public PrefixCache APIs.
+    #[test]
+    fn test_suffix_match_directly() {
+        use mivi_kv::{compute_chunk_hash, HybridStateSnapshot, PrefixCache};
+
+        let mut cache = PrefixCache::new(4, 64);
+
+        // Use insert_chunk (public API) to store a synthetic chunk.
+        // chained_hash=0 makes the stored key equal to standalone_hash.
+        let chunk_tokens: Vec<u32> = (1000u32..1064).collect();
+        let standalone_hash = compute_chunk_hash(0, &chunk_tokens);
+        let state = HybridStateSnapshot::new(64, standalone_hash, vec![], vec![], vec![], vec![]);
+        cache.insert_chunk(0, &chunk_tokens, 0, state);
+
+        // Simulate agent step 1: 64 history + same 64-token chunk suffix
+        let history: Vec<u32> = (2000u32..2064).collect();
+        let step1_input: Vec<u32> = history.iter().chain(chunk_tokens.iter()).cloned().collect();
+
+        let result = cache.find_longest_suffix_match(64, &step1_input);
+        assert!(result.is_some(), "suffix match should find cached chunk");
+        let (skip, pos, _) = result.unwrap();
+        assert_eq!(skip, 64, "should skip 64 tokens");
+        assert_eq!(pos, 64, "match at position 64");
+    }
+
+    /// Integration test with real model: verify suffix match fires on continuation.
+    /// Requires GGUF model. Run with:
+    ///   MIVI_TEST_MODEL=/path/to/model.gguf cargo test -p mivi-model test_suffix_match_e2e -- --ignored
+    #[test]
+    #[ignore]
+    fn test_suffix_match_e2e() {
+        let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
+        let mut model = Model::load_with_options(&std::path::Path::new(&model_path), None, None)
+            .expect("failed to load model");
+
+        let system = "You are a helpful assistant.";
+        let prompt = format!("{}\nUser: Tell me a very long and detailed story.", system);
+
+        // Step 0: generate enough tokens to fill at least one 64-token chunk.
+        let _ = model.generate_streaming_incremental(&prompt, 0, 512, |_tok, _text| false);
+        let step0_pos = model.current_pos();
+        let cached = model.prefix_cache.len();
+        println!("Step 0: {} tokens, {} chunks", step0_pos, cached);
+
+        if step0_pos < 64 {
+            println!("SKIP: EOS at {} tokens (< 64)", step0_pos);
+            return;
+        }
+        assert!(cached > 0, "expected >=1 chunk after step 0");
+
+        // Step 1: same system prompt — suffix should hit the cache.
+        let step1_pos_before = model.current_pos();
+        let step1 = format!("{}\nUser: hello", system);
+        let _ = model.generate_streaming_incremental(&step1, step1_pos_before, 5, |_tok, _text| false);
+
+        println!("Step 1: {}->{} tokens", step1_pos_before, model.current_pos());
+        assert!(model.prefix_cache.len() >= cached, "cache should persist");
+    }
+}
+

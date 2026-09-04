@@ -126,8 +126,8 @@ mod tests {
     #[test]
     fn test_semantic_anchor_cache_insert_and_find() {
         let mut cache = SemanticAnchorCache::new(8);
-        let snapshot1 = HybridStateSnapshot::new(10, vec![], vec![], vec![], vec![]);
-        let snapshot2 = HybridStateSnapshot::new(25, vec![], vec![], vec![], vec![]);
+        let snapshot1 = HybridStateSnapshot::new(10, 0, vec![], vec![], vec![], vec![]);
+        let snapshot2 = HybridStateSnapshot::new(25, 0, vec![], vec![], vec![], vec![]);
 
         cache.insert_anchor(
             SemanticAnchorType::ThinkingStart,
