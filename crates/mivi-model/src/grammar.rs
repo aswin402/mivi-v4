@@ -110,6 +110,32 @@ pub enum JsonScope {
     Array,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralKind {
+    True,
+    False,
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumberState {
+    Sign,
+    Zero,
+    Integer,
+    FractionStart,
+    Fraction,
+    ExponentStart,
+    ExponentSign,
+    ExponentDigits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimitiveState {
+    None,
+    Literal { kind: LiteralKind, next: u8 },
+    Number(NumberState),
+}
+
 /// Pushdown Automata tracking structural JSON syntax (100% stack-allocated, zero-heap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonGrammar {
@@ -124,6 +150,7 @@ pub struct JsonGrammar {
     pub started: bool,
     pub completed: bool,
     pub has_error: bool,
+    primitive: PrimitiveState,
 }
 
 impl Default for JsonGrammar {
@@ -147,6 +174,7 @@ impl JsonGrammar {
             started: false,
             completed: false,
             has_error: false,
+            primitive: PrimitiveState::None,
         }
     }
 
@@ -194,6 +222,120 @@ impl JsonGrammar {
         }
     }
 
+    #[inline]
+    fn finish_value(&mut self) {
+        self.expect_value = false;
+        self.expect_comma_or_close = true;
+        if self.stack_depth == 0 && self.started {
+            self.completed = true;
+            self.expect_comma_or_close = false;
+        }
+    }
+
+    #[inline]
+    fn begin_primitive(&mut self, ch: char) -> bool {
+        self.started = true;
+        self.expect_value = false;
+        self.expect_comma_or_close = true;
+        self.primitive = match ch {
+            't' => PrimitiveState::Literal {
+                kind: LiteralKind::True,
+                next: 1,
+            },
+            'f' => PrimitiveState::Literal {
+                kind: LiteralKind::False,
+                next: 1,
+            },
+            'n' => PrimitiveState::Literal {
+                kind: LiteralKind::Null,
+                next: 1,
+            },
+            '-' => PrimitiveState::Number(NumberState::Sign),
+            '0' => PrimitiveState::Number(NumberState::Zero),
+            '1'..='9' => PrimitiveState::Number(NumberState::Integer),
+            _ => return false,
+        };
+        true
+    }
+
+    #[inline]
+    fn finish_primitive(&mut self) {
+        self.primitive = PrimitiveState::None;
+        self.finish_value();
+    }
+
+    #[inline]
+    fn is_value_delimiter(ch: char) -> bool {
+        ch.is_whitespace() || matches!(ch, ',' | '}' | ']')
+    }
+
+    /// Consume a character belonging to an in-progress literal or number.
+    /// Returns false when the character belongs to the following JSON token.
+    fn feed_primitive(&mut self, ch: char) -> bool {
+        let primitive = self.primitive;
+        match primitive {
+            PrimitiveState::None => false,
+            PrimitiveState::Literal { kind, next } => {
+                let expected: &[u8] = match kind {
+                    LiteralKind::True => b"true",
+                    LiteralKind::False => b"false",
+                    LiteralKind::Null => b"null",
+                };
+                if (next as usize) < expected.len() && ch == expected[next as usize] as char {
+                    let next = next + 1;
+                    if next as usize == expected.len() {
+                        self.finish_primitive();
+                    } else {
+                        self.primitive = PrimitiveState::Literal { kind, next };
+                    }
+                    true
+                } else {
+                    self.has_error = true;
+                    false
+                }
+            }
+            PrimitiveState::Number(state) => {
+                let next_state = match state {
+                    NumberState::Sign if ch == '0' => NumberState::Zero,
+                    NumberState::Sign if ch.is_ascii_digit() => NumberState::Integer,
+                    NumberState::Zero if ch == '.' => NumberState::FractionStart,
+                    NumberState::Zero if matches!(ch, 'e' | 'E') => NumberState::ExponentStart,
+                    NumberState::Integer if ch.is_ascii_digit() => NumberState::Integer,
+                    NumberState::Integer if ch == '.' => NumberState::FractionStart,
+                    NumberState::Integer if matches!(ch, 'e' | 'E') => NumberState::ExponentStart,
+                    NumberState::FractionStart if ch.is_ascii_digit() => NumberState::Fraction,
+                    NumberState::Fraction if ch.is_ascii_digit() => NumberState::Fraction,
+                    NumberState::Fraction if matches!(ch, 'e' | 'E') => NumberState::ExponentStart,
+                    NumberState::ExponentStart if matches!(ch, '+' | '-') => {
+                        NumberState::ExponentSign
+                    }
+                    NumberState::ExponentStart if ch.is_ascii_digit() => {
+                        NumberState::ExponentDigits
+                    }
+                    NumberState::ExponentSign if ch.is_ascii_digit() => NumberState::ExponentDigits,
+                    NumberState::ExponentDigits if ch.is_ascii_digit() => {
+                        NumberState::ExponentDigits
+                    }
+                    NumberState::Zero
+                    | NumberState::Integer
+                    | NumberState::Fraction
+                    | NumberState::ExponentDigits
+                        if Self::is_value_delimiter(ch) =>
+                    {
+                        self.finish_primitive();
+                        return false;
+                    }
+                    _ => {
+                        self.has_error = true;
+                        return false;
+                    }
+                };
+                self.primitive = PrimitiveState::Number(next_state);
+                true
+            }
+        }
+    }
+
     /// Advance parser state with a decoded token chunk. Returns true if valid, false if syntax error.
     pub fn feed(&mut self, chunk: &str) -> bool {
         if self.completed || self.has_error {
@@ -202,6 +344,9 @@ impl JsonGrammar {
 
         for ch in chunk.chars() {
             if self.completed {
+                if ch.is_whitespace() {
+                    continue;
+                }
                 self.has_error = true;
                 return false;
             }
@@ -224,8 +369,7 @@ impl JsonGrammar {
                         self.expect_key = false;
                         self.expect_colon = true;
                     } else if self.expect_value {
-                        self.expect_value = false;
-                        self.expect_comma_or_close = true;
+                        self.finish_value();
                     } else {
                         self.has_error = true;
                         return false;
@@ -245,6 +389,13 @@ impl JsonGrammar {
                 continue;
             }
 
+            if self.primitive != PrimitiveState::None && self.feed_primitive(ch) {
+                continue;
+            }
+            if self.has_error {
+                return false;
+            }
+
             // Outside string whitespace
             if ch.is_whitespace() {
                 continue;
@@ -262,7 +413,10 @@ impl JsonGrammar {
                     self.started = true;
                 }
                 '}' => {
-                    if self.expect_colon || self.expect_value {
+                    if self.expect_colon
+                        || self.expect_value
+                        || (self.expect_key && !self.expect_comma_or_close)
+                    {
                         self.has_error = true;
                         return false;
                     }
@@ -330,14 +484,8 @@ impl JsonGrammar {
                         return false;
                     }
                 }
-                '0'..='9' | '-' | '+' | '.' | 'e' | 'E' | 't' | 'r' | 'u' | 'f' | 'a' | 'l' | 's' | 'n' => {
-                    if self.expect_value {
-                        self.started = true;
-                        self.expect_value = false;
-                        self.expect_comma_or_close = true;
-                    } else if self.expect_comma_or_close {
-                        // Continuation of number or boolean literal
-                    } else {
+                '0'..='9' | '-' | 't' | 'f' | 'n' => {
+                    if !self.expect_value || !self.begin_primitive(ch) {
                         self.has_error = true;
                         return false;
                     }
@@ -521,9 +669,11 @@ fn compact_json_schema_bounded(schema: &serde_json::Value, depth: usize) -> serd
             }
             serde_json::Value::Object(compacted)
         }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(|v| compact_json_schema_bounded(v, depth + 1)).collect())
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| compact_json_schema_bounded(v, depth + 1))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -590,6 +740,22 @@ mod tests {
         assert!(grammar.feed("{\"pi\":3.14159,\"rate\":-0.05,\"exp\":1e-4}"));
         assert!(grammar.completed);
         assert!(!grammar.has_error);
+    }
+
+    #[test]
+    fn test_json_grammar_rejects_incomplete_literals_and_numbers() {
+        for malformed in [
+            r#"{"value":tru}"#,
+            r#"{"value":01}"#,
+            r#"{"value":1.}"#,
+            r#"{"value":true,}"#,
+        ] {
+            let mut grammar = JsonGrammar::new();
+            assert!(
+                !grammar.feed(malformed),
+                "accepted malformed JSON: {malformed}"
+            );
+        }
     }
 
     #[test]

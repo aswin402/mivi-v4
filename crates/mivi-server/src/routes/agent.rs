@@ -8,8 +8,9 @@ use axum::{
     extract::{Json, State},
     response::{sse::Event, IntoResponse, Response},
 };
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 pub const AGENT_PROMPT_TEMPLATE: &str =
@@ -22,8 +23,44 @@ mod context_tests {
 
     #[test]
     fn context_documents_reject_paths_outside_workspace() {
-        let result = load_context_documents(Path::new("/workspace"), &["../../secret.txt".to_string()]);
+        let result =
+            load_context_documents(Path::new("/workspace"), &["../../secret.txt".to_string()]);
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_documents_reject_symlinked_files_and_directories() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!(
+            "mivi-server-context-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir(&workspace).expect("create isolated workspace");
+        fs::write(workspace.join("real.txt"), "workspace context").expect("create target file");
+        fs::create_dir(workspace.join("real-dir")).expect("create target directory");
+        symlink("real.txt", workspace.join("linked.txt")).expect("create file symlink");
+        symlink("real-dir", workspace.join("linked-dir")).expect("create directory symlink");
+
+        let linked_file = load_context_documents(&workspace, &["linked.txt".to_string()]);
+        let linked_directory =
+            load_context_documents(&workspace, &["linked-dir/context.txt".to_string()]);
+
+        assert!(linked_file.is_err());
+        assert!(linked_directory.is_err());
+        fs::remove_file(workspace.join("linked.txt")).unwrap();
+        fs::remove_file(workspace.join("linked-dir")).unwrap();
+        fs::remove_dir(workspace.join("real-dir")).unwrap();
+        fs::remove_file(workspace.join("real.txt")).unwrap();
+        fs::remove_dir(workspace).unwrap();
     }
 }
 
@@ -33,26 +70,18 @@ const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 
 fn load_context_documents(workspace: &Path, paths: &[String]) -> Result<String, String> {
     if paths.len() > MAX_CONTEXT_DOCS {
-        return Err(format!("context_docs supports at most {} documents", MAX_CONTEXT_DOCS));
+        return Err(format!(
+            "context_docs supports at most {} documents",
+            MAX_CONTEXT_DOCS
+        ));
     }
 
     let mut total_bytes = 0usize;
     let mut rendered = String::new();
     for path in paths {
-        let target = mivi_tools::builtins::safe_join(workspace, path)?;
-        let metadata = std::fs::metadata(&target)
-            .map_err(|e| format!("Failed to inspect context document '{}': {}", path, e))?;
-        if !metadata.is_file() {
-            return Err(format!("Context document '{}' is not a regular file", path));
-        }
-        if metadata.len() > MAX_CONTEXT_DOC_BYTES {
-            return Err(format!(
-                "Context document '{}' exceeds the {} byte limit",
-                path, MAX_CONTEXT_DOC_BYTES
-            ));
-        }
-        let content = std::fs::read_to_string(&target)
-            .map_err(|e| format!("Failed to read context document '{}': {}", path, e))?;
+        let content =
+            mivi_tools::builtins::read_workspace_file(workspace, path, MAX_CONTEXT_DOC_BYTES)
+                .map_err(|e| format!("Failed to read context document '{}': {}", path, e))?;
         total_bytes = total_bytes
             .checked_add(content.len())
             .ok_or_else(|| "Total context document size overflowed".to_string())?;
@@ -83,14 +112,32 @@ pub async fn run_agent_task(
     let cid = format!("{}{}", mivi_core::AGENT_RUN_ID_PREFIX, uuid::Uuid::new_v4());
     let broker = state.broker.clone();
     let engine = state.engine.clone();
-    let channel_capacity = state.config.channel_capacity;
-    let default_max_steps = state.config.default_max_agent_steps;
-    let agent_gen_tokens = state.config.agent_gen_tokens;
     let allowed_tools = req.allowed_tools.clone();
-    let context_prompt = match load_context_documents(&state.workspace, req.context_docs.as_deref().unwrap_or(&[])) {
+    let context_prompt = match load_context_documents(
+        &state.workspace,
+        req.context_docs.as_deref().unwrap_or(&[]),
+    ) {
         Ok(context) => context,
         Err(message) => return crate::types::AppError::InvalidRequest(message).into_response(),
     };
+    let slot_wait_started = Instant::now();
+    let inference_permit = match state.try_acquire_inference_slot() {
+        Ok(permit) => permit,
+        Err(_) => {
+            state.metrics.record_inference_rejected();
+            return crate::types::AppError::TooManyRequests(
+                "The maximum number of concurrent inference requests is active".to_string(),
+            )
+            .into_response();
+        }
+    };
+    state
+        .metrics
+        .record_inference_accepted(slot_wait_started.elapsed());
+    let channel_capacity = state.config.channel_capacity;
+    let default_max_steps = state.config.default_max_agent_steps;
+    let agent_gen_tokens = state.config.agent_gen_tokens;
+    let metrics = state.metrics.clone();
 
     let (tx, rx) =
         mpsc::channel::<std::result::Result<Event, std::convert::Infallible>>(channel_capacity);
@@ -100,6 +147,7 @@ pub async fn run_agent_task(
 
     let task_for_log = req.task.clone();
     tokio::spawn(async move {
+        let _inference_permit = inference_permit;
         const MAX_AGENT_STEPS_LIMIT: usize = 50;
         let max_steps = if req.max_steps == 0 {
             default_max_steps
@@ -122,8 +170,11 @@ pub async fn run_agent_task(
             let mut current_prompt = base_prompt.clone();
 
             for _ in 0..max_steps {
+                let generation_started = Instant::now();
                 match engine.generate(&current_prompt, agent_gen_tokens).await {
-                    Ok((model_out, _, _)) => {
+                    Ok((model_out, prompt_tokens, completion_tokens)) => {
+                        metrics.record_generation(generation_started.elapsed());
+                        metrics.record_tokens(prompt_tokens, completion_tokens);
                         let result = agent.step(&model_out).await;
                         if tx
                             .send(Ok(create_content_chunk_event(&cid_clone, &mname, &result)))
@@ -149,6 +200,8 @@ pub async fn run_agent_task(
                         );
                     }
                     Err(e) => {
+                        metrics.record_generation(generation_started.elapsed());
+                        metrics.record_inference_error();
                         tracing::error!("Agent inference failed: {}", e);
                         let _ = tx
                             .send(Ok(create_error_chunk_event(
@@ -168,6 +221,7 @@ pub async fn run_agent_task(
                 .back()
                 .cloned()
                 .unwrap_or_else(|| "Completed agent task execution.".to_string());
+            metrics.record_tool_timeouts(agent.timed_out_tools);
             crate::logging::print_interaction_box(
                 Some(&task_for_log),
                 None,

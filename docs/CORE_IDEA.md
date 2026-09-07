@@ -2,6 +2,9 @@
 
 > **One binary. One command. An AI agent brain that runs anywhere.**
 
+> **Status:** Product vision. Memory, speed, and capability figures in this document are targets,
+> not measured guarantees for every model, operating system, or hardware configuration.
+
 ---
 
 ## The Thesis
@@ -12,13 +15,14 @@ Every AI agent framework today faces the same bottleneck: **the model**.
 - Open-source models are bloated — 7B+ parameters, 16GB+ RAM, GPU required
 - Small models exist but are trained as "mini chatbots" — they can talk, but they can't *think*, *plan*, or *use tools*
 
-**mivi-v4 is a different animal.** It's not a chatbot shrunk down. It's a purpose-built *agent brain* — a model that was born to:
+**mivi-v4 is a different direction.** It's not a chatbot shrunk down. It's a purpose-built *agent runtime* — a system intended to:
 - Parse tool schemas and call functions correctly
 - Think step-by-step before acting
-- Route complex tasks to specialized experts
-- Use the internet for knowledge instead of memorizing Wikipedia
+- Route complex tasks through tools and runtime components
+- Use external tools for current knowledge instead of relying only on model weights
 
-All in **<400MB of RAM**, on any laptop, without a GPU.
+The target is a low-memory CPU deployment; actual RSS depends on the model file, context size,
+KV precision, adapters, and operating system page residency.
 
 ---
 
@@ -40,7 +44,7 @@ The old paradigm stuffs all knowledge into model weights. This is why models are
 User → [mivi-v4 (350M)] → Think → Route → Use Tools → Answer
               ↑                        ↑
     "knows HOW to do things"    "uses tools for WHAT things"
-    350MB RAM, CPU only          Internet, files, code, APIs
+    Model-dependent RSS, CPU only  Internet, files, code, APIs
 ```
 
 mivi-v4 doesn't try to know everything. It knows how to:
@@ -69,19 +73,19 @@ mivi-v4 is not a general-purpose chatbot fine-tuned for tool use. It's built fro
 ```
 
 ### ⚡ Pillar 2: Resource-Frugal
-Everything is designed for the constraint: **<1GB RAM, CPU-only, no GPU**.
+Everything is designed toward a low-memory, **CPU-first** deployment; actual usage must be measured for each model and configuration.
 
 | What | How |
 |---|---|
-| Model weights | Q4_K_M quantization → 195MB |
+| Model weights | Quantized GGUF; size depends on the selected model file |
 | Architecture | Hybrid SSM+GQA → sub-quadratic KV cache |
-| Memory model | Pre-allocated arena → zero heap allocations during inference |
+| Memory model | Pre-allocated hot-path buffers where implemented; request and prompt handling still allocate |
 | Weight loading | `mmap` → OS manages paging, only active pages in RAM |
-| Tokenizer | SIMD-accelerated → sub-microsecond |
-| Runtime | Pure Rust → no Python, no framework overhead |
+| Tokenizer | Rust implementation with SIMD-oriented paths; benchmark by workload |
+| Runtime | Rust with a small Unix libc FFI surface; no Python runtime required |
 
-### 🎯 Pillar 3: Expert-Routed
-One model can't be the best at everything. But one model with four specialized experts can be great at four things:
+### 🎯 Pillar 3: Extensible Routing (planned)
+One model cannot be best at everything. Future specialist adapters or models can be added behind the runtime, but the current server uses one loaded model plus tool routing.
 
 ```
                     Input
@@ -131,15 +135,15 @@ This means:
 | Dimension | Other Small Models | mivi-v4 |
 |---|---|---|
 | **Purpose** | General chatbot | Agent brain |
-| **Architecture** | Pure transformer | Hybrid SSM+GQA + MoLE |
+| **Architecture** | Pure transformer | Hybrid SSM+GQA |
 | **Knowledge** | Memorized in weights | Retrieved via tools |
-| **Tool calling** | Bolted on | Native, grammar-enforced |
+| **Tool calling** | Bolted on | Runtime-managed and schema-validated |
 | **Reasoning** | Implicit | Explicit `<think>` blocks |
-| **Experts** | Single model | 4 specialized LoRA experts |
-| **Runtime** | Python (PyTorch) | Pure Rust, zero-heap |
-| **Memory** | 2-16GB | <400MB |
+| **Experts** | Single model | Specialist routing is planned; current server loads one model |
+| **Runtime** | Python (PyTorch) | Rust runtime with bounded request handling |
+| **Memory** | 2-16GB | Model/configuration dependent |
 | **Deployment** | Docker + Python + CUDA | Single binary, one command |
-| **Target** | Cloud GPUs | Any laptop CPU |
+| **Target** | Cloud GPUs | Laptop-class CPU deployments, measured per configuration |
 
 ---
 
@@ -150,7 +154,7 @@ This means:
 **v4** = Fourth iteration of the architecture
 
 The model name `mivi-v4` represents the convergence of:
-- Miniature (350M params, <400MB RAM)
+- Miniature (small model, configuration-dependent memory)
 - Intelligent (thinks before acting, routes to experts)
 - Versatile (coding, reasoning, tools, chat)
 - Inference (optimized for fast, efficient generation)

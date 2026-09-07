@@ -9,18 +9,15 @@
  |_|  |_|_____| \__/ |_____|        \___/   |_|  
 ```
 
-# ⚡ Mivi-v4: Agent-Native SLM Engine & Server in Pure Rust
+# ⚡ Mivi-v4: Agent-Native SLM Engine & Server in Rust
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-blue.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-89%20passed%20(100%25)-brightgreen.svg?style=flat-square)](tests/)
 [![Architecture](https://img.shields.io/badge/arch-Hybrid%20SSM%20%2B%20GQA%20Attention-blueviolet.svg?style=flat-square)](#-hybrid-ssm--attention-architecture)
-[![Memory](https://img.shields.io/badge/memory-%7E42--260%20MB%20RAM-purple.svg?style=flat-square)](#-memory-footprint--efficiency)
-[![Speed](https://img.shields.io/badge/throughput-46.6%20GFLOPS%20CPU-success.svg?style=flat-square)](#-performance--benchmarks)
 
-**Mivi-v4** is a high-performance, ultra-low-memory, agent-native Small Language Model (SLM) inference engine and server written from scratch in **100% pure Rust** with **zero C/C++ dependencies**. 
+**Mivi-v4** is a CPU-first, low-memory, agent-native Small Language Model (SLM) inference engine and server implemented primarily in Rust. Unix filesystem hardening uses the platform libc interface; no C++ runtime is required.
 
-It runs **Hybrid SSM + GQA Attention** architectures (such as Liquid AI's **LFM2.5-350M**) directly on CPU with native SIMD acceleration (AVX2/FMA/NEON), preallocated zero-heap execution, built-in sandboxed tool orchestration, and a drop-in OpenAI-compatible streaming HTTP server.
+It runs **Hybrid SSM + GQA Attention** architectures (such as Liquid AI's **LFM2.5** family) directly on CPU with native SIMD acceleration (AVX2/FMA/NEON), preallocated inference buffers, built-in sandboxed tool orchestration, and a drop-in OpenAI-compatible streaming HTTP server.
 
 ---
 
@@ -39,9 +36,9 @@ While engines like `llama.cpp` focus primarily on C++ execution for standard Tra
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                    Intent Classifier Router & Context VM                        │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│            Hybrid LFM2.5 Inference Core (10 SSM ShortConv + 6 GQA Attn)         │
+│                     Hybrid SSM + GQA Inference Core                           │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│  Selective KV Cache (62.5% Savings)  │  Pure Rust SIMD (AVX2/NEON) Quant Kernels│
+│  Selective KV Cache for Attention    │  Pure Rust SIMD (AVX2/NEON) Quant Kernels│
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,12 +46,12 @@ While engines like `llama.cpp` focus primarily on C++ execution for standard Tra
 
 | Dimension | ⚡ **Mivi-v4** | 🦙 **llama.cpp** | 🦙 **Ollama** |
 |---|---|---|---|
-| **Implementation Language** | **100% Pure Rust** (Zero C/C++ dependencies) | C / C++ | Go (wrapper daemon around llama.cpp) |
+| **Implementation Language** | **Rust** (with small Unix libc FFI for filesystem hardening) | C / C++ | Go (wrapper daemon around llama.cpp) |
 | **Architecture Focus** | **Hybrid SLMs** (Gated ShortConv SSM + GQA Attention) | Pure Transformers (Llama, Mistral, Gemma) | Same as llama.cpp |
 | **Agent & Tools Support** | **Native Built-in** (ReAct agent loop, Pratt parser calc, sandboxed FS) | ❌ None (Text completion only) | ❌ Needs external framework (LangChain, AutoGen) |
-| **KV Cache Footprint** | **Selective Allocation** (Only 6 of 16 layers allocate KV memory; **62.5% savings**) | Allocates full KV cache for all layers | Allocates full KV cache for all layers |
-| **RAM Footprint (350M)** | **~42 MB – 260 MB RSS** | ~500 MB – 1.5 GB | ~1 GB – 3 GB+ (Go runtime + subprocesses) |
-| **Memory Safety** | **100% Rust Safe Memory** (No segfaults, zero UB) | Manual C/C++ pointer management | Go GC + C++ backend |
+| **KV Cache Footprint** | **Selective Allocation** for attention layers | Implementation-dependent | Implementation-dependent |
+| **RAM Footprint** | Model, context, KV precision, and OS paging dependent | Model/configuration dependent | Model/configuration dependent |
+| **Memory Safety** | Rust ownership with isolated low-level SIMD/mmap code | Manual C/C++ pointer management | Go runtime plus native backend |
 | **Single Binary** | **Yes** (Single standalone executable `mivi`) | Multiple CLI binaries & shared libraries | Daemon binary + bundled llama.cpp dynamic libraries |
 | **HTTP Server & SSE** | **Built-in Axum server** with dynamic port hunting & watchdog | `llama-server` | Built-in Go API daemon |
 
@@ -64,20 +61,20 @@ While engines like `llama.cpp` focus primarily on C++ execution for standard Tra
 
 ### 1. ⚡ Hybrid SSM + GQA Attention Architecture
 Standard LLMs use pure self-attention with quadratic $O(N^2)$ memory and compute costs. Mivi is optimized for hybrid architectures:
-- **10 Gated ShortConv SSM Layers**: 1D causal depthwise convolution with linear $O(N)$ time complexity and constant $O(1)$ state memory.
-- **6 Grouped-Query Attention (GQA) Layers**: High-precision associative recall with FlashDecoding online softmax.
-- **Selective KV Cache**: KV cache is dynamically mapped *only* to attention layers. Non-attention SSM layers consume zero KV memory, reducing RAM requirements by **62.5%**.
+- **Gated ShortConv SSM Layers**: 1D causal depthwise convolution with linear $O(N)$ time complexity and bounded recurrent state.
+- **Grouped-Query Attention (GQA) Layers**: High-precision associative recall with FlashDecoding online softmax.
+- **Selective KV Cache**: KV cache is dynamically mapped *only* to attention layers; non-attention SSM layers do not allocate KV entries.
 
 ### 2. 🛡️ Native Sandboxed Agent & Tool Engine
 Mivi eliminates the need for heavyweight Python agent runtimes:
 - **Autonomous ReAct Agent Loop**: State machine with observation, reasoning, action, and stagnation guards.
 - **Pratt Parser Calculator**: Full recursive descent math engine evaluating mathematical expressions safely with zero `eval()` vulnerabilities.
-- **Sandboxed Filesystem (`read_file`, `write_file`, `list_dir`)**: Enforces path canonicalization and directory prefix checks to prevent `../` directory traversal attacks.
+- **Sandboxed Filesystem (`read_file`, `write_file`, `list_dir`)**: Enforces relative-path checks and Unix descriptor-relative no-follow access to prevent traversal and symlink redirection.
 
-### 3. 🌐 OpenAI-Compatible Server with Enterprise Reliability
+### 3. 🌐 OpenAI-Compatible Local Server
 - **Drop-in Replacement**: Supports `/v1/models`, `/v1/chat/completions` (JSON & SSE streaming), and `/v1/mivi/agent`.
 - **Dynamic Port Hunting**: Automatically hunts for available adjacent ports if the requested port is in use.
-- **Resource Safety Watchdog**: Monitors process RSS memory every 500ms; issues warnings and performs graceful shutdown if limits are exceeded.
+- **Resource Safety Watchdog**: Monitors process RSS memory and can perform a graceful shutdown when configured limits are exceeded.
 - **Hono-Style Minimalist Logging**: Clean terminal logs reporting method, path, status, latency, and tokens/sec.
 
 ### 4. 💬 Modern Interactive Terminal Chat REPL
@@ -87,9 +84,9 @@ Mivi eliminates the need for heavyweight Python agent runtimes:
 - **Slash Commands**: `/help`, `/clear`, `/history`, `/temp`, `/top_p`, `/rep`, `/thinking`, `/exit`.
 
 ### 5. ⚡ LMCache-Inspired Prefix Caching & Disk Persistence
-- **$O(1)$ Instant Time-To-First-Token (TTFT)**: Input prompts are chunked into 64-token blocks and hashed with 64-bit rolling FNV-1a. Shared system prompts, tool schemas, and multi-turn prefixes hit the in-memory cache and skip forward passes.
+- **Prefix reuse on cache hits**: Input prompts are chunked into 64-token blocks and hashed with 64-bit rolling FNV-1a. Shared system prompts, tool schemas, and multi-turn prefixes can skip repeated forward passes when the cached state is compatible.
 - **Hybrid State Snapshotting**: Automatically snapshots both the 6 Attention KV layers and 10 Gated ShortConv SSM convolution states (`conv_states`).
-- **On-Disk Persistence (`.mivi/cache/*.kvc`)**: Saves prefilled prompt states to disk, allowing instant zero-prefill startup across process restarts.
+- **On-Disk Persistence (`.mivi/cache/*.kvc`)**: Saves prefilled prompt states to disk for possible reuse across compatible process restarts.
 
 ---
 
@@ -99,7 +96,7 @@ The codebase is organized into 12 cleanly isolated workspace crates:
 
 | Crate | Directory | Description |
 |---|---|---|
-| [`mivi-core`](crates/mivi-core) | `crates/mivi-core` | Zero-heap `RunState` arena, AVX2/NEON SIMD dispatch, RMSNorm, Softmax, RoPE cache, and brand constants. |
+| [`mivi-core`](crates/mivi-core) | `crates/mivi-core` | Preallocated `RunState` arena, AVX2/NEON SIMD dispatch, RMSNorm, Softmax, RoPE cache, and brand constants. |
 | [`mivi-quant`](crates/mivi-quant) | `crates/mivi-quant` | Quantization kernels for **Q4_K_M**, **Q6_K**, **Q8_0**, and **F16** with parallel matrix-vector multipliers. |
 | [`mivi-kv`](crates/mivi-kv) | `crates/mivi-kv` | Selective-layer KV cache, 64-token chunk prefix caching (`PrefixCache`), and `.kvc` on-disk state persistence. |
 | [`mivi-model`](crates/mivi-model) | `crates/mivi-model` | GGUF v3 file parser, LFM2.5 forward pass, FlashDecoding attention, Gated ShortConv SSM, and Min-P/Top-P sampler. |
@@ -116,28 +113,16 @@ The codebase is organized into 12 cleanly isolated workspace crates:
 
 ## 📊 Performance & Benchmarks
 
-Benchmarked on x86_64 CPU (16 threads, AVX2 + FMA):
+Run `just bench` to measure the local quantized matvec kernels. Supplying a model path also
+enables the runner's model-generation and prefix-cache measurements. Throughput and latency
+depend on the CPU, SIMD features, compiler profile, model, context length, and KV precision;
+the project does not treat a single machine's numbers as a universal performance guarantee.
 
-| Kernel Operation | Quantization | Dimensions | Time per Op | Compute Throughput |
-|---|---|---|---|---|
-| **Matvec (Q8_0)** | 8-bit | 1024 × 1024 | **0.045 ms** | **46.62 GFLOPS** |
-| **Matvec (Q4_K_M)** | 4-bit | 1024 × 1024 | **0.230 ms** | **9.10 GFLOPS** |
-| **RMSNorm** | 32-bit | Dim = 1024 | **< 0.001 ms** | Zero Allocation |
-| **Token Generation** | Q4_K_M | LFM2.5-350M | **~43 ms / token** | **~23.0 tok/s** (CPU) |
+### 💾 Memory Footprint
 
-### 💾 Memory Footprint (LFM2.5-350M Q4_K_M)
-
-```
-Component                       RAM Allocation       Notes
-──────────────────────────────  ──────────────       ─────────────────────────
-Q4_K_M Model Weights            ~190–210 MB          Memory-mapped (demand paged)
-RunState Activation Buffers     ~30–45 MB            Fixed preallocation (0 heap churn)
-Selective KV Cache (4K Context) ~8–15 MB             Allocated only for 6 attention layers
-Tokenizer Vocab & BPE Merges    ~15–20 MB            65K token lookup table
-Axum HTTP Server & Tool Sandbox ~10–25 MB            Tokio async runtime
-──────────────────────────────  ──────────────
-Total Peak RAM RSS              ~260 MB              < 300 MB (Full Engine + Model + Server!)
-```
+Runtime RSS depends on the loaded GGUF, context size, KV precision, adapters, and OS page
+residency. Use the server's runtime telemetry and `--max-memory`/`--warn-memory` limits when
+sizing a deployment.
 
 ---
 
@@ -145,7 +130,7 @@ Total Peak RAM RSS              ~260 MB              < 300 MB (Full Engine + Mod
 
 ### 1. Prerequisites
 
-- **Rust**: 1.75+ (2021 edition)
+- **Rust**: current stable toolchain (2021 edition)
 - **Just**: (Optional task runner) `cargo install just`
 
 ### 2. Build
@@ -185,11 +170,11 @@ Start an interactive chat REPL session:
 
 ```bash
 just chat
-# Or: cargo run --release -- chat --model models/mivi-v4-q4_k_m.gguf
+# Or: cargo run --release -- chat --model models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf
 ```
 
 ```text
-  ⚡ Mivi Chat v0.1.2 (LFM2.5-350M • 4K ctx • 42.7 MB RAM)
+  ⚡ Mivi Chat v<version> (<loaded model> • <configured context> ctx)
   Type your prompt, or /help for interactive commands, Ctrl+C to cancel.
   ─────────────────────────────────────────────────────────────────
   user › Write a python function to check if a number is prime
@@ -202,17 +187,22 @@ def is_prime(n):
             return False
     return True
 ```
-  ⏱ 1.48s • 47 tokens • 31.7 tok/s • RAM 260.1 MB
+  ⏱ <duration> • <tokens> tokens • <tok/s> • RAM <RSS> MB
 ```
+
+The chat output above is illustrative; model output and measurements vary by local hardware and configuration.
 
 ### 5. Launch the OpenAI-Compatible HTTP Server (`serve`)
 
 ```bash
 just serve
 # Or: cargo run --release -- serve --model models/mivi-v4-q4_k_m.gguf --port 8080 --workspace .
-# Public binds (for example --host 0.0.0.0) require MIVI_API_KEY.
+# Public binds (for example --host 0.0.0.0) require MIVI_API_KEY; with a key configured,
+# all API/model/control routes require authentication. Health and the embedded UI remain public.
 # Optional browser access: repeat --cors-origin for each exact allowed origin.
 # Example: --cors-origin http://localhost:3000
+# Tool handlers are bounded to 4 concurrent blocking executions by default;
+# tune with --max-concurrent-tool-executions when serving multiple agent requests.
 ```
 
 ```text
@@ -221,13 +211,14 @@ just serve
   │   ⚡ Mivi Agent Engine                                   │
   │   Lightweight, Fast & Sandboxed Local Agent Server       │
   │                                                          │
-  │   • Model:      mivi                                     │
-  │   • Context:    128K tokens                              │
+  │   • Model:      <loaded model or mivi alias>              │
+  │   • Context:    16K default, 64K maximum                  │
   │   • Local API:  http://127.0.0.1:8080/v1                 │
   │                                                          │
   │   OpenAI-compatible endpoints:                           │
   │   POST /v1/chat/completions (SSE streaming)              │
   │   POST /v1/mivi/agent       (Autonomous loop)            │
+  │   GET  /metrics             (cumulative counters)         │
   │                                                          │
   ╰──────────────────────────────────────────────────────────╯
 ```
@@ -243,7 +234,12 @@ JSON streaming, and forced `tool_choice: "required"` are currently rejected expl
 `/v1/messages` supports validated sampling, `stop_sequences`, and structured streaming tool-use blocks.
 
 Agent context documents must be relative to the configured `--workspace` and are size-bounded before being
-added to the prompt.
+added to the prompt. On Unix, reads use descriptor-relative no-follow traversal to prevent symlink swaps.
+Timed-out built-in tool handlers receive a cooperative cancellation signal; custom legacy handlers may
+continue until they return, subject to the broker's concurrency limit.
+
+`GET /metrics` returns process-local JSON counters for accepted/rejected inference requests, generation
+latency, token totals, inference errors, and timed-out tools. Counters reset when the process restarts.
 
 ---
 
@@ -333,14 +329,9 @@ just test
 # Or: cargo test --workspace --jobs 2
 ```
 
-```text
-running 84 tests across workspace:
-  - 17 integration tests (Server, Agent, VM, Tokenizer, Prefix Cache, Disk KVC) ... OK
-  - 1 PyTorch Oracle Golden Ground-Truth validation test .......................... OK
-  - 66 unit tests (SIMD, Math, Quant, KV, Router, Tools, Grammar, PLD) ............ OK
-
-test result: ok. 84 passed; 0 failed; finished in 100% success!
-```
+While iterating, prefer a focused package/test command such as
+`cargo test -p mivi-server --lib --jobs 2 -- --test-threads=2`. Test counts change as coverage
+evolves, so treat the command result—not a fixed example count—as the source of truth.
 
 ---
 
@@ -350,7 +341,7 @@ test result: ok. 84 passed; 0 failed; finished in 100% success!
 |---|---|
 | `just build` | Compile workspace in debug mode (max 2 jobs) |
 | `just build-release` | Compile optimized release binary |
-| `just test` | Run complete 84-test suite |
+| `just test` | Run the workspace test suite with two Cargo jobs and two test threads |
 | `just clippy` | Run Clippy linter with `-D warnings` |
 | `just fmt-check` | Verify code formatting with `rustfmt` |
 | `just verify` | Run full quality gate (`fmt-check` + `clippy` + `test`) |

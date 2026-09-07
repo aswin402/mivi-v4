@@ -97,11 +97,10 @@ pub fn print_completion_response_box(
     if let Some(reply) = assistant_reply {
         if !reply.trim().is_empty() {
             println!(
-                "    {}└─{} {}{}{} › \"{}\"",
+                "    {}└─{} {}mivi{} › \"{}\"",
                 ansi::DIM,
                 ansi::RESET,
                 ansi::BOLD_GREEN,
-                "mivi",
                 ansi::RESET,
                 summarize_prompt(reply, 180)
             );
@@ -172,12 +171,11 @@ pub fn print_interaction_box(
                 "┌─"
             };
             println!(
-                "    {}{}{} {}{}{} › \"{}\"",
+                "    {}{}{} {}mivi{} › \"{}\"",
                 ansi::DIM,
                 prefix,
                 ansi::RESET,
                 ansi::BOLD_GREEN,
-                "mivi",
                 ansi::RESET,
                 summarize_prompt(reply, 180)
             );
@@ -213,12 +211,12 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
             _ => format!("{}{}{}", ansi::WHITE, method, ansi::RESET),
         };
         println!(
-            "  {} {} {:<24} {}{}{}",
-            format!("{}→{}", ansi::BOLD_CYAN, ansi::RESET),
+            "  {}→{} {} {:<24} {}[inference started]{}",
+            ansi::BOLD_CYAN,
+            ansi::RESET,
             method_str,
             path,
             ansi::DIM,
-            "[inference started]",
             ansi::RESET
         );
         let _ = std::io::stdout().flush();

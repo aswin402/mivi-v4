@@ -6,9 +6,7 @@ use tracing_subscriber::FmtSubscriber;
 async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(filter)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_env_filter(filter).finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     // Initialize Rayon thread pool (respects MIVI_THREADS/RAYON_NUM_THREADS or defaults to at most 2).
@@ -36,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
             model,
             max_memory,
             warn_memory,
+            max_concurrent_requests,
+            max_concurrent_tool_executions,
             no_safelock,
             kv_precision,
             ctx_size,
@@ -48,6 +48,8 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 max_memory,
                 warn_memory,
+                max_concurrent_requests,
+                max_concurrent_tool_executions,
                 no_safelock,
                 kv_precision,
                 ctx_size,

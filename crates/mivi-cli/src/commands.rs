@@ -39,6 +39,15 @@ pub enum Commands {
         /// Warning threshold RSS memory in MB (default: 2400 MB)
         #[arg(long, default_value = "2400")]
         warn_memory: f32,
+        /// Maximum simultaneous inference requests (default: 1)
+        #[arg(long, default_value = "1")]
+        max_concurrent_requests: usize,
+        /// Maximum simultaneous blocking tool executions (default: 4)
+        #[arg(
+            long,
+            default_value_t = mivi_tools::DEFAULT_MAX_CONCURRENT_TOOL_EXECUTIONS
+        )]
+        max_concurrent_tool_executions: usize,
         /// Disable the resource safety watchdog
         #[arg(long)]
         no_safelock: bool,
@@ -121,5 +130,38 @@ pub fn parse_kv_precision(s: Option<&str>) -> Option<mivi_kv::KvPrecision> {
         "tq4" | "turboquant4" | "4bit" => Some(mivi_kv::KvPrecision::TurboQuant4),
         "tq2" | "turboquant2" | "2bit" => Some(mivi_kv::KvPrecision::TurboQuant2),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn serve_tool_concurrency_limit_is_configurable() {
+        let cli = Cli::try_parse_from(["mivi", "serve", "--max-concurrent-tool-executions", "7"])
+            .expect("serve arguments should parse");
+
+        match cli.command {
+            Commands::Serve {
+                max_concurrent_tool_executions,
+                ..
+            } => assert_eq!(max_concurrent_tool_executions, 7),
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_tool_concurrency_limit_defaults_to_four() {
+        let cli = Cli::try_parse_from(["mivi", "serve"]).expect("serve arguments should parse");
+
+        match cli.command {
+            Commands::Serve {
+                max_concurrent_tool_executions,
+                ..
+            } => assert_eq!(max_concurrent_tool_executions, 4),
+            _ => panic!("expected serve command"),
+        }
     }
 }

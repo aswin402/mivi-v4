@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+## [v0.2.27] - 2026-09-07
+
+### Correctness Fixes After v0.2.26 Review
+
+- Fixed a long-output Anthropic streaming deadlock caused by usage encoding waiting behind a full bounded generation buffer.
+- Preserved streaming inference errors through finalization so OpenAI does not claim a normal stop and Anthropic does not claim end_turn after failure.
+- Added configurable inference-slot backpressure (one concurrent request by default) so work cannot accumulate unbounded behind the single engine actor; busy requests receive HTTP 429.
+- Extended API-key middleware to model, status, tools, metrics, and Ollama API routes; only health and the embedded UI remain public when a key is configured.
+- Corrected Anthropic streaming usage to report zero output tokens when generation produces no text.
+- Stopped agent execution of later tool calls after a timeout leaves the previous call's side effects unknown.
+- Added cooperative cancellation signals for cancellable tool handlers and migrated built-in filesystem/calculator handlers to observe timeout cancellation.
+- Bounded concurrent blocking tool handlers so timed-out handlers that already started cannot exhaust the runtime's blocking pool.
+- Exposed the blocking-tool concurrency bound through `ServerConfig` and `mivi serve --max-concurrent-tool-executions` (default 4).
+- Normalized zero-valued server channel and concurrency settings before Tokio channel/semaphore creation, preventing configuration panics.
+- Hardened Unix workspace reads and directory listings with descriptor-relative no-follow access, preventing symlink swaps from redirecting a read after path validation.
+- Routed agent context-document reads through the same bounded descriptor-relative no-follow reader, closing the validation/read race for agent prompts.
+- Replaced fake Ollama model metadata with GGUF-derived file size, parameter count, architecture family, and dominant quantization; unavailable digest values are omitted instead of reported as empty strings.
+- Removed stale fixed benchmark, memory, test-count, and context claims from the README and aligned the HTTP specification with the implemented routes and configuration.
+- Added a lightweight process-local `/metrics` endpoint covering inference admission, slot wait, generation latency, token totals, inference errors, and timed-out tools.
+- Made stop-sequence prefix matching safe for Unicode, preserved sampling penalties at `temperature: 0`, and corrected unseeded RNG progression.
+- Removed the fixed top-p candidate cap by expanding the selection window until the requested nucleus probability is covered.
+- Strengthened JSON primitive validation and added checked KV-cache disk length arithmetic and serialization bounds.
+- Added bounded JSON Schema validation for generated OpenAI and Anthropic tool calls, including declared-tool, type, required-field, enum, array, and additional-property checks.
+
 ## [v0.2.26] - 2026-09-05
 
 ### API Contract Hardening, Generation Controls & Workspace Security

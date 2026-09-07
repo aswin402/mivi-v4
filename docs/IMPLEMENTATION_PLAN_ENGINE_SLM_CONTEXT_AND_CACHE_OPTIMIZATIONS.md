@@ -7,6 +7,9 @@
 - **DOX**: *Hierarchical AGENTS.md Context Scoping* (`agent0ai/dox`)
 - **Headroom MCP**: *High-Performance Context & Prompt Compression Layer in Rust* (`aswin402/headroom-mcp`)
 
+> **Status:** Historical planning document. The performance percentages, cache hit rates, and latency
+> figures below are proposals or estimates, not validated properties of the current codebase.
+
 ---
 
 ## 🎯 Architecture Overview

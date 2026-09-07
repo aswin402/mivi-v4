@@ -54,17 +54,23 @@ mod tests {
             ToolChoice::Disabled
         );
         assert_eq!(
-            parse_tool_choice(Some(&tools), Some(&json!({
-                "type": "function",
-                "function": {"name": "read_file"}
-            })))
+            parse_tool_choice(
+                Some(&tools),
+                Some(&json!({
+                    "type": "function",
+                    "function": {"name": "read_file"}
+                }))
+            )
             .unwrap(),
             ToolChoice::Named("read_file".to_string())
         );
-        assert!(parse_tool_choice(Some(&tools), Some(&json!({
-            "type": "function",
-            "function": {"name": "missing"}
-        })))
+        assert!(parse_tool_choice(
+            Some(&tools),
+            Some(&json!({
+                "type": "function",
+                "function": {"name": "missing"}
+            }))
+        )
         .is_err());
     }
 
@@ -79,8 +85,14 @@ mod tests {
             Some(&json!({"type": "function", "function": {"name": "read_file"}})),
         )
         .unwrap();
-        assert_eq!(filter_tools_for_choice(Some(tools.clone()), &named), Some(vec![tools[0].clone()]));
-        assert_eq!(filter_tools_for_choice(Some(tools), &ToolChoice::Disabled), None);
+        assert_eq!(
+            filter_tools_for_choice(Some(tools.clone()), &named),
+            Some(vec![tools[0].clone()])
+        );
+        assert_eq!(
+            filter_tools_for_choice(Some(tools), &ToolChoice::Disabled),
+            None
+        );
     }
 }
 use serde_json::Value;
@@ -237,7 +249,9 @@ pub fn validate_additional_sampling_parameters(
     }
     if let Some(value) = repetition_penalty {
         if !value.is_finite() || !(0.0..=2.0).contains(&value) || value == 0.0 {
-            return Err("repetition_penalty must be finite, greater than 0, and at most 2".to_string());
+            return Err(
+                "repetition_penalty must be finite, greater than 0, and at most 2".to_string(),
+            );
         }
     }
     Ok(())
@@ -313,6 +327,39 @@ pub fn parse_tool_choice(
     }
 }
 
+/// Validate the structural parts of OpenAI function-tool declarations that this server uses.
+pub fn validate_openai_tool_definitions(tools: Option<&[Value]>) -> Result<(), String> {
+    let Some(tools) = tools else {
+        return Ok(());
+    };
+
+    for (index, tool) in tools.iter().enumerate() {
+        let tool_object = tool
+            .as_object()
+            .ok_or_else(|| format!("tools[{index}] must be an object"))?;
+        if tool_object.get("type").and_then(Value::as_str) != Some("function") {
+            return Err(format!("tools[{index}].type must be 'function'"));
+        }
+        let function = tool_object
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("tools[{index}].function must be an object"))?;
+        function
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| format!("tools[{index}].function.name must be a non-empty string"))?;
+        if let Some(parameters) = function.get("parameters") {
+            if !parameters.is_object() {
+                return Err(format!(
+                    "tools[{index}].function.parameters must be a JSON object"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn filter_tools_for_choice(
     tools: Option<Vec<Value>>,
     choice: &ToolChoice,
@@ -332,5 +379,130 @@ pub fn filter_tools_for_choice(
                 })
                 .collect()
         }),
+    }
+}
+
+/// Validate model-generated calls against the tool definitions sent by an OpenAI client.
+///
+/// Tool calls are model output, so a successful JSON parse is not enough: the tool must be
+/// declared by the caller and its arguments must satisfy that declaration before the response
+/// can expose the call to an executor.
+pub fn validate_tool_calls_against_tools(
+    calls: &[mivi_tools::ToolCall],
+    tools: &[Value],
+) -> Result<(), String> {
+    for call in calls {
+        if !call.arguments.is_object() {
+            return Err(format!(
+                "Arguments for tool '{}' must be a JSON object",
+                call.name
+            ));
+        }
+        let tool = tools.iter().find(|tool| {
+            tool.get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                == Some(call.name.as_str())
+        });
+        let Some(tool) = tool else {
+            return Err(format!(
+                "Model generated a call to undeclared tool '{}'",
+                call.name
+            ));
+        };
+        let empty_schema = Value::Object(serde_json::Map::new());
+        let schema = tool
+            .get("function")
+            .and_then(Value::as_object)
+            .and_then(|function| function.get("parameters"))
+            .unwrap_or(&empty_schema);
+        mivi_tools::validate_tool_arguments(schema, &call.arguments)
+            .map_err(|error| format!("Invalid arguments for tool '{}': {error}", call.name))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tool_validation_tests {
+    use super::{validate_openai_tool_definitions, validate_tool_calls_against_tools};
+    use mivi_tools::ToolCall;
+    use serde_json::json;
+
+    #[test]
+    fn rejects_calls_to_undeclared_tools() {
+        let call = ToolCall::new("missing", json!({}));
+        let error = validate_tool_calls_against_tools(
+            &[call],
+            &[json!({"type": "function", "function": {"name": "known"}})],
+        )
+        .unwrap_err();
+        assert!(error.contains("undeclared"));
+    }
+
+    #[test]
+    fn rejects_arguments_that_do_not_match_the_declared_schema() {
+        let call = ToolCall::new("read_file", json!({"path": 42}));
+        let error = validate_tool_calls_against_tools(
+            &[call],
+            &[json!({
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }
+                }
+            })],
+        )
+        .unwrap_err();
+        assert!(error.contains("read_file"));
+        assert!(error.contains("string"));
+    }
+
+    #[test]
+    fn rejects_non_object_tool_arguments() {
+        let call = ToolCall::new("read_file", json!("README.md"));
+        let error = validate_tool_calls_against_tools(
+            &[call],
+            &[json!({
+                "type": "function",
+                "function": {"name": "read_file", "parameters": {}}
+            })],
+        )
+        .unwrap_err();
+        assert!(error.contains("JSON object"));
+    }
+
+    #[test]
+    fn rejects_malformed_openai_tool_definitions() {
+        let error = validate_openai_tool_definitions(Some(&[json!({
+            "type": "function",
+            "function": {"name": "read_file", "parameters": []}
+        })]))
+        .unwrap_err();
+        assert!(error.contains("parameters"));
+    }
+
+    #[test]
+    fn accepts_arguments_matching_the_declared_schema() {
+        let call = ToolCall::new("read_file", json!({"path": "README.md"}));
+        assert!(validate_tool_calls_against_tools(
+            &[call],
+            &[json!({
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }
+                }
+            })],
+        )
+        .is_ok());
     }
 }

@@ -247,6 +247,8 @@ pub enum AppError {
     InferenceError(String),
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+    #[error("Server is busy: {0}")]
+    TooManyRequests(String),
     #[error("Internal server error: {0}")]
     Internal(String),
 }
@@ -276,6 +278,12 @@ impl axum::response::IntoResponse for AppError {
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "api_error",
                 Some("service_unavailable"),
+                m,
+            ),
+            AppError::TooManyRequests(m) => (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "api_error",
+                Some("server_busy"),
                 m,
             ),
             AppError::Internal(m) => (

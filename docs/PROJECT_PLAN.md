@@ -2,12 +2,15 @@
 
 > A purpose-built Small Language Model + Mixture-of-Experts system with a Rust inference engine, designed to power AI agents on consumer hardware with <1GB RAM.
 
+> **Status:** Planning document. Resource, latency, and quality figures below are design targets or
+> estimates unless explicitly labeled as measured; they are not current deployment guarantees.
+
 ---
 
 ## 🎯 Project Vision
 
 Build a **complete AI agent brain** that:
-- Runs on any laptop without a GPU, under 1GB RAM
+- Targets laptop-class CPU deployments without a GPU, with memory usage measured per model/configuration
 - Understands agent context, memory, tools, and skills natively
 - Uses the internet for knowledge (like a real engineer) instead of memorizing facts
 - Exposes a single-binary HTTP API that any agent framework can consume

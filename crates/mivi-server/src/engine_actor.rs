@@ -31,6 +31,87 @@ pub struct EngineHandle {
     tx: mpsc::Sender<EngineCommand>,
     has_model: bool,
     stream_buffer_capacity: usize,
+    model_metadata: Option<EngineModelMetadata>,
+}
+
+/// Metadata exposed by compatibility APIs for a loaded GGUF model.
+#[derive(Debug, Clone, Default)]
+pub struct EngineModelMetadata {
+    pub size_bytes: u64,
+    pub parameter_count: Option<u64>,
+    pub family: Option<String>,
+    pub quantization_level: Option<String>,
+}
+
+impl EngineModelMetadata {
+    fn from_model(model: &mivi_model::Model) -> Self {
+        let parameter_count = model
+            .gguf
+            .tensors
+            .values()
+            .filter_map(|tensor| tensor_element_count(&tensor.dims))
+            .try_fold(0_u64, |total, count| total.checked_add(count));
+
+        let mut quantized_elements = Vec::<(String, u64)>::new();
+        for tensor in model.gguf.tensors.values() {
+            let Some(element_count) = tensor_element_count(&tensor.dims) else {
+                continue;
+            };
+            let label = format!("{:?}", tensor.ggml_type);
+            if let Some((_, total)) = quantized_elements
+                .iter_mut()
+                .find(|(existing, _)| existing == &label)
+            {
+                if let Some(updated) = total.checked_add(element_count) {
+                    *total = updated;
+                }
+            } else {
+                quantized_elements.push((label, element_count));
+            }
+        }
+
+        let family = model
+            .gguf
+            .metadata
+            .get("general.architecture")
+            .and_then(mivi_model::GgufValue::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let has_ssm = model
+                    .config
+                    .block_types
+                    .contains(&mivi_model::BlockType::SSM);
+                let has_attention = model
+                    .config
+                    .block_types
+                    .contains(&mivi_model::BlockType::Attention);
+                match (has_ssm, has_attention) {
+                    (true, true) => Some("hybrid".to_string()),
+                    (true, false) => Some("ssm".to_string()),
+                    (false, true) => Some("attention".to_string()),
+                    (false, false) => None,
+                }
+            });
+
+        let quantization_level = quantized_elements
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(label, _)| label);
+
+        Self {
+            size_bytes: model.gguf.mmap.len() as u64,
+            parameter_count,
+            family,
+            quantization_level,
+        }
+    }
+}
+
+fn tensor_element_count(dims: &[usize]) -> Option<u64> {
+    dims.iter().try_fold(1_u64, |total, dimension| {
+        total.checked_mul(u64::try_from(*dimension).ok()?)
+    })
 }
 
 pub const DEFAULT_STREAM_BUFFER_CAPACITY: usize = 64;
@@ -44,11 +125,7 @@ pub const ERR_NO_MODEL: &str = "No model is loaded";
 
 impl EngineHandle {
     pub fn new(tx: mpsc::Sender<EngineCommand>, has_model: bool) -> Self {
-        Self {
-            tx,
-            has_model,
-            stream_buffer_capacity: DEFAULT_STREAM_BUFFER_CAPACITY,
-        }
+        Self::with_capacity_and_metadata(tx, has_model, DEFAULT_STREAM_BUFFER_CAPACITY, None)
     }
 
     pub fn with_capacity(
@@ -56,16 +133,31 @@ impl EngineHandle {
         has_model: bool,
         stream_buffer_capacity: usize,
     ) -> Self {
+        Self::with_capacity_and_metadata(tx, has_model, stream_buffer_capacity, None)
+    }
+
+    fn with_capacity_and_metadata(
+        tx: mpsc::Sender<EngineCommand>,
+        has_model: bool,
+        stream_buffer_capacity: usize,
+        model_metadata: Option<EngineModelMetadata>,
+    ) -> Self {
         Self {
             tx,
             has_model,
-            stream_buffer_capacity,
+            stream_buffer_capacity: stream_buffer_capacity.max(1),
+            model_metadata,
         }
     }
 
     #[inline]
     pub fn has_model(&self) -> bool {
         self.has_model
+    }
+
+    #[inline]
+    pub fn model_metadata(&self) -> Option<&EngineModelMetadata> {
+        self.model_metadata.as_ref()
     }
 
     #[inline]
@@ -96,7 +188,8 @@ impl EngineHandle {
             top_p,
             ..GenerationOptions::default()
         };
-        self.generate_with_options(prompt, max_tokens, options).await
+        self.generate_with_options(prompt, max_tokens, options)
+            .await
     }
 
     pub async fn generate_with_options(
@@ -213,24 +306,28 @@ impl EngineActor {
         config: &ServerConfig,
         mock_mode: bool,
     ) -> std::io::Result<EngineHandle> {
-        let (tx, rx) = mpsc::channel(config.channel_capacity);
+        let channel_capacity = config.channel_capacity.max(1);
+        let (tx, rx) = mpsc::channel(channel_capacity);
         let has_model = model.is_some() || mock_mode;
-        let stream_buffer_capacity = config.channel_capacity;
+        let stream_buffer_capacity = channel_capacity;
+        let model_metadata = model.as_ref().map(EngineModelMetadata::from_model);
 
         std::thread::Builder::new()
             .name(ENGINE_ACTOR_THREAD_NAME.to_string())
             .spawn(move || {
                 let mut rx = rx;
                 while let Some(cmd) = rx.blocking_recv() {
-                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        match cmd {
+                    let res =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
                             EngineCommand::Generate {
                                 prompt,
                                 max_tokens,
                                 options,
                                 responder,
                             } => {
-                                handle_generate(&mut model, mock_mode, prompt, max_tokens, options, responder);
+                                handle_generate(
+                                    &mut model, mock_mode, prompt, max_tokens, options, responder,
+                                );
                             }
                             EngineCommand::GenerateStream {
                                 prompt,
@@ -238,13 +335,14 @@ impl EngineActor {
                                 options,
                                 responder,
                             } => {
-                                handle_generate_stream(&mut model, mock_mode, prompt, max_tokens, options, responder);
+                                handle_generate_stream(
+                                    &mut model, mock_mode, prompt, max_tokens, options, responder,
+                                );
                             }
                             EngineCommand::Encode { text, responder } => {
                                 handle_encode(&model, text, responder);
                             }
-                        }
-                    }));
+                        }));
                     if let Err(panic_err) = res {
                         tracing::error!(
                             "Engine actor caught panic during command execution: {:?}",
@@ -254,10 +352,11 @@ impl EngineActor {
                 }
             })?;
 
-        Ok(EngineHandle::with_capacity(
+        Ok(EngineHandle::with_capacity_and_metadata(
             tx,
             has_model,
             stream_buffer_capacity,
+            model_metadata,
         ))
     }
 
@@ -280,7 +379,7 @@ fn handle_generate(
     responder: oneshot::Sender<std::result::Result<(String, usize, usize), String>>,
 ) {
     if let Some(ref mut m) = model {
-        let checkpoint = SamplingCheckpoint::capture(m);
+        let checkpoint = SamplingCheckpoint::capture(m, options.seed);
         apply_generation_options(m, &options);
 
         let p_tok = m.tokenizer.encode(&prompt).len();
@@ -312,11 +411,7 @@ fn handle_generate(
         } else {
             ENGINE_READY_MSG.to_string()
         };
-        let _ = responder.send(Ok((
-            output,
-            p_tok,
-            MOCK_COMPLETION_TOKENS,
-        )));
+        let _ = responder.send(Ok((output, p_tok, MOCK_COMPLETION_TOKENS)));
     } else {
         let _ = responder.send(Err(ERR_NO_MODEL.to_string()));
     }
@@ -331,7 +426,7 @@ fn handle_generate_stream(
     responder: mpsc::Sender<std::result::Result<String, String>>,
 ) {
     if let Some(ref mut m) = model {
-        let checkpoint = SamplingCheckpoint::capture(m);
+        let checkpoint = SamplingCheckpoint::capture(m, options.seed);
         apply_generation_options(m, &options);
 
         let res = if options.response_mode == ResponseMode::JsonObject {
@@ -363,19 +458,27 @@ fn handle_generate_stream(
 struct SamplingCheckpoint {
     config: mivi_model::GenerationConfig,
     rng_state: u64,
+    restore_rng: bool,
 }
 
 impl SamplingCheckpoint {
-    fn capture(model: &mivi_model::Model) -> Self {
+    fn capture(model: &mivi_model::Model, request_seed: Option<u64>) -> Self {
         Self {
             config: model.sampler.config.clone(),
             rng_state: model.sampler.rng_state(),
+            restore_rng: Self::should_restore_rng(request_seed),
         }
+    }
+
+    fn should_restore_rng(request_seed: Option<u64>) -> bool {
+        request_seed.is_some()
     }
 
     fn restore(self, model: &mut mivi_model::Model) {
         model.sampler.config = self.config;
-        model.sampler.restore_rng_state(self.rng_state);
+        if self.restore_rng {
+            model.sampler.restore_rng_state(self.rng_state);
+        }
     }
 }
 
@@ -444,5 +547,27 @@ mod tests {
         );
 
         assert!(rx.blocking_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn sampling_checkpoint_only_restores_rng_for_seeded_requests() {
+        assert!(!SamplingCheckpoint::should_restore_rng(None));
+        assert!(SamplingCheckpoint::should_restore_rng(Some(7)));
+    }
+
+    #[test]
+    fn tensor_element_count_is_checked() {
+        assert_eq!(tensor_element_count(&[]), Some(1));
+        assert_eq!(tensor_element_count(&[2, 3, 4]), Some(24));
+        assert_eq!(tensor_element_count(&[usize::MAX, 2]), None);
+    }
+
+    #[test]
+    fn zero_channel_capacity_is_clamped_before_channel_creation() {
+        let mut config = ServerConfig::default();
+        config.channel_capacity = 0;
+
+        let engine = EngineActor::spawn_with_config(None, &config);
+        assert_eq!(engine.stream_buffer_capacity, 1);
     }
 }

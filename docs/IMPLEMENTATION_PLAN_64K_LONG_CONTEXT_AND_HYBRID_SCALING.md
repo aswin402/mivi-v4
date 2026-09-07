@@ -4,6 +4,9 @@
 **Target Engine:** `Mivi-v4` (Pure-Rust Hybrid SSM + Attention Inference Engine & Agent Platform)  
 **Goal:** Scale Mivi's context window from 4,096 tokens to **65,536 tokens (64K)** and **131,072 tokens (128K)** while maintaining $< 1\text{ GB}$ total RAM footprint and $< 500\text{ ms}$ TTFT via LMCache on consumer CPUs.
 
+> **Status:** Historical proposal. The context, memory, and TTFT figures are targets or calculations;
+> they are not guarantees for the current implementation, model, or hardware.
+
 ---
 
 ## 1. Executive Summary & Research Foundation

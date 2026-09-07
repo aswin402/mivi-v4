@@ -20,7 +20,7 @@ pub use generation::{GenerationOptions, ResponseMode, ToolChoice};
 pub use grammar::{JsonConstraintState, ResponseFormat};
 pub use logging::{mivi_log_middleware, summarize_prompt, LogMetadata};
 pub use routes::create_router;
-pub use state::AppState;
+pub use state::{AppState, InferenceSlotUnavailable, MetricsSnapshot, ServerMetrics};
 pub use streaming::{
     create_chunk_event, create_content_chunk_event, create_done_chunk_event, create_done_event,
     create_thinking_chunk_event, create_tool_calls_chunk_event, send_sse_sequence,

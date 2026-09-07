@@ -1,7 +1,9 @@
 //! Tool definitions and registration routines for default built-in tools.
 
-use super::calc::handle_calculator;
-use super::fs::{handle_list_dir, handle_read_file, handle_write_file};
+use super::calc::handle_calculator_cancellable;
+use super::fs::{
+    handle_list_dir_cancellable, handle_read_file_cancellable, handle_write_file_cancellable,
+};
 use crate::broker::ToolBroker;
 use crate::schema::{FunctionDefinition, ToolDefinition};
 use std::path::Path;
@@ -18,30 +20,36 @@ pub async fn register_builtin_tools(broker: &ToolBroker, workspace_root: &Path) 
 
     let ws1 = ws_path.clone();
     broker
-        .register(
+        .register_cancellable(
             TOOL_READ_FILE,
-            Arc::new(move |args| handle_read_file(args, &ws1)),
+            Arc::new(move |args, cancellation| {
+                handle_read_file_cancellable(args, &ws1, cancellation)
+            }),
         )
         .await;
 
     let ws2 = ws_path.clone();
     broker
-        .register(
+        .register_cancellable(
             TOOL_WRITE_FILE,
-            Arc::new(move |args| handle_write_file(args, &ws2)),
+            Arc::new(move |args, cancellation| {
+                handle_write_file_cancellable(args, &ws2, cancellation)
+            }),
         )
         .await;
 
     let ws3 = ws_path.clone();
     broker
-        .register(
+        .register_cancellable(
             TOOL_LIST_DIR,
-            Arc::new(move |args| handle_list_dir(args, &ws3)),
+            Arc::new(move |args, cancellation| {
+                handle_list_dir_cancellable(args, &ws3, cancellation)
+            }),
         )
         .await;
 
     broker
-        .register(TOOL_CALCULATOR, Arc::new(handle_calculator))
+        .register_cancellable(TOOL_CALCULATOR, Arc::new(handle_calculator_cancellable))
         .await;
 }
 

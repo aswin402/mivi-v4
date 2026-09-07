@@ -1,6 +1,6 @@
 use crate::state::{AgentPhase, AgentState};
 use crate::xml_utils::{escape_xml_attr, escape_xml_content};
-use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolResult};
+use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolCancellation, ToolResult};
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ pub struct AgentLoop<'a> {
     pub state: AgentState,
     pub broker: &'a ToolBroker,
     pub tool_timeout: Duration,
+    pub timed_out_tools: usize,
     allowed_tools: Option<HashSet<String>>,
     recent_actions: VecDeque<String>,
 }
@@ -25,6 +26,7 @@ impl<'a> AgentLoop<'a> {
             state,
             broker,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
+            timed_out_tools: 0,
             allowed_tools: None,
             recent_actions: VecDeque::with_capacity(STAGNATION_WINDOW_SIZE + 1),
         }
@@ -119,10 +121,19 @@ impl<'a> AgentLoop<'a> {
                     format!("Tool '{}' is not allowed for this agent run", call.name),
                 )
             } else {
-                match tokio::time::timeout(self.tool_timeout, self.broker.execute(call)).await {
+                let cancellation = ToolCancellation::new();
+                match tokio::time::timeout(
+                    self.tool_timeout,
+                    self.broker
+                        .execute_with_cancellation(call, cancellation.clone()),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => {
+                        cancellation.cancel();
                         timed_out = true;
+                        self.timed_out_tools = self.timed_out_tools.saturating_add(1);
                         ToolResult::err(
                             call.name.clone(),
                             format!(
@@ -147,6 +158,11 @@ impl<'a> AgentLoop<'a> {
                 status_attr,
                 escape_xml_content(&body)
             ));
+            if timed_out {
+                // Do not execute later calls after an operation with unknown
+                // side-effect status; the run is already being failed closed.
+                break;
+            }
         }
 
         self.state.phase = if timed_out {
@@ -235,5 +251,97 @@ mod tests {
 
         assert!(result.contains("timed out"));
         assert_eq!(agent.state.phase, AgentPhase::Failed);
+        assert_eq!(agent.timed_out_tools, 1);
+    }
+
+    #[tokio::test]
+    async fn timed_out_tool_stops_remaining_calls() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let broker = ToolBroker::new();
+        broker
+            .register(
+                "slow_tool",
+                Arc::new(|_| {
+                    std::thread::sleep(Duration::from_millis(25));
+                    ToolResult::ok("slow_tool", "finished")
+                }),
+            )
+            .await;
+        let fast_executed = Arc::new(AtomicBool::new(false));
+        let fast_executed_by_tool = Arc::clone(&fast_executed);
+        broker
+            .register(
+                "fast_tool",
+                Arc::new(move |_| {
+                    fast_executed_by_tool.store(true, Ordering::SeqCst);
+                    ToolResult::ok("fast_tool", "finished")
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let mut agent = AgentLoop::new(state, &broker).with_timeout(Duration::from_millis(1));
+        let result = agent
+            .step(
+                r#"<tool_call>{"name":"slow_tool","arguments":{}}</tool_call><tool_call>{"name":"fast_tool","arguments":{}}</tool_call>"#,
+            )
+            .await;
+
+        assert!(result.contains("timed out"));
+        assert_eq!(agent.state.phase, AgentPhase::Failed);
+        assert!(!fast_executed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn timed_out_cancellable_tool_receives_cancellation_signal() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let broker = ToolBroker::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let observed_cancellation = Arc::new(AtomicBool::new(false));
+        let started_by_tool = Arc::clone(&started);
+        let observed_by_tool = Arc::clone(&observed_cancellation);
+        broker
+            .register_cancellable(
+                "cooperative_tool",
+                Arc::new(move |_, cancellation| {
+                    started_by_tool.store(true, Ordering::SeqCst);
+                    while !cancellation.is_cancelled() {
+                        std::thread::yield_now();
+                    }
+                    observed_by_tool.store(true, Ordering::SeqCst);
+                    ToolResult::err("cooperative_tool", "cancelled")
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let mut agent = AgentLoop::new(state, &broker).with_timeout(Duration::from_millis(1));
+        let result = agent
+            .step(r#"<tool_call>{"name":"cooperative_tool","arguments":{}}</tool_call>"#)
+            .await;
+
+        assert!(result.contains("timed out"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellable tool should start");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed_cancellation.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed-out tool should receive cancellation");
     }
 }

@@ -11,7 +11,11 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Anthropic Message input.
@@ -107,7 +111,8 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
             }
             system_text.push_str("Available tools:\n");
             for tool in tools {
-                let schema_str = serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
+                let schema_str =
+                    serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
                 system_text.push_str(&format!(
                     "- {}: {} | parameters: {}\n",
                     tool.name,
@@ -139,15 +144,23 @@ pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
                         }
                         "tool_use" => {
                             let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            let input =
+                                block.get("input").cloned().unwrap_or(serde_json::json!({}));
                             acc.push_str(&format!(
                                 "<tool_call>{{\"name\":\"{}\",\"arguments\":{}}}</tool_call>",
                                 name, input
                             ));
                         }
                         "tool_result" => {
-                            let content_str = block.get("content")
-                                .map(|c| if let Some(s) = c.as_str() { s.to_string() } else { c.to_string() })
+                            let content_str = block
+                                .get("content")
+                                .map(|c| {
+                                    if let Some(s) = c.as_str() {
+                                        s.to_string()
+                                    } else {
+                                        c.to_string()
+                                    }
+                                })
                                 .unwrap_or_default();
                             acc.push_str(&format!("<tool_result>{}</tool_result>", content_str));
                         }
@@ -222,6 +235,20 @@ pub async fn anthropic_messages_handler(
             return anthropic_invalid_request(message);
         }
     }
+    if let Some(tools) = req.tools.as_deref() {
+        for (index, tool) in tools.iter().enumerate() {
+            if tool.name.trim().is_empty() {
+                return anthropic_invalid_request(format!(
+                    "tools[{index}].name must be a non-empty string"
+                ));
+            }
+            if !tool.input_schema.is_object() {
+                return anthropic_invalid_request(format!(
+                    "tools[{index}].input_schema must be a JSON object"
+                ));
+            }
+        }
+    }
 
     let prompt = convert_anthropic_to_chatml(&req);
     let max_tokens = bounded_max_tokens(req.max_tokens, state.config.max_allowed_tokens);
@@ -233,6 +260,18 @@ pub async fn anthropic_messages_handler(
         ..GenerationOptions::default()
     };
     let tools_enabled = req.tools.as_ref().is_some_and(|tools| !tools.is_empty());
+    let tool_definitions = req.tools.clone().unwrap_or_default();
+    let slot_wait_started = Instant::now();
+    let inference_permit = match state.try_acquire_inference_slot() {
+        Ok(permit) => permit,
+        Err(_) => {
+            state.metrics.record_inference_rejected();
+            return anthropic_overloaded_response();
+        }
+    };
+    state
+        .metrics
+        .record_inference_accepted(slot_wait_started.elapsed());
     let model_name = state.model_name.clone();
     let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
@@ -245,7 +284,9 @@ pub async fn anthropic_messages_handler(
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Array(arr) => arr.iter().find_map(|item| {
                 if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    item.get("text").and_then(|t| t.as_str()).map(ToString::to_string)
+                    item.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(ToString::to_string)
                 } else {
                     None
                 }
@@ -260,6 +301,11 @@ pub async fn anthropic_messages_handler(
 
     if req.stream {
         // SSE streaming response
+        // Encode before starting generation so the engine actor cannot block on
+        // the bounded stream buffer before it processes this usage request.
+        let input_tokens = state.engine.encode(&prompt).await.len();
+        let metrics = state.metrics.clone();
+        let generation_started = Instant::now();
         let stream_rx = match state
             .engine
             .generate_stream_with_options(&prompt, max_tokens, options.clone())
@@ -267,6 +313,8 @@ pub async fn anthropic_messages_handler(
         {
             Ok(rx) => rx,
             Err(e) => {
+                metrics.record_generation(generation_started.elapsed());
+                state.metrics.record_inference_error();
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(serde_json::json!({
@@ -280,7 +328,6 @@ pub async fn anthropic_messages_handler(
 
         let mid = message_id.clone();
         let mname = model_name.clone();
-        let input_tokens = state.engine.encode(&prompt).await.len().max(1);
 
         // 1. message_start and content_block_start
         let msg_start_event = Event::default().event("message_start").data(
@@ -311,11 +358,17 @@ pub async fn anthropic_messages_handler(
         // 2. content_block_delta stream with dynamic token counting
         let assembled_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let text_accum = assembled_text.clone();
+        let stream_failed = Arc::new(AtomicBool::new(false));
+        let stream_failed_flag = stream_failed.clone();
 
         let stream = ReceiverStream::new(stream_rx).filter_map(move |chunk_res| {
+            if stream_failed_flag.load(Ordering::Acquire) {
+                return futures::future::ready(None);
+            }
             let chunk = match chunk_res {
                 Ok(chunk) => chunk,
                 Err(error) => {
+                    stream_failed_flag.store(true, Ordering::Release);
                     let data = serde_json::json!({
                         "type": "error",
                         "error": { "type": "api_error", "message": error }
@@ -351,12 +404,27 @@ pub async fn anthropic_messages_handler(
         let token_engine = state.engine.clone();
         let prompt_log_clone = last_user_prompt.clone();
         let text_final = assembled_text.clone();
+        let validation_tools = tool_definitions.clone();
+        let stream_failed_final = stream_failed.clone();
         let post_generation_stream = futures::stream::once(async move {
+            let _inference_permit = inference_permit;
+            if stream_failed_final.load(Ordering::Acquire) {
+                metrics.record_generation(generation_started.elapsed());
+                metrics.record_tokens(input_tokens, 0);
+                metrics.record_inference_error();
+                return vec![Ok::<Event, Infallible>(
+                    Event::default().event("content_block_stop").data(
+                        serde_json::json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                    ),
+                )];
+            }
             let output = text_final
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default();
-            let out_tokens = token_engine.encode(&output).await.len().max(1);
+            let out_tokens = token_engine.encode(&output).await.len();
+            metrics.record_generation(generation_started.elapsed());
+            metrics.record_tokens(input_tokens, out_tokens);
             let thinking = mivi_tools::extract_thinking(&output);
             let clean = if tools_enabled {
                 mivi_tools::strip_tool_calls(&mivi_tools::strip_thinking(&output))
@@ -368,8 +436,27 @@ pub async fn anthropic_messages_handler(
             } else {
                 Vec::new()
             };
-            let has_tools = !parsed_tools.is_empty();
+            let validation_error = if tools_enabled {
+                validate_anthropic_tool_calls(&parsed_tools, &validation_tools).err()
+            } else {
+                None
+            };
+            let has_tools = validation_error.is_none() && !parsed_tools.is_empty();
             let mut events = Vec::new();
+
+            if let Some(error) = validation_error {
+                metrics.record_inference_error();
+                tracing::error!(%error, "Model generated invalid Anthropic tool call");
+                events.push(Ok::<Event, Infallible>(
+                    Event::default().event("error").data(
+                        serde_json::json!({
+                            "type": "error",
+                            "error": { "type": "api_error", "message": error }
+                        })
+                        .to_string(),
+                    ),
+                ));
+            }
 
             if tools_enabled && !clean.is_empty() {
                 let data = serde_json::json!({
@@ -386,7 +473,7 @@ pub async fn anthropic_messages_handler(
                 serde_json::json!({ "type": "content_block_stop", "index": 0 }).to_string(),
             )));
 
-            if tools_enabled {
+            if has_tools {
                 for (index, tool) in parsed_tools.iter().enumerate() {
                     let tool_index = index + 1;
                     let tool_id = format!("toolu_{}", uuid::Uuid::new_v4().simple());
@@ -451,15 +538,10 @@ pub async fn anthropic_messages_handler(
             .to_string(),
         );
 
-        let full_stream = futures::stream::iter(vec![
-            Ok(msg_start_event),
-            Ok(block_start_event),
-        ])
-        .chain(stream)
-        .chain(post_generation_stream.flat_map(futures::stream::iter))
-        .chain(futures::stream::iter(vec![
-            Ok(msg_stop_event),
-        ]));
+        let full_stream = futures::stream::iter(vec![Ok(msg_start_event), Ok(block_start_event)])
+            .chain(stream)
+            .chain(post_generation_stream.flat_map(futures::stream::iter))
+            .chain(futures::stream::iter(vec![Ok(msg_stop_event)]));
 
         let mut resp = Sse::new(full_stream)
             .keep_alive(axum::response::sse::KeepAlive::default())
@@ -473,17 +555,30 @@ pub async fn anthropic_messages_handler(
         resp
     } else {
         // Non-streaming JSON response
-        match state
+        let _inference_permit = inference_permit;
+        let generation_started = Instant::now();
+        let generation_result = state
             .engine
             .generate_with_options(&prompt, max_tokens, options)
-            .await
-        {
+            .await;
+        state
+            .metrics
+            .record_generation(generation_started.elapsed());
+        match generation_result {
             Ok((output_text, prompt_tokens, completion_tokens)) => {
+                state
+                    .metrics
+                    .record_tokens(prompt_tokens, completion_tokens);
                 let parsed_tools = if tools_enabled {
                     mivi_tools::extract_tool_calls(&output_text)
                 } else {
                     Vec::new()
                 };
+                if let Err(error) = validate_anthropic_tool_calls(&parsed_tools, &tool_definitions)
+                {
+                    state.metrics.record_inference_error();
+                    return anthropic_inference_error(error);
+                }
                 let has_tools = !parsed_tools.is_empty();
                 let clean_text = if tools_enabled {
                     mivi_tools::strip_tool_calls(&output_text)
@@ -494,7 +589,9 @@ pub async fn anthropic_messages_handler(
                 let content_blocks = if has_tools {
                     let mut blocks = Vec::new();
                     if !clean_text.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: clean_text.clone() });
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: clean_text.clone(),
+                        });
                     }
                     for tool in &parsed_tools {
                         blocks.push(AnthropicContentBlock::ToolUse {
@@ -530,11 +627,22 @@ pub async fn anthropic_messages_handler(
                 };
 
                 let mut resp_obj = Json(resp).into_response();
-                let reply_preview = if clean_text.is_empty() { output_text.clone() } else { clean_text };
-                let tc_names: Vec<String> = parsed_tools.iter().map(|t| format!("{}(...)", t.name)).collect();
+                let reply_preview = if clean_text.is_empty() {
+                    output_text.clone()
+                } else {
+                    clean_text
+                };
+                let tc_names: Vec<String> = parsed_tools
+                    .iter()
+                    .map(|t| format!("{}(...)", t.name))
+                    .collect();
                 crate::logging::print_completion_response_box(
                     thinking.as_deref(),
-                    if tc_names.is_empty() { None } else { Some(&tc_names) },
+                    if tc_names.is_empty() {
+                        None
+                    } else {
+                        Some(&tc_names)
+                    },
                     Some(&reply_preview),
                 );
                 let log_meta = crate::logging::LogMetadata {
@@ -544,22 +652,77 @@ pub async fn anthropic_messages_handler(
                     tokens_prompt: Some(prompt_tokens),
                     tokens_completion: Some(completion_tokens),
                     finish_reason: stop_reason,
-                    tool_calls: if tc_names.is_empty() { None } else { Some(tc_names) },
+                    tool_calls: if tc_names.is_empty() {
+                        None
+                    } else {
+                        Some(tc_names)
+                    },
                     ..Default::default()
                 };
                 resp_obj.extensions_mut().insert(log_meta);
                 resp_obj
             }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "type": "error",
-                    "error": { "type": "api_error", "message": e }
-                })),
-            )
-                .into_response(),
+            Err(e) => {
+                state.metrics.record_inference_error();
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "type": "error",
+                        "error": { "type": "api_error", "message": e }
+                    })),
+                )
+                    .into_response()
+            }
         }
     }
+}
+
+fn validate_anthropic_tool_calls(
+    calls: &[mivi_tools::ToolCall],
+    tools: &[AnthropicTool],
+) -> Result<(), String> {
+    for call in calls {
+        if !call.arguments.is_object() {
+            return Err(format!(
+                "Arguments for tool '{}' must be a JSON object",
+                call.name
+            ));
+        }
+        let Some(tool) = tools.iter().find(|tool| tool.name == call.name) else {
+            return Err(format!(
+                "Model generated a call to undeclared tool '{}'",
+                call.name
+            ));
+        };
+        mivi_tools::validate_tool_arguments(&tool.input_schema, &call.arguments)
+            .map_err(|error| format!("Invalid arguments for tool '{}': {error}", call.name))?;
+    }
+    Ok(())
+}
+
+fn anthropic_inference_error(message: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": message }
+        })),
+    )
+        .into_response()
+}
+
+fn anthropic_overloaded_response() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "The maximum number of concurrent inference requests is active"
+            }
+        })),
+    )
+        .into_response()
 }
 
 fn anthropic_invalid_request(message: String) -> Response {

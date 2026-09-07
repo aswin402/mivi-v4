@@ -617,7 +617,9 @@ mod tests {
     #[tokio::test]
     async fn test_serve_embedded_ui_contains_critical_elements() {
         let resp = serve_embedded_ui().await;
-        assert!(resp.0.contains("<title>Mivi-v4 — Local AI Agent & Inference Engine</title>"));
+        assert!(resp
+            .0
+            .contains("<title>Mivi-v4 — Local AI Agent & Inference Engine</title>"));
         assert!(resp.0.contains("Mivi Engine Actor"));
         assert!(resp.0.contains("/v1/chat/completions"));
         assert!(resp.0.contains("think-card"));

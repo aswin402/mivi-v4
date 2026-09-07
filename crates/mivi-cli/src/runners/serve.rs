@@ -16,6 +16,8 @@ pub struct ServeArgs {
     pub model: Option<PathBuf>,
     pub max_memory: f32,
     pub warn_memory: f32,
+    pub max_concurrent_requests: usize,
+    pub max_concurrent_tool_executions: usize,
     pub no_safelock: bool,
     pub kv_precision: Option<String>,
     pub ctx_size: Option<usize>,
@@ -53,7 +55,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         anyhow::bail!("Workspace path is not a directory: {:?}", workspace);
     }
 
-    let broker = mivi_tools::ToolBroker::new();
+    let max_concurrent_tool_executions = args.max_concurrent_tool_executions.max(1);
+    let broker =
+        mivi_tools::ToolBroker::with_max_concurrent_executions(max_concurrent_tool_executions);
     mivi_tools::register_builtin_tools(&broker, &workspace).await;
     let tool_count = mivi_tools::get_builtin_tool_definitions().len();
 
@@ -78,8 +82,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     let engine = mivi_server::EngineActor::spawn(loaded_model);
 
-    let mut server_config = mivi_server::ServerConfig::default();
-    server_config.cors_allowed_origins = args.cors_origins;
+    let server_config = mivi_server::ServerConfig {
+        cors_allowed_origins: args.cors_origins,
+        max_concurrent_requests: args.max_concurrent_requests.max(1),
+        max_concurrent_tool_executions,
+        ..mivi_server::ServerConfig::default()
+    };
     let state = Arc::new(
         AppState::with_config(model_name.clone(), broker, engine, api_key, server_config)
             .with_workspace(workspace),

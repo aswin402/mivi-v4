@@ -158,9 +158,13 @@ Total: 34 bytes per 32 elements = 8.5 bits/weight
 
 ### 3.1 RunState Arena (Pre-allocated at startup)
 
+The dimensions below are illustrative defaults; the loaded model configuration determines the
+actual buffer sizes. The arena is intended to reuse buffers during inference, but tokenizer,
+cache, logging, and response paths can still allocate outside the arena.
+
 ```rust
 /// All inference buffers. Allocated once, reused every token.
-/// Zero heap allocations during the decode loop.
+/// The decode path reuses these buffers where possible.
 pub struct RunState {
     // --- Per-token activations (reused each step) ---
     pub x: Box<[f32]>,          // [dim=1024]              4 KB
@@ -393,93 +397,95 @@ Transitions:
 
 ### 6.1 Server Configuration
 
+The following is the implemented server configuration. Host, port, model path, context size,
+memory limits, and KV precision are CLI-runner options rather than fields on `ServerConfig`.
+
 ```rust
 pub struct ServerConfig {
-    pub host: String,           // default: "127.0.0.1"; public binds require MIVI_API_KEY
-    pub port: u16,              // default: 8080
-    pub cors_allowed_origins: Vec<String>, // default: empty; exact browser origins only
-    pub model_path: Option<PathBuf>, // optional; inference is unavailable until a model is loaded
-    pub lora_paths: Vec<PathBuf>, // optional
-    pub max_context: usize,     // default: 2048
-    pub n_threads: usize,       // default: num_cpus
-    pub api_key: Option<String>,// optional auth
+    pub cors_allowed_origins: Vec<String>, // default: empty (CORS disabled)
+    pub max_body_bytes: usize,             // default: 2 MiB
+    pub max_messages: usize,               // default: 128
+    pub max_allowed_tokens: usize,         // default: 8192
+    pub default_max_tokens: usize,         // default: 256
+    pub default_max_agent_steps: usize,    // default: 10
+    pub channel_capacity: usize,           // default: 64
+    pub max_concurrent_requests: usize,    // default: 1
+    pub max_concurrent_tool_executions: usize, // default: 4
+    pub agent_gen_tokens: usize,            // default: 512
+    pub max_port_attempts: u16,             // default: 20
 }
 ```
+
+The CLI binds to loopback by default. Non-loopback binds require a non-empty `MIVI_API_KEY`.
+When configured, the key protects all API, model, status, tools, metrics, and Ollama routes;
+`/health` and the embedded UI remain public.
+Model context defaults to 16,384 tokens and is capped at 65,536 by the model loader.
+Blocking tool execution defaults to four concurrent handlers and can be configured with
+`mivi serve --max-concurrent-tool-executions`; zero is clamped to one.
+Built-in handlers receive a cooperative cancellation signal when an agent tool timeout occurs.
+Custom handlers registered through the legacy API remain supported but cannot observe that signal.
 
 ### 6.2 Endpoints
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/`, `/web` | Embedded web UI |
+| `GET` | `/v1`, `/v1/` | API root and loaded-model status |
 | `POST` | `/v1/chat/completions` | Chat completion (streaming/non-streaming) |
-| `POST` | `/v1/completions` | Raw text completion |
+| `POST` | `/chat/completions` | Unprefixed chat-completion alias |
+| `POST` | `/v1/messages` | Anthropic-compatible messages (streaming/non-streaming) |
+| `POST` | `/messages` | Unprefixed messages alias |
+| `POST` | `/v1/mivi/agent` | Bounded agent task execution |
 | `GET` | `/v1/models` | List loaded models |
+| `GET` | `/v1/models/:model_id` | Retrieve one loaded model |
+| `GET` | `/models`, `/models/:model_id` | Unprefixed model-list aliases |
+| `GET` | `/v1/mivi/status` | Runtime status and telemetry |
+| `GET` | `/v1/mivi/tools` | Built-in tool definitions |
 | `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Inference metrics |
+| `GET` | `/metrics` | Process-local inference counters |
+| `GET` | `/api/tags` | Ollama-compatible model listing |
+| `GET` | `/api/version` | Ollama-compatible server version |
 
 ### 6.3 Chat Completion Request Schema
 
 ```rust
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub tools: Option<Vec<Tool>>,
-    #[serde(default = "default_auto")]
-    pub tool_choice: ToolChoice,  // "auto" | "none" | {"type":"function","function":{"name":"..."}}
-    #[serde(default = "default_temp")]
-    pub temperature: f32,         // 0.0 - 2.0, default 0.7
-    #[serde(default)]
-    pub top_p: Option<f32>,       // 0.0 - 1.0
-    #[serde(default)]
-    pub top_k: Option<usize>,     // 1 - vocab_size
-    #[serde(default)]
-    pub min_p: Option<f32>,       // 0.0 - 1.0 (Mivi extension)
-    #[serde(default)]
-    pub max_tokens: Option<usize>,// max generation length
-    #[serde(default)]
-    pub stream: bool,             // SSE streaming
-    #[serde(default = "default_true")]
-    pub thinking: bool,           // enable <think> blocks
-    #[serde(default)]
-    pub stop: Option<Vec<String>>,// custom stop sequences
-    #[serde(default)]
-    pub repetition_penalty: Option<f32>,
-    #[serde(default)]
-    pub presence_penalty: Option<f32>,
-    #[serde(default)]
+    pub model: Option<String>,
+    pub messages: Vec<MessageDto>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
+    pub max_tokens: Option<usize>,
+    pub stream: Option<bool>,
+    pub tools: Option<Vec<serde_json::Value>>,
+    pub tool_choice: Option<serde_json::Value>,
     pub frequency_penalty: Option<f32>,
-    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub stop: Option<serde_json::Value>,
+    pub response_format: Option<serde_json::Value>,
     pub seed: Option<u64>,
-    #[serde(default)]
-    pub response_format: Option<ResponseFormat>,
-}
-
-#[derive(Deserialize)]
-pub struct Message {
-    pub role: Role,               // system | user | assistant | tool
-    pub content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub tool_call_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Tool {
-    pub r#type: String,           // "function"
-    pub function: FunctionDef,
-}
-
-#[derive(Deserialize)]
-pub struct FunctionDef {
-    pub name: String,
-    pub description: Option<String>,
-    pub parameters: serde_json::Value, // JSON Schema
+    pub user: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 ```
+
+`MessageDto` and the response DTOs are defined in `crates/mivi-server/src/types.rs`; this excerpt
+lists the request fields and their wire-level types rather than duplicating every nested DTO.
 
 The server currently accepts `tool_choice` values `auto`, `none`, and a named function. It rejects
 `tool_choice: "required"`, JSON Schema response formats, and JSON streaming with an explicit invalid
 request error. `response_format: {"type":"json_object"}` is supported for non-streaming requests.
+
+`GET /metrics` returns JSON counters for accepted and rejected inference requests, slot wait, generation
+latency, prompt/completion token totals, inference errors, and timed-out tools. These counters are
+process-local and reset on restart.
+
+Agent `context_docs` paths must remain relative to the configured workspace and are limited to 16 files,
+512 KiB per file, and 2 MiB total. Unix reads use pinned descriptor-relative no-follow traversal; non-Unix
+builds use the portable validated-path fallback.
 
 ### 6.4 Streaming Response Chunks
 

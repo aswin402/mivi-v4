@@ -91,7 +91,11 @@ pub struct PrattParser<'a> {
 
 impl<'a> PrattParser<'a> {
     pub fn new(tokens: &'a [MathToken]) -> Self {
-        Self { tokens, pos: 0, depth: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     pub fn peek(&self) -> Option<&MathToken> {

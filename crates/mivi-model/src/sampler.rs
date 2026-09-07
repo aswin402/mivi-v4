@@ -90,14 +90,9 @@ impl Sampler {
 
     /// Sample token index from unnormalized logits without per-token heap allocations.
     pub fn sample(&mut self, logits: &mut [f32], recent_tokens: &[u32]) -> u32 {
-        if self.config.temperature <= 0.0 {
-            return argmax(logits);
-        }
-
         // 1. Penalties (repetition, presence, frequency)
         if !recent_tokens.is_empty()
-            && (self.config.repetition_penalty > 0.0
-                && self.config.repetition_penalty != 1.0
+            && (self.config.repetition_penalty > 0.0 && self.config.repetition_penalty != 1.0
                 || self.config.presence_penalty != 0.0
                 || self.config.frequency_penalty != 0.0)
         {
@@ -109,6 +104,11 @@ impl Sampler {
                 self.config.frequency_penalty,
                 &mut self.seen_tokens,
             );
+        }
+
+        // Temperature zero uses greedy decoding, but still honors penalties.
+        if self.config.temperature <= 0.0 {
+            return argmax(logits);
         }
 
         // 2. Temperature scaling
@@ -169,18 +169,30 @@ impl Sampler {
             return argmax(probs);
         }
 
-        // Quickselect top candidates (up to 1024) to avoid sorting entire vocabulary
-        let candidate_limit = 1024.min(self.scratch.len());
-        if candidate_limit < self.scratch.len() {
-            self.scratch
-                .select_nth_unstable_by(candidate_limit - 1, |a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
-            self.scratch.truncate(candidate_limit);
-        }
+        // Expand the quickselect window until it contains the requested nucleus mass.
+        // The old fixed 1024-token cap changed top-p semantics for flat distributions.
+        let mut candidate_limit = 1024.min(self.scratch.len());
+        loop {
+            if candidate_limit < self.scratch.len() {
+                self.scratch
+                    .select_nth_unstable_by(candidate_limit - 1, |a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+            }
 
-        self.scratch
-            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            self.scratch[..candidate_limit].sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let candidate_mass: f32 = self.scratch[..candidate_limit]
+                .iter()
+                .map(|&(_, probability)| probability)
+                .sum();
+            if candidate_mass >= top_p || candidate_limit == self.scratch.len() {
+                break;
+            }
+            candidate_limit = (candidate_limit * 2).min(self.scratch.len());
+        }
 
         // Find nucleus: smallest set of top tokens whose cumulative probability >= top_p
         let mut nucleus_mass = 0.0f32;
@@ -319,6 +331,36 @@ mod tests {
     fn test_argmax() {
         let logits = vec![1.0, 5.0, 3.0, 2.0];
         assert_eq!(argmax(&logits), 1);
+    }
+
+    #[test]
+    fn zero_temperature_still_applies_penalties() {
+        let config = GenerationConfig {
+            temperature: 0.0,
+            presence_penalty: 2.0,
+            ..Default::default()
+        };
+        let mut sampler = Sampler::with_seed(config, Some(1));
+        let mut logits = vec![5.0, 4.0];
+
+        assert_eq!(sampler.sample(&mut logits, &[0]), 1);
+    }
+
+    #[test]
+    fn top_p_sampling_can_select_tokens_beyond_the_first_1024() {
+        let count = 2048;
+        let total: f32 = (1..=count).map(|value| value as f32).sum();
+        let probabilities = (0..count)
+            .map(|index| (count - index) as f32 / total)
+            .collect::<Vec<_>>();
+        let mut sampler = Sampler::with_seed(GenerationConfig::default(), Some(1));
+
+        let selected_tail = (0..256).any(|_| sampler.sample_top_p(&probabilities, 0.9) >= 1024);
+
+        assert!(
+            selected_tail,
+            "top-p nucleus was incorrectly capped at 1024 tokens"
+        );
     }
 
     #[test]

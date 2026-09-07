@@ -99,7 +99,9 @@ impl Model {
         // Working context length configuration (defaults to 16k, capped at 64k max).
         pub const DEFAULT_WORKING_CTX: usize = 16384;
         pub const MAX_SUPPORTED_CTX: usize = 65536;
-        let ctx_cap = max_ctx.unwrap_or(DEFAULT_WORKING_CTX).min(MAX_SUPPORTED_CTX);
+        let ctx_cap = max_ctx
+            .unwrap_or(DEFAULT_WORKING_CTX)
+            .min(MAX_SUPPORTED_CTX);
         let working_seq_len = config.max_seq_len.min(ctx_cap);
 
         let arena_cfg = ArenaConfig {
@@ -428,15 +430,18 @@ impl Model {
         let mut chained_hash = 0u64;
 
         if start_pos == 0 {
-            if let Some((matched_len, chunk)) = self.prefix_cache.find_longest_prefix(prompt_tokens) {
+            if let Some((matched_len, chunk)) = self.prefix_cache.find_longest_prefix(prompt_tokens)
+            {
                 if matched_len > 0 && matched_len <= prompt_tokens.len() {
                     if self
                         .kv_cache
                         .import_state(matched_len, &chunk.state.k_cache, &chunk.state.v_cache)
                         .is_ok()
                     {
-                        self.state
-                            .import_ssm_states(&chunk.state.ssm_conv_states, &chunk.state.ssm_hidden_states);
+                        self.state.import_ssm_states(
+                            &chunk.state.ssm_conv_states,
+                            &chunk.state.ssm_hidden_states,
+                        );
                         start_prefill_idx = matched_len;
                         chained_hash = chunk.hash;
                     }
@@ -705,7 +710,8 @@ impl Model {
             }
 
             raw_bytes.clear();
-            self.tokenizer.decode_token_bytes(next_token, &mut raw_bytes);
+            self.tokenizer
+                .decode_token_bytes(next_token, &mut raw_bytes);
             let decoded_chunk = stream_decoder.feed(&raw_bytes);
             if !decoded_chunk.is_empty() {
                 grammar.feed(&decoded_chunk);
@@ -730,9 +736,10 @@ fn longest_stop_prefix_len(text: &str, stop_tokens: &[String]) -> usize {
         if st.is_empty() {
             continue;
         }
-        let check_len = (st.len() - 1).min(text.len());
-        for len in (1..=check_len).rev() {
-            if text.ends_with(&st[..len]) {
+        let mut char_indices = st.char_indices();
+        let _ = char_indices.next();
+        while let Some((len, _)) = char_indices.next_back() {
+            if len <= text.len() && text.ends_with(&st[..len]) {
                 max_match = max_match.max(len);
                 break;
             }
@@ -816,6 +823,13 @@ mod prefix_cache_integration_tests {
         assert_eq!(checked_context_end(4, 3, 8).unwrap(), 7);
     }
 
+    #[test]
+    fn unicode_stop_prefix_does_not_panic() {
+        let stop_tokens = vec!["💥".to_string()];
+
+        assert_eq!(longest_stop_prefix_len("x", &stop_tokens), 0);
+    }
+
     /// Integration test with real model: verify continuation preserves the prefix cache.
     /// Suffix snapshots are intentionally not restored because token-byte matching
     /// alone cannot prove that the cached hybrid state has the same causal context.
@@ -846,9 +860,14 @@ mod prefix_cache_integration_tests {
         // Step 1: continuation must remain correct while retaining the cache.
         let step1_pos_before = model.current_pos();
         let step1 = format!("{}\nUser: hello", system);
-        let _ = model.generate_streaming_incremental(&step1, step1_pos_before, 5, |_tok, _text| false);
+        let _ =
+            model.generate_streaming_incremental(&step1, step1_pos_before, 5, |_tok, _text| false);
 
-        println!("Step 1: {}->{} tokens", step1_pos_before, model.current_pos());
+        println!(
+            "Step 1: {}->{} tokens",
+            step1_pos_before,
+            model.current_pos()
+        );
         assert!(model.prefix_cache.len() >= cached, "cache should persist");
     }
 }

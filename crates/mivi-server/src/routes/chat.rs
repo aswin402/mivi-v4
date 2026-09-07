@@ -3,7 +3,8 @@
 use crate::engine_actor::EngineHandle;
 use crate::generation::{
     filter_tools_for_choice, parse_response_mode, parse_stop_sequences, parse_tool_choice,
-    validate_additional_sampling_parameters, validate_sampling_parameters, GenerationOptions,
+    validate_additional_sampling_parameters, validate_openai_tool_definitions,
+    validate_sampling_parameters, validate_tool_calls_against_tools, GenerationOptions,
     ResponseMode, ToolChoice,
 };
 use crate::state::AppState;
@@ -17,7 +18,8 @@ use axum::{
     },
 };
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Instant;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio_stream::wrappers::ReceiverStream;
 
 #[inline]
@@ -65,11 +67,9 @@ pub async fn chat_completions(
     ) {
         return AppError::InvalidRequest(message).into_response();
     }
-    if let Err(message) = validate_additional_sampling_parameters(
-        req.top_k,
-        req.min_p,
-        req.repetition_penalty,
-    ) {
+    if let Err(message) =
+        validate_additional_sampling_parameters(req.top_k, req.min_p, req.repetition_penalty)
+    {
         return AppError::InvalidRequest(message).into_response();
     }
     let response_mode = match parse_response_mode(req.response_format.as_ref()) {
@@ -82,6 +82,9 @@ pub async fn chat_completions(
             "json_object response format is not supported for streaming".to_string(),
         )
         .into_response();
+    }
+    if let Err(message) = validate_openai_tool_definitions(req.tools.as_deref()) {
+        return AppError::InvalidRequest(message).into_response();
     }
     let tool_choice = match parse_tool_choice(req.tools.as_deref(), req.tool_choice.as_ref()) {
         Ok(choice) => choice,
@@ -110,6 +113,20 @@ pub async fn chat_completions(
         .max_tokens
         .unwrap_or(state.config.default_max_tokens)
         .min(state.config.max_allowed_tokens);
+    let slot_wait_started = Instant::now();
+    let inference_permit = match state.try_acquire_inference_slot() {
+        Ok(permit) => permit,
+        Err(_) => {
+            state.metrics.record_inference_rejected();
+            return AppError::TooManyRequests(
+                "The maximum number of concurrent inference requests is active".to_string(),
+            )
+            .into_response();
+        }
+    };
+    state
+        .metrics
+        .record_inference_accepted(slot_wait_started.elapsed());
     let completion_id = format!("{}{}", mivi_core::CHATCMPL_ID_PREFIX, uuid::Uuid::new_v4());
     let last_user_prompt = req
         .messages
@@ -124,22 +141,21 @@ pub async fn chat_completions(
     let chat_messages: Vec<mivi_tokenizer::ChatMessage> =
         req.messages.iter().map(Into::into).collect();
 
-    let tools_json = tools
-        .as_ref()
-        .and_then(|t| match serde_json::to_string(t) {
-            Ok(json) => Some(json),
-            Err(e) => {
-                tracing::error!("Failed to serialize tools list: {}", e);
-                None
-            }
-        });
+    let tools_json = tools.as_ref().and_then(|t| match serde_json::to_string(t) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::error!("Failed to serialize tools list: {}", e);
+            None
+        }
+    });
 
     let enable_thinking = req
         .reasoning_effort
         .as_deref()
         .map(|r| r != "none")
         .unwrap_or(false);
-    let prompt = mivi_tokenizer::format_chatml(&chat_messages, tools_json.as_deref(), enable_thinking);
+    let prompt =
+        mivi_tokenizer::format_chatml(&chat_messages, tools_json.as_deref(), enable_thinking);
 
     if let Some(prompt_text) = &last_user_prompt {
         let approx_tokens = (prompt.len() / 4).max(1);
@@ -153,10 +169,13 @@ pub async fn chat_completions(
             options,
             tool_choice,
             tool_calls_enabled,
+            tool_definitions: tools.clone(),
+            inference_permit,
             completion_id,
             model_name,
             engine: state.engine.clone(),
             channel_capacity: state.config.channel_capacity,
+            metrics: state.metrics.clone(),
         };
         let mut resp = handle_chat_streaming(ctx);
         let log_meta = crate::logging::LogMetadata {
@@ -173,9 +192,12 @@ pub async fn chat_completions(
             options,
             tool_choice,
             tool_calls_enabled,
+            tool_definitions: tools.clone(),
+            inference_permit,
             completion_id,
             model_name,
             engine: &state.engine,
+            metrics: state.metrics.clone(),
         };
         handle_chat_blocking(ctx).await
     }
@@ -187,10 +209,13 @@ struct ChatStreamContext {
     options: GenerationOptions,
     tool_choice: ToolChoice,
     tool_calls_enabled: bool,
+    tool_definitions: Option<Vec<serde_json::Value>>,
+    inference_permit: OwnedSemaphorePermit,
     completion_id: String,
     model_name: String,
     engine: EngineHandle,
     channel_capacity: usize,
+    metrics: Arc<crate::state::ServerMetrics>,
 }
 
 struct ChatBlockingContext<'a> {
@@ -199,9 +224,12 @@ struct ChatBlockingContext<'a> {
     options: GenerationOptions,
     tool_choice: ToolChoice,
     tool_calls_enabled: bool,
+    tool_definitions: Option<Vec<serde_json::Value>>,
+    inference_permit: OwnedSemaphorePermit,
     completion_id: String,
     model_name: String,
     engine: &'a EngineHandle,
+    metrics: Arc<crate::state::ServerMetrics>,
 }
 
 pub const THINKING_INIT_MSG: &str = "Generating completion with Mivi engine...";
@@ -212,20 +240,27 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let cid = ctx.completion_id;
     let mname = ctx.model_name;
     let engine = ctx.engine;
+    let metrics = ctx.metrics;
     let prompt = ctx.prompt;
     let max_tokens = ctx.max_tokens;
     let options = ctx.options;
     let tool_choice = ctx.tool_choice;
     let tool_calls_enabled = ctx.tool_calls_enabled;
+    let tool_definitions = ctx.tool_definitions;
+    let inference_permit = ctx.inference_permit;
 
     tokio::spawn(async move {
+        let _inference_permit = inference_permit;
         send_sse_sequence_with_finish(&tx, &cid, &mname, None, || async {
+            let generation_started = Instant::now();
             match engine
                 .generate_stream_with_options(&prompt, max_tokens, options)
                 .await
             {
                 Ok(mut stream_rx) => {
                     let mut assembled = String::new();
+                    let mut stream_failed = false;
+                    let mut client_disconnected = false;
                     let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(2));
                     keepalive.tick().await;
 
@@ -235,17 +270,20 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 match chunk_res {
                                     Some(Ok(word)) => {
                                         assembled.push_str(&word);
-                                        if !tool_calls_enabled {
-                                            if tx
-                                                .send(Ok(create_content_chunk_event(&cid, &mname, &word)))
+                                        if !tool_calls_enabled
+                                            && tx
+                                                .send(Ok(create_content_chunk_event(
+                                                    &cid, &mname, &word,
+                                                )))
                                                 .await
                                                 .is_err()
-                                            {
-                                                break;
-                                            }
+                                        {
+                                            client_disconnected = true;
+                                            break;
                                         }
                                     }
                                     Some(Err(err_msg)) => {
+                                        stream_failed = true;
                                         tracing::error!("Inference stream error: {}", err_msg);
                                         let _ = tx
                                             .send(Ok(create_error_chunk_event(
@@ -262,16 +300,41 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                             _ = keepalive.tick() => {
                                 // Emit SSE comment heartbeat to keep client socket active during CPU prefill
                                 if tx.send(Ok(create_keepalive_event())).await.is_err() {
+                                    client_disconnected = true;
                                     break;
                                 }
                             }
                         }
                     }
+                    if client_disconnected {
+                        drop(stream_rx);
+                        metrics.record_generation(generation_started.elapsed());
+                        return "error";
+                    }
+                    metrics.record_generation(generation_started.elapsed());
+                    if stream_failed {
+                        metrics.record_inference_error();
+                        return "error";
+                    }
                     if !assembled.is_empty() {
                         let thinking = mivi_tools::extract_thinking(&assembled);
                         let clean_reply = mivi_tools::strip_thinking(&assembled);
                         let tool_calls = extract_tool_calls_for_choice(&assembled, &tool_choice);
-                        let tc_names: Vec<String> = tool_calls.into_iter().map(|tc| format!("{}(...)", tc.name)).collect();
+                        if let Err(error) = validate_tool_calls_against_tools(
+                            &tool_calls,
+                            tool_definitions.as_deref().unwrap_or_default(),
+                        ) {
+                            tracing::error!(%error, "Model generated invalid tool call");
+                            metrics.record_inference_error();
+                            let _ = tx
+                                .send(Ok(create_error_chunk_event(&cid, &mname, &error)))
+                                .await;
+                            return "error";
+                        }
+                        let tc_names: Vec<String> = tool_calls
+                            .into_iter()
+                            .map(|tc| format!("{}(...)", tc.name))
+                            .collect();
                         if tool_calls_enabled {
                             if !tc_names.is_empty() {
                                 let values = tool_call_values(&assembled, &tool_choice);
@@ -282,14 +345,22 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 let clean_reply = mivi_tools::strip_tool_calls(&clean_reply);
                                 if !clean_reply.is_empty() {
                                     let _ = tx
-                                        .send(Ok(create_content_chunk_event(&cid, &mname, &clean_reply)))
+                                        .send(Ok(create_content_chunk_event(
+                                            &cid,
+                                            &mname,
+                                            &clean_reply,
+                                        )))
                                         .await;
                                 }
                             }
                         }
                         crate::logging::print_completion_response_box(
                             thinking.as_deref(),
-                            if tc_names.is_empty() { None } else { Some(&tc_names) },
+                            if tc_names.is_empty() {
+                                None
+                            } else {
+                                Some(&tc_names)
+                            },
                             Some(&clean_reply),
                         );
                         return if tool_calls_enabled && !tc_names.is_empty() {
@@ -300,6 +371,8 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                     }
                 }
                 Err(e) => {
+                    metrics.record_generation(generation_started.elapsed());
+                    metrics.record_inference_error();
                     tracing::error!("Failed to start stream: {}", e);
                     let _ = tx
                         .send(Ok(create_error_chunk_event(
@@ -320,14 +393,25 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
 }
 
 async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
-    match ctx
+    let _inference_permit = ctx.inference_permit;
+    let generation_started = Instant::now();
+    let generation_result = ctx
         .engine
         .generate_with_options(ctx.prompt, ctx.max_tokens, ctx.options.clone())
-        .await
-    {
+        .await;
+    ctx.metrics.record_generation(generation_started.elapsed());
+    match generation_result {
         Ok((output, p_tokens, c_tokens)) => {
+            ctx.metrics.record_tokens(p_tokens, c_tokens);
             let thinking = mivi_tools::extract_thinking(&output);
             let tool_calls_extracted = extract_tool_calls_for_choice(&output, &ctx.tool_choice);
+            if let Err(error) = validate_tool_calls_against_tools(
+                &tool_calls_extracted,
+                ctx.tool_definitions.as_deref().unwrap_or_default(),
+            ) {
+                ctx.metrics.record_inference_error();
+                return AppError::InferenceError(error).into_response();
+            }
 
             let (tool_calls, finish_reason) = if !tool_calls_extracted.is_empty() {
                 let tc_vals: Vec<serde_json::Value> = tool_calls_extracted
@@ -393,7 +477,11 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                 .collect();
             crate::logging::print_completion_response_box(
                 thinking.as_deref(),
-                if tc_names.is_empty() { None } else { Some(&tc_names) },
+                if tc_names.is_empty() {
+                    None
+                } else {
+                    Some(&tc_names)
+                },
                 Some(&reply_preview),
             );
             let log_meta = crate::logging::LogMetadata {
@@ -403,20 +491,24 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                 tokens_prompt: Some(p_tokens),
                 tokens_completion: Some(c_tokens),
                 finish_reason: Some(finish_reason.to_string()),
-                tool_calls: if tc_names.is_empty() { None } else { Some(tc_names) },
+                tool_calls: if tc_names.is_empty() {
+                    None
+                } else {
+                    Some(tc_names)
+                },
                 ..Default::default()
             };
             resp.extensions_mut().insert(log_meta);
             resp
         }
-        Err(e) => AppError::InferenceError(e).into_response(),
+        Err(e) => {
+            ctx.metrics.record_inference_error();
+            AppError::InferenceError(e).into_response()
+        }
     }
 }
 
-fn extract_tool_calls_for_choice(
-    output: &str,
-    choice: &ToolChoice,
-) -> Vec<mivi_tools::ToolCall> {
+fn extract_tool_calls_for_choice(output: &str, choice: &ToolChoice) -> Vec<mivi_tools::ToolCall> {
     if matches!(choice, ToolChoice::Disabled) {
         return Vec::new();
     }

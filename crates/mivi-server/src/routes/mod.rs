@@ -55,7 +55,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let public_routes = Router::new()
         .route("/", get(crate::ui::serve_embedded_ui))
         .route("/web", get(crate::ui::serve_embedded_ui))
-        .route("/health", get(health_check))
+        .route("/health", get(health_check));
+
+    let protected_routes = Router::new()
         // Base API check endpoints for AI agent frameworks (e.g. baseURL = http://localhost:8080/v1)
         .route("/v1", get(v1_root))
         .route("/v1/", get(v1_root))
@@ -63,13 +65,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/models/:model_id", get(get_model_info))
         .route("/models", get(list_models))
         .route("/models/:model_id", get(get_model_info))
+        .route("/metrics", get(metrics))
         .route("/v1/mivi/status", get(get_status))
         .route("/v1/mivi/tools", get(list_tools))
         // Ollama API compatibility routes
         .route("/api/tags", get(list_models_ollama))
-        .route("/api/version", get(ollama_version));
-
-    let protected_routes = Router::new()
+        .route("/api/version", get(ollama_version))
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/chat/completions", post(chat::chat_completions))
         .route("/v1/messages", post(anthropic::anthropic_messages_handler))
@@ -116,7 +117,8 @@ async fn v1_root(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "chat_completions": "/v1/chat/completions",
             "messages": "/v1/messages",
             "models": "/v1/models",
-            "agent": "/v1/mivi/agent"
+            "agent": "/v1/mivi/agent",
+            "metrics": "/metrics"
         }
     }))
 }
@@ -198,24 +200,63 @@ async fn get_model_info(
 }
 
 async fn list_models_ollama(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "models": if state.engine.has_model() { serde_json::json!([
-            {
-                "name": state.model_name,
-                "model": state.model_name,
-                "modified_at": chrono::Utc::now().to_rfc3339(),
-                "size": 0,
-                "digest": "",
-                "details": {
-                    "parent_model": "",
-                    "format": "gguf",
-                    "family": "hybrid-slm",
-                    "parameter_size": "unknown",
-                    "quantization_level": "unknown"
-                }
+    let models = if state.engine.has_model() {
+        let mut model = serde_json::json!({
+            "name": state.model_name,
+            "model": state.model_name,
+            "modified_at": chrono::Utc::now().to_rfc3339(),
+            "details": {
+                "format": "gguf"
             }
-        ]) } else { serde_json::json!([]) }
-    }))
+        });
+
+        if let Some(metadata) = state.engine.model_metadata() {
+            model["size"] = serde_json::json!(metadata.size_bytes);
+
+            if let Some(family) = &metadata.family {
+                model["details"]["family"] = serde_json::json!(family);
+            }
+            if let Some(parameter_count) = metadata.parameter_count {
+                model["details"]["parameter_count"] = serde_json::json!(parameter_count);
+                model["details"]["parameter_size"] =
+                    serde_json::json!(format_parameter_size(parameter_count));
+            }
+            if let Some(quantization_level) = &metadata.quantization_level {
+                model["details"]["quantization_level"] = serde_json::json!(quantization_level);
+            }
+        }
+
+        serde_json::json!([model])
+    } else {
+        serde_json::json!([])
+    };
+
+    Json(serde_json::json!({ "models": models }))
+}
+
+fn format_parameter_size(parameter_count: u64) -> String {
+    const THOUSAND: f64 = 1_000.0;
+    const MILLION: f64 = 1_000_000.0;
+    const BILLION: f64 = 1_000_000_000.0;
+
+    let count = parameter_count as f64;
+    if count >= BILLION {
+        format_scaled_parameter_size(count / BILLION, "B")
+    } else if count >= MILLION {
+        format_scaled_parameter_size(count / MILLION, "M")
+    } else if count >= THOUSAND {
+        format_scaled_parameter_size(count / THOUSAND, "K")
+    } else {
+        format!("{parameter_count}")
+    }
+}
+
+fn format_scaled_parameter_size(value: f64, suffix: &str) -> String {
+    if value >= 10.0 {
+        format!("{value:.0}{suffix}")
+    } else {
+        format!("{value:.1}{suffix}")
+    }
 }
 
 async fn ollama_version() -> impl IntoResponse {
@@ -246,7 +287,59 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert!(response.headers().get("access-control-allow-origin").is_none());
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_protects_api_metadata_routes() {
+        let engine = crate::EngineActor::spawn(None);
+        let state = Arc::new(AppState::new(
+            "test-model",
+            ToolBroker::new(),
+            engine,
+            Some("test-key".to_string()),
+        ));
+        let app = create_router(state);
+
+        for path in [
+            "/v1",
+            "/v1/models",
+            "/models",
+            "/metrics",
+            "/v1/mivi/status",
+            "/v1/mivi/tools",
+            "/api/tags",
+            "/api/version",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+
+        let authenticated = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1")
+                    .header("Authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -279,6 +372,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(model.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ollama_tags_do_not_return_fake_model_metadata() {
+        let engine = crate::EngineActor::spawn_mock();
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/tags")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let model = &payload["models"][0];
+        assert!(model.get("size").is_none());
+        assert!(model.get("digest").is_none());
+        assert_eq!(model["details"]["format"], "gguf");
+        assert!(model["details"].get("family").is_none());
+        assert!(model["details"].get("parameter_size").is_none());
+        assert!(model["details"].get("quantization_level").is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_empty_counters() {
+        let engine = crate::EngineActor::spawn_mock();
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["inference_requests_total"], 0);
+        assert_eq!(payload["inference_requests_rejected_total"], 0);
+        assert_eq!(payload["generation_count"], 0);
+        assert_eq!(payload["tool_timeouts_total"], 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_counts_rejected_inference_requests() {
+        let engine = crate::EngineActor::spawn_mock();
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let permit = state.try_acquire_inference_slot().unwrap();
+        let app = create_router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(permit);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["inference_requests_total"], 0);
+        assert_eq!(payload["inference_requests_rejected_total"], 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_records_successful_generation() {
+        let engine = crate::EngineActor::spawn_mock();
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let app = create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["inference_requests_total"], 1);
+        assert_eq!(payload["inference_requests_rejected_total"], 0);
+        assert_eq!(payload["inference_errors_total"], 0);
+        assert_eq!(payload["generation_count"], 1);
+        assert!(payload["prompt_tokens_total"].as_u64().unwrap() > 0);
+        assert!(payload["completion_tokens_total"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn ollama_parameter_size_uses_compact_units() {
+        assert_eq!(format_parameter_size(350_000_000), "350M");
+        assert_eq!(format_parameter_size(1_200_000_000), "1.2B");
+        assert_eq!(format_parameter_size(999), "999");
     }
 
     #[test]
@@ -364,6 +609,10 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
 
     Json(resp)
+}
+
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.metrics.snapshot())
 }
 
 async fn list_tools() -> impl IntoResponse {

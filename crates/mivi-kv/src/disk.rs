@@ -40,6 +40,42 @@ pub fn ensure_cache_dir(dir: Option<&Path>) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+fn checked_u32_length(value: usize, field: &str) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{field} exceeds the on-disk u32 limit"),
+        )
+    })
+}
+
+fn checked_payload_bytes(
+    n_tokens: usize,
+    k_len: usize,
+    v_len: usize,
+    conv_len: usize,
+    ssm_len: usize,
+) -> io::Result<usize> {
+    let value_count = k_len
+        .checked_add(v_len)
+        .and_then(|value| value.checked_add(conv_len))
+        .and_then(|value| value.checked_add(ssm_len))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "KV cache length overflow"))?;
+    let token_bytes = n_tokens
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "KV cache token length overflow")
+        })?;
+    let value_bytes = value_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "KV cache state length overflow")
+        })?;
+    token_bytes
+        .checked_add(value_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "KV cache payload size overflow"))
+}
+
 /// Saves a hybrid state snapshot and its corresponding token sequence to a `.kvc` file.
 pub fn save_to_disk(
     file_path: &Path,
@@ -61,12 +97,18 @@ pub fn save_to_disk(
 
     // 2. Metadata header
     writer.write_u64::<LittleEndian>(model_hash)?;
-    writer.write_u32::<LittleEndian>(tokens.len() as u32)?;
-    writer.write_u32::<LittleEndian>(state.pos as u32)?;
-    writer.write_u32::<LittleEndian>(state.k_cache.len() as u32)?;
-    writer.write_u32::<LittleEndian>(state.v_cache.len() as u32)?;
-    writer.write_u32::<LittleEndian>(state.ssm_conv_states.len() as u32)?;
-    writer.write_u32::<LittleEndian>(state.ssm_hidden_states.len() as u32)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(tokens.len(), "token count")?)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(state.pos, "position")?)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(state.k_cache.len(), "K cache length")?)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(state.v_cache.len(), "V cache length")?)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(
+        state.ssm_conv_states.len(),
+        "SSM convolution state length",
+    )?)?;
+    writer.write_u32::<LittleEndian>(checked_u32_length(
+        state.ssm_hidden_states.len(),
+        "SSM hidden state length",
+    )?)?;
 
     // 3. Tokens payload
     for &tok in tokens {
@@ -134,13 +176,24 @@ pub fn load_from_disk(
     let ssm_len = reader.read_u32::<LittleEndian>()? as usize;
 
     let file_meta = file_path.metadata()?;
-    let file_len = file_meta.len() as usize;
+    let file_len = usize::try_from(file_meta.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "KV cache file is too large for this platform",
+        )
+    })?;
     const HEADER_BYTES: usize = 40;
-    let expected_payload_bytes = (n_tokens * 4) + (k_len + v_len + conv_len + ssm_len) * 4;
-    if HEADER_BYTES + expected_payload_bytes > file_len {
+    let expected_payload_bytes = checked_payload_bytes(n_tokens, k_len, v_len, conv_len, ssm_len)?;
+    let required_file_len = HEADER_BYTES
+        .checked_add(expected_payload_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "KV cache file size overflow"))?;
+    if required_file_len > file_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Cache header payload ({} bytes total) exceeds file size ({} bytes)", HEADER_BYTES + expected_payload_bytes, file_len),
+            format!(
+                "Cache header payload ({} bytes total) exceeds file size ({} bytes)",
+                required_file_len, file_len
+            ),
         ));
     }
 
@@ -174,7 +227,8 @@ pub fn load_from_disk(
         ssm_hidden_states.push(reader.read_f32::<LittleEndian>()?);
     }
 
-    let snapshot = HybridStateSnapshot::new(pos, 0, k_cache, v_cache, ssm_conv_states, ssm_hidden_states);
+    let snapshot =
+        HybridStateSnapshot::new(pos, 0, k_cache, v_cache, ssm_conv_states, ssm_hidden_states);
     Ok((tokens, snapshot))
 }
 
@@ -192,7 +246,11 @@ pub fn list_cached_files(dir: Option<&Path>) -> io::Result<Vec<CacheFileInfo>> {
         if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("kvc") {
             let metadata = entry.metadata()?;
             let size_bytes = metadata.len();
-            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
 
             // Try reading header for token count and model hash
             if let Ok(file) = File::open(&path) {
@@ -257,7 +315,8 @@ mod tests {
 
         assert!(save_to_disk(&file_path, &tokens, &original_snapshot, model_hash).is_ok());
 
-        let (loaded_tokens, loaded_snapshot) = load_from_disk(&file_path, Some(model_hash)).unwrap();
+        let (loaded_tokens, loaded_snapshot) =
+            load_from_disk(&file_path, Some(model_hash)).unwrap();
         assert_eq!(loaded_tokens, tokens);
         assert_eq!(loaded_snapshot, original_snapshot);
 
@@ -267,5 +326,11 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn disk_cache_payload_size_rejects_arithmetic_overflow() {
+        assert!(checked_payload_bytes(usize::MAX, 0, 0, 0, 0).is_err());
+        assert!(checked_payload_bytes(0, usize::MAX, 0, 0, 0).is_err());
     }
 }

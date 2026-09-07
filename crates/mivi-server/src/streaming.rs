@@ -286,7 +286,11 @@ pub async fn send_sse_sequence<F, Fut>(
     Fut: std::future::Future<Output = ()>,
 {
     // Send initial assistant role chunk
-    if tx.send(Ok(create_initial_chunk_event(id, model))).await.is_err() {
+    if tx
+        .send(Ok(create_initial_chunk_event(id, model)))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -321,7 +325,11 @@ pub async fn send_sse_sequence_with_finish<F, Fut>(
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = &'static str>,
 {
-    if tx.send(Ok(create_initial_chunk_event(id, model))).await.is_err() {
+    if tx
+        .send(Ok(create_initial_chunk_event(id, model)))
+        .await
+        .is_err()
+    {
         return;
     }
     if let Some(msg) = thinking_msg {
