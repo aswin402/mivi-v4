@@ -1,5 +1,9 @@
 //! Dedicated Engine Actor managing model inference on an isolated worker thread.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::generation::{validate_json_output, GenerationOptions, ResponseMode};
@@ -17,11 +21,37 @@ pub enum EngineCommand {
         max_tokens: usize,
         options: GenerationOptions,
         responder: mpsc::Sender<Result<String, String>>,
+        cancellation: GenerationCancellation,
     },
     Encode {
         text: String,
         responder: oneshot::Sender<Vec<u32>>,
     },
+}
+
+/// Cooperative cancellation handle for one streaming generation request.
+#[derive(Debug, Clone)]
+pub struct GenerationCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl GenerationCancellation {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Request that the engine stop at its next safe checkpoint.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Return whether cancellation has been requested.
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 use crate::config::ServerConfig;
@@ -41,6 +71,8 @@ pub struct EngineModelMetadata {
     pub parameter_count: Option<u64>,
     pub family: Option<String>,
     pub quantization_level: Option<String>,
+    pub chat_template: Option<String>,
+    pub context_length: Option<usize>,
 }
 
 impl EngineModelMetadata {
@@ -99,11 +131,21 @@ impl EngineModelMetadata {
             .max_by_key(|(_, count)| *count)
             .map(|(label, _)| label);
 
+        let chat_template = model
+            .gguf
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(mivi_model::GgufValue::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
         Self {
             size_bytes: model.gguf.mmap.len() as u64,
             parameter_count,
             family,
             quantization_level,
+            chat_template,
+            context_length: Some(model.config.max_seq_len),
         }
     }
 }
@@ -136,7 +178,8 @@ impl EngineHandle {
         Self::with_capacity_and_metadata(tx, has_model, stream_buffer_capacity, None)
     }
 
-    fn with_capacity_and_metadata(
+    /// Construct a handle for an external/custom engine with optional model metadata.
+    pub fn with_capacity_and_metadata(
         tx: mpsc::Sender<EngineCommand>,
         has_model: bool,
         stream_buffer_capacity: usize,
@@ -246,18 +289,38 @@ impl EngineHandle {
         max_tokens: usize,
         options: GenerationOptions,
     ) -> Result<mpsc::Receiver<Result<String, String>>, String> {
+        self.generate_stream_with_options_cancelable(prompt, max_tokens, options)
+            .await
+            .map(|(rx, _cancellation)| rx)
+    }
+
+    /// Submit a streaming generation job and return a handle that can stop it cooperatively.
+    pub async fn generate_stream_with_options_cancelable(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        options: GenerationOptions,
+    ) -> Result<
+        (
+            mpsc::Receiver<Result<String, String>>,
+            GenerationCancellation,
+        ),
+        String,
+    > {
         let (responder, rx) = mpsc::channel(self.stream_buffer_capacity);
+        let cancellation = GenerationCancellation::new();
         self.tx
             .send(EngineCommand::GenerateStream {
                 prompt: prompt.to_string(),
                 max_tokens,
                 options,
                 responder,
+                cancellation: cancellation.clone(),
             })
             .await
             .map_err(|_| ERR_ENGINE_CHANNEL_DISCONNECTED.to_string())?;
 
-        Ok(rx)
+        Ok((rx, cancellation))
     }
 
     /// Encode prompt tokens.
@@ -334,9 +397,16 @@ impl EngineActor {
                                 max_tokens,
                                 options,
                                 responder,
+                                cancellation,
                             } => {
                                 handle_generate_stream(
-                                    &mut model, mock_mode, prompt, max_tokens, options, responder,
+                                    &mut model,
+                                    mock_mode,
+                                    prompt,
+                                    max_tokens,
+                                    options,
+                                    responder,
+                                    cancellation,
                                 );
                             }
                             EngineCommand::Encode { text, responder } => {
@@ -424,6 +494,7 @@ fn handle_generate_stream(
     max_tokens: usize,
     options: GenerationOptions,
     responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
 ) {
     if let Some(ref mut m) = model {
         let checkpoint = SamplingCheckpoint::capture(m, options.seed);
@@ -432,25 +503,36 @@ fn handle_generate_stream(
         let res = if options.response_mode == ResponseMode::JsonObject {
             Err("json_object response format is not supported for streaming".to_string())
         } else {
-            m.generate_streaming(&prompt, max_tokens, |_, text| {
-                responder.blocking_send(Ok(text.to_string())).is_ok()
-            })
+            m.generate_streaming_with_cancel(
+                &prompt,
+                max_tokens,
+                |_, text| {
+                    !cancellation.is_cancelled()
+                        && responder.blocking_send(Ok(text.to_string())).is_ok()
+                        && !cancellation.is_cancelled()
+                },
+                || cancellation.is_cancelled(),
+            )
             .map(|_| ())
             .map_err(|e| e.to_string())
         };
 
         if let Err(e) = res {
-            let _ = responder.blocking_send(Err(e));
+            if !cancellation.is_cancelled() {
+                let _ = responder.blocking_send(Err(e));
+            }
         }
 
         checkpoint.restore(m);
     } else if mock_mode {
         for &chunk in MOCK_STREAM_CHUNKS {
-            if responder.blocking_send(Ok(chunk.to_string())).is_err() {
+            if cancellation.is_cancelled()
+                || responder.blocking_send(Ok(chunk.to_string())).is_err()
+            {
                 break;
             }
         }
-    } else {
+    } else if !cancellation.is_cancelled() {
         let _ = responder.blocking_send(Err(ERR_NO_MODEL.to_string()));
     }
 }
@@ -553,6 +635,16 @@ mod tests {
     fn sampling_checkpoint_only_restores_rng_for_seeded_requests() {
         assert!(!SamplingCheckpoint::should_restore_rng(None));
         assert!(SamplingCheckpoint::should_restore_rng(Some(7)));
+    }
+
+    #[test]
+    fn generation_cancellation_is_shared_across_handles() {
+        let first = GenerationCancellation::new();
+        let second = first.clone();
+
+        assert!(!second.is_cancelled());
+        first.cancel();
+        assert!(second.is_cancelled());
     }
 
     #[test]

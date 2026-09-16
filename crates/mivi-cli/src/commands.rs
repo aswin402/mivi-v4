@@ -33,6 +33,9 @@ pub enum Commands {
         cors_origins: Vec<String>,
         #[arg(short, long)]
         model: Option<PathBuf>,
+        /// JSON model protocol profile; overrides embedded model metadata
+        #[arg(long, value_name = "PATH")]
+        model_profile: Option<PathBuf>,
         /// Maximum RSS memory in MB before triggering safety shutdown (default: 3000 MB)
         #[arg(long, default_value = "3000")]
         max_memory: f32,
@@ -48,6 +51,18 @@ pub enum Commands {
             default_value_t = mivi_tools::DEFAULT_MAX_CONCURRENT_TOOL_EXECUTIONS
         )]
         max_concurrent_tool_executions: usize,
+        /// Maximum wall-clock time per inference request, including streaming generation
+        #[arg(
+            long,
+            default_value_t = mivi_server::DEFAULT_REQUEST_TIMEOUT_SECS
+        )]
+        request_timeout_secs: u64,
+        /// Maximum wall-clock time before the first model output
+        #[arg(
+            long,
+            default_value_t = mivi_server::DEFAULT_FIRST_TOKEN_TIMEOUT_SECS
+        )]
+        first_token_timeout_secs: u64,
         /// Disable the resource safety watchdog
         #[arg(long)]
         no_safelock: bool,
@@ -161,6 +176,34 @@ mod tests {
                 max_concurrent_tool_executions,
                 ..
             } => assert_eq!(max_concurrent_tool_executions, 4),
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_request_timeout_is_configurable() {
+        let cli = Cli::try_parse_from(["mivi", "serve", "--request-timeout-secs", "17"])
+            .expect("serve arguments should parse");
+
+        match cli.command {
+            Commands::Serve {
+                request_timeout_secs,
+                ..
+            } => assert_eq!(request_timeout_secs, 17),
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_first_token_timeout_is_configurable() {
+        let cli = Cli::try_parse_from(["mivi", "serve", "--first-token-timeout-secs", "9"])
+            .expect("serve arguments should parse");
+
+        match cli.command {
+            Commands::Serve {
+                first_token_timeout_secs,
+                ..
+            } => assert_eq!(first_token_timeout_secs, 9),
             _ => panic!("expected serve command"),
         }
     }

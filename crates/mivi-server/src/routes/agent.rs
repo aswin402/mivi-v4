@@ -1,5 +1,8 @@
 //! Agent task execution endpoint supporting tool loops and SSE streaming.
 
+use crate::engine_actor::GenerationCancellation;
+use crate::generation::GenerationOptions;
+use crate::model_profile::ModelProfile;
 use crate::routes::chat::sse_response;
 use crate::state::AppState;
 use crate::streaming::*;
@@ -8,13 +11,11 @@ use axum::{
     extract::{Json, State},
     response::{sse::Event, IntoResponse, Response},
 };
+use mivi_protocol::Message;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-pub const AGENT_PROMPT_TEMPLATE: &str =
-    "<user_request>\n{}\n</user_request>\nFormulate a plan and call appropriate tools if necessary.";
 
 #[cfg(test)]
 mod context_tests {
@@ -68,6 +69,153 @@ const MAX_CONTEXT_DOCS: usize = 16;
 const MAX_CONTEXT_DOC_BYTES: u64 = 512 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 
+fn canonical_builtin_tool_definitions(
+    allowed_tools: Option<&[String]>,
+) -> Vec<mivi_protocol::ToolDefinition> {
+    mivi_tools::get_builtin_tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            allowed_tools
+                .is_none_or(|allowed| allowed.iter().any(|name| name == &tool.function.name))
+        })
+        .map(|tool| mivi_protocol::ToolDefinition {
+            name: tool.function.name,
+            description: tool.function.description,
+            parameters: tool.function.parameters,
+        })
+        .collect()
+}
+
+fn native_agent_user_message(task: &str, context_prompt: &str) -> Message {
+    let mut content = task.to_string();
+    if !context_prompt.is_empty() {
+        content.push('\n');
+        content.push_str(context_prompt);
+    }
+    content.push_str("\nFormulate a plan and call appropriate tools if necessary.");
+    Message {
+        role: "user".to_string(),
+        content: Some(content),
+        name: None,
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        reasoning: None,
+    }
+}
+
+fn append_native_agent_turn(
+    messages: &mut Vec<Message>,
+    profile: &ModelProfile,
+    model_output: &str,
+    tool_results: &[mivi_tools::ToolResult],
+) -> Result<(), String> {
+    let tool_calls = profile.tool_codec().extract(model_output)?;
+    let clean_text = profile
+        .tool_codec()
+        .strip(&mivi_tools::strip_thinking(model_output));
+    messages.push(Message {
+        role: "assistant".to_string(),
+        content: (!clean_text.is_empty()).then_some(clean_text),
+        name: None,
+        tool_call_id: None,
+        tool_calls: tool_calls
+            .into_iter()
+            .map(|call| mivi_protocol::ToolCall {
+                id: None,
+                name: call.name,
+                arguments: call.arguments,
+            })
+            .collect(),
+        reasoning: None,
+    });
+
+    for result in tool_results {
+        let content = if result.success {
+            result.output.clone()
+        } else {
+            result.error.clone().unwrap_or_default()
+        };
+        messages.push(Message {
+            role: "tool".to_string(),
+            content: Some(content),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+        });
+    }
+    Ok(())
+}
+
+struct AgentGenerationCancellation(GenerationCancellation);
+
+impl AgentGenerationCancellation {
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+impl Drop for AgentGenerationCancellation {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+async fn generate_agent_step(
+    engine: &crate::engine_actor::EngineHandle,
+    prompt: &str,
+    max_tokens: usize,
+    admitted_prompt_tokens: Option<usize>,
+    request_timeout: Duration,
+    first_token_timeout: Duration,
+    output_events: &mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
+) -> Result<(String, usize, usize), String> {
+    let (mut receiver, cancellation) = engine
+        .generate_stream_with_options_cancelable(prompt, max_tokens, GenerationOptions::default())
+        .await?;
+    let cancellation = AgentGenerationCancellation(cancellation);
+    let mut deadline = Box::pin(tokio::time::sleep(request_timeout));
+    let mut first_token_deadline = Box::pin(tokio::time::sleep(first_token_timeout));
+    let mut first_token_received = false;
+    let mut output = String::new();
+
+    loop {
+        tokio::select! {
+            _ = &mut first_token_deadline, if !first_token_received => {
+                cancellation.cancel();
+                return Err("Model did not produce a first token before the configured deadline.".to_string());
+            }
+            _ = &mut deadline => {
+                cancellation.cancel();
+                return Err("Inference request timed out.".to_string());
+            }
+            _ = output_events.closed() => {
+                cancellation.cancel();
+                return Err("Agent client disconnected.".to_string());
+            }
+            chunk = receiver.recv() => {
+                match chunk {
+                    Some(Ok(chunk)) => {
+                        if !chunk.is_empty() {
+                            first_token_received = true;
+                        }
+                        output.push_str(&chunk);
+                    }
+                    Some(Err(error)) => return Err(format!("Inference error: {error}")),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    let prompt_tokens = match admitted_prompt_tokens {
+        Some(prompt_tokens) => prompt_tokens,
+        None => engine.encode(prompt).await.len(),
+    };
+    let completion_tokens = engine.encode(&output).await.len();
+    Ok((output, prompt_tokens, completion_tokens))
+}
+
 fn load_context_documents(workspace: &Path, paths: &[String]) -> Result<String, String> {
     if paths.len() > MAX_CONTEXT_DOCS {
         return Err(format!(
@@ -108,11 +256,26 @@ pub async fn run_agent_task(
         return crate::types::AppError::ServiceUnavailable("No model is loaded".to_string())
             .into_response();
     }
+    let profile = match ModelProfile::resolve(
+        state.engine.model_metadata(),
+        state.config.model_profile.as_ref(),
+    ) {
+        Ok(profile) => profile,
+        Err(message) => return crate::types::AppError::InvalidRequest(message).into_response(),
+    };
+    if !profile.supports_tools() {
+        return crate::types::AppError::InvalidRequest(
+            "selected text-only model profile cannot run the tool-based agent endpoint".to_string(),
+        )
+        .into_response();
+    }
+    let profile_codec = profile.tool_codec_handle();
+    let allowed_tools = req.allowed_tools.clone();
+    let canonical_tools = canonical_builtin_tool_definitions(allowed_tools.as_deref());
     let model_name = state.model_name.clone();
     let cid = format!("{}{}", mivi_core::AGENT_RUN_ID_PREFIX, uuid::Uuid::new_v4());
     let broker = state.broker.clone();
     let engine = state.engine.clone();
-    let allowed_tools = req.allowed_tools.clone();
     let context_prompt = match load_context_documents(
         &state.workspace,
         req.context_docs.as_deref().unwrap_or(&[]),
@@ -137,6 +300,8 @@ pub async fn run_agent_task(
     let channel_capacity = state.config.channel_capacity;
     let default_max_steps = state.config.default_max_agent_steps;
     let agent_gen_tokens = state.config.agent_gen_tokens;
+    let request_timeout = Duration::from_secs(state.config.request_timeout_secs);
+    let first_token_timeout = Duration::from_secs(state.config.first_token_timeout_secs);
     let metrics = state.metrics.clone();
 
     let (tx, rx) =
@@ -155,23 +320,62 @@ pub async fn run_agent_task(
             req.max_steps.min(MAX_AGENT_STEPS_LIMIT)
         };
         let agent_state = mivi_agent::AgentState::new(&req.task, max_steps);
-        let mut agent =
-            mivi_agent::AgentLoop::new(agent_state, &broker).with_allowed_tools(allowed_tools);
+        let mut agent = mivi_agent::AgentLoop::new(agent_state, &broker)
+            .with_allowed_tools(allowed_tools)
+            .with_tool_codec(profile_codec);
         let thinking_msg = format!("Initializing agent for task: '{}'", req.task);
 
-        send_sse_sequence(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
-            let sanitized_task = mivi_agent::escape_xml_content(&req.task);
-            let base_prompt = format!(
-                "{}\n{}",
-                AGENT_PROMPT_TEMPLATE.replace("{}", &sanitized_task),
-                context_prompt
-            );
-            let mut conversation_history = String::new();
-            let mut current_prompt = base_prompt.clone();
+        send_sse_sequence_with_finish(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
+            let mut finish_reason = "stop";
+            let mut native_messages = vec![native_agent_user_message(&req.task, &context_prompt)];
+            let mut current_prompt =
+                match profile.render_prompt(&native_messages, &canonical_tools, false) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        metrics.record_inference_error();
+                        let _ = tx
+                            .send(Ok(create_error_chunk_event(&cid_clone, &mname, &error)))
+                            .await;
+                        return "error";
+                    }
+                };
 
             for _ in 0..max_steps {
+                let admitted_prompt_tokens = match crate::routes::admit_model_context(
+                    &engine,
+                    &current_prompt,
+                    agent_gen_tokens,
+                )
+                .await
+                {
+                    Ok(prompt_tokens) => prompt_tokens,
+                    Err(error) => {
+                        metrics.record_inference_error();
+                        tracing::warn!(%error, "Agent prompt exceeds model context");
+                        let _ = tx
+                            .send(Ok(create_error_chunk_event(
+                                &cid_clone,
+                                &mname,
+                                &error.to_string(),
+                            )))
+                            .await;
+                        finish_reason = "error";
+                        break;
+                    }
+                };
+
                 let generation_started = Instant::now();
-                match engine.generate(&current_prompt, agent_gen_tokens).await {
+                match generate_agent_step(
+                    &engine,
+                    &current_prompt,
+                    agent_gen_tokens,
+                    admitted_prompt_tokens,
+                    request_timeout,
+                    first_token_timeout,
+                    &tx,
+                )
+                .await
+                {
                     Ok((model_out, prompt_tokens, completion_tokens)) => {
                         metrics.record_generation(generation_started.elapsed());
                         metrics.record_tokens(prompt_tokens, completion_tokens);
@@ -181,35 +385,56 @@ pub async fn run_agent_task(
                             .await
                             .is_err()
                         {
+                            if agent.state.phase == mivi_agent::AgentPhase::Failed {
+                                finish_reason = "error";
+                            }
                             break;
                         }
 
-                        if agent.state.phase == mivi_agent::AgentPhase::Completed
-                            || agent.state.phase == mivi_agent::AgentPhase::Failed
-                        {
+                        if agent.state.phase == mivi_agent::AgentPhase::Failed {
+                            finish_reason = "error";
+                            break;
+                        }
+                        if agent.state.phase == mivi_agent::AgentPhase::Completed {
                             break;
                         }
 
-                        conversation_history.push_str(&format!(
-                            "\n<assistant>\n{}\n</assistant>\n{}\n",
-                            model_out, result
-                        ));
-                        current_prompt = format!(
-                            "{}\n{}\nContinue with the task. If complete, indicate the final answer.",
-                            base_prompt, conversation_history
-                        );
+                        if let Err(error) = append_native_agent_turn(
+                            &mut native_messages,
+                            &profile,
+                            &model_out,
+                            agent.last_tool_results(),
+                        ) {
+                            metrics.record_inference_error();
+                            let _ = tx
+                                .send(Ok(create_error_chunk_event(&cid_clone, &mname, &error)))
+                                .await;
+                            finish_reason = "error";
+                            break;
+                        } else {
+                            match profile.render_prompt(&native_messages, &canonical_tools, false) {
+                                Ok(prompt) => current_prompt = prompt,
+                                Err(error) => {
+                                    metrics.record_inference_error();
+                                    let _ = tx
+                                        .send(Ok(create_error_chunk_event(
+                                            &cid_clone, &mname, &error,
+                                        )))
+                                        .await;
+                                    finish_reason = "error";
+                                    break;
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         metrics.record_generation(generation_started.elapsed());
                         metrics.record_inference_error();
                         tracing::error!("Agent inference failed: {}", e);
                         let _ = tx
-                            .send(Ok(create_error_chunk_event(
-                                &cid_clone,
-                                &mname,
-                                "Agent inference failed. Check server logs.",
-                            )))
+                            .send(Ok(create_error_chunk_event(&cid_clone, &mname, &e)))
                             .await;
+                        finish_reason = "error";
                         break;
                     }
                 }
@@ -229,6 +454,7 @@ pub async fn run_agent_task(
                 Some(&last_reply),
                 true,
             );
+            finish_reason
         })
         .await;
     });

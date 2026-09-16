@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "mivi"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "axum",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-agent"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "chrono",
  "mivi-tools",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-cli"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "axum",
@@ -751,6 +751,7 @@ dependencies = [
  "mivi-tokenizer",
  "mivi-tools",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -758,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-context"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "mivi-core",
  "mivi-tokenizer",
@@ -770,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-core"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "rayon",
  "serde",
@@ -780,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-kv"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "byteorder",
  "half",
@@ -792,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-memory"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "chrono",
  "mivi-core",
@@ -805,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-model"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -820,8 +821,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mivi-protocol"
+version = "0.2.28"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mivi-quant"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "byteorder",
  "half",
@@ -833,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-router"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "regex",
  "serde",
@@ -842,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-server"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "axum",
  "chrono",
@@ -850,6 +859,7 @@ dependencies = [
  "mivi-agent",
  "mivi-core",
  "mivi-model",
+ "mivi-protocol",
  "mivi-tokenizer",
  "mivi-tools",
  "serde",
@@ -866,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-tokenizer"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "mivi-core",
  "regex",
@@ -878,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "mivi-tools"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "libc",
  "regex",

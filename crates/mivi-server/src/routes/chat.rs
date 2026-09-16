@@ -4,9 +4,10 @@ use crate::engine_actor::EngineHandle;
 use crate::generation::{
     filter_tools_for_choice, parse_response_mode, parse_stop_sequences, parse_tool_choice,
     validate_additional_sampling_parameters, validate_openai_tool_definitions,
-    validate_sampling_parameters, validate_tool_calls_against_tools, GenerationOptions,
-    ResponseMode, ToolChoice,
+    validate_sampling_parameters, validate_tool_calls_against_tools, validate_tool_choice_result,
+    GenerationOptions, ResponseMode, ToolChoice,
 };
+use crate::model_profile::ModelProfile;
 use crate::state::AppState;
 use crate::streaming::*;
 use crate::types::*;
@@ -18,7 +19,7 @@ use axum::{
     },
 };
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -138,28 +139,56 @@ pub async fn chat_completions(
 
     let model_name = state.model_name.clone();
 
-    let chat_messages: Vec<mivi_tokenizer::ChatMessage> =
-        req.messages.iter().map(Into::into).collect();
-
-    let tools_json = tools.as_ref().and_then(|t| match serde_json::to_string(t) {
-        Ok(json) => Some(json),
-        Err(e) => {
-            tracing::error!("Failed to serialize tools list: {}", e);
-            None
-        }
-    });
+    let chat_messages = match req
+        .messages
+        .iter()
+        .map(MessageDto::to_canonical_message)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(messages) => messages,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    let canonical_tools = match canonical_tools_from_values(tools.as_deref()) {
+        Ok(tools) => tools,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    let profile = match ModelProfile::resolve(
+        state.engine.model_metadata(),
+        state.config.model_profile.as_ref(),
+    ) {
+        Ok(profile) => profile,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+    if !profile.supports_tools()
+        && (req.tools.as_ref().is_some_and(|items| !items.is_empty())
+            || chat_messages.iter().any(|message| {
+                !message.tool_calls.is_empty() || message.role.eq_ignore_ascii_case("tool")
+            }))
+    {
+        return AppError::InvalidRequest(
+            "selected model profile does not support tool calls".to_string(),
+        )
+        .into_response();
+    }
 
     let enable_thinking = req
         .reasoning_effort
         .as_deref()
         .map(|r| r != "none")
         .unwrap_or(false);
-    let prompt =
-        mivi_tokenizer::format_chatml(&chat_messages, tools_json.as_deref(), enable_thinking);
+    let prompt = match profile.render_prompt(&chat_messages, &canonical_tools, enable_thinking) {
+        Ok(prompt) => prompt,
+        Err(message) => return AppError::InvalidRequest(message).into_response(),
+    };
+
+    let admitted_prompt_tokens =
+        match crate::routes::admit_model_context(&state.engine, &prompt, max_tokens).await {
+            Ok(prompt_tokens) => prompt_tokens,
+            Err(error) => return error.into_openai_error().into_response(),
+        };
 
     if let Some(prompt_text) = &last_user_prompt {
-        let approx_tokens = (prompt.len() / 4).max(1);
-        crate::logging::print_incoming_prompt(prompt_text, Some(approx_tokens), false);
+        crate::logging::print_incoming_prompt(prompt_text, admitted_prompt_tokens, false);
     }
 
     if is_streaming {
@@ -170,11 +199,14 @@ pub async fn chat_completions(
             tool_choice,
             tool_calls_enabled,
             tool_definitions: tools.clone(),
+            profile: profile.clone(),
             inference_permit,
             completion_id,
             model_name,
             engine: state.engine.clone(),
             channel_capacity: state.config.channel_capacity,
+            request_timeout: Duration::from_secs(state.config.request_timeout_secs),
+            first_token_timeout: Duration::from_secs(state.config.first_token_timeout_secs),
             metrics: state.metrics.clone(),
         };
         let mut resp = handle_chat_streaming(ctx);
@@ -193,6 +225,7 @@ pub async fn chat_completions(
             tool_choice,
             tool_calls_enabled,
             tool_definitions: tools.clone(),
+            profile,
             inference_permit,
             completion_id,
             model_name,
@@ -210,11 +243,14 @@ struct ChatStreamContext {
     tool_choice: ToolChoice,
     tool_calls_enabled: bool,
     tool_definitions: Option<Vec<serde_json::Value>>,
+    profile: ModelProfile,
     inference_permit: OwnedSemaphorePermit,
     completion_id: String,
     model_name: String,
     engine: EngineHandle,
     channel_capacity: usize,
+    request_timeout: Duration,
+    first_token_timeout: Duration,
     metrics: Arc<crate::state::ServerMetrics>,
 }
 
@@ -225,6 +261,7 @@ struct ChatBlockingContext<'a> {
     tool_choice: ToolChoice,
     tool_calls_enabled: bool,
     tool_definitions: Option<Vec<serde_json::Value>>,
+    profile: ModelProfile,
     inference_permit: OwnedSemaphorePermit,
     completion_id: String,
     model_name: String,
@@ -247,51 +284,188 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let tool_choice = ctx.tool_choice;
     let tool_calls_enabled = ctx.tool_calls_enabled;
     let tool_definitions = ctx.tool_definitions;
+    let profile = ctx.profile;
     let inference_permit = ctx.inference_permit;
+    let request_timeout = ctx.request_timeout;
+    let first_token_timeout = ctx.first_token_timeout;
 
     tokio::spawn(async move {
         let _inference_permit = inference_permit;
         send_sse_sequence_with_finish(&tx, &cid, &mname, None, || async {
             let generation_started = Instant::now();
             match engine
-                .generate_stream_with_options(&prompt, max_tokens, options)
+                .generate_stream_with_options_cancelable(&prompt, max_tokens, options)
                 .await
             {
-                Ok(mut stream_rx) => {
-                    let mut assembled = String::new();
+                Ok((mut stream_rx, cancellation)) => {
+                    let tool_codec = profile.tool_codec();
+                    let mut incremental_text = IncrementalToolText::new(tool_codec);
+                    let mut streamed_tool_call = None;
                     let mut stream_failed = false;
                     let mut client_disconnected = false;
                     let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(2));
+                    let deadline = tokio::time::sleep(request_timeout);
+                    let first_token_deadline = tokio::time::sleep(first_token_timeout);
+                    tokio::pin!(deadline);
+                    tokio::pin!(first_token_deadline);
+                    let mut first_token_received = false;
                     keepalive.tick().await;
 
                     loop {
                         tokio::select! {
+                            _ = &mut first_token_deadline, if !first_token_received => {
+                                cancellation.cancel();
+                                stream_failed = true;
+                                if tx
+                                    .send(Ok(create_error_chunk_event(
+                                        &cid,
+                                        &mname,
+                                        "Model did not produce a first token before the configured deadline.",
+                                    )))
+                                    .await
+                                    .is_err()
+                                {
+                                    client_disconnected = true;
+                                }
+                                break;
+                            }
+                            _ = &mut deadline => {
+                                cancellation.cancel();
+                                stream_failed = true;
+                                if tx
+                                    .send(Ok(create_error_chunk_event(
+                                        &cid,
+                                        &mname,
+                                        "Inference request timed out.",
+                                    )))
+                                    .await
+                                    .is_err()
+                                {
+                                    client_disconnected = true;
+                                }
+                                break;
+                            }
+                            _ = tx.closed() => {
+                                cancellation.cancel();
+                                client_disconnected = true;
+                                break;
+                            }
                             chunk_res = stream_rx.recv() => {
                                 match chunk_res {
                                     Some(Ok(word)) => {
-                                        assembled.push_str(&word);
-                                        if !tool_calls_enabled
-                                            && tx
+                                        if !word.is_empty() {
+                                            first_token_received = true;
+                                        }
+                                        let incremental_content = incremental_text.push(&word);
+                                        let content = if tool_calls_enabled {
+                                            incremental_content
+                                        } else {
+                                            Some(word)
+                                        };
+                                        if let Some(content) = content {
+                                            if tx
                                                 .send(Ok(create_content_chunk_event(
-                                                    &cid, &mname, &word,
+                                                    &cid, &mname, &content,
                                                 )))
                                                 .await
                                                 .is_err()
-                                        {
-                                            client_disconnected = true;
-                                            break;
+                                            {
+                                                client_disconnected = true;
+                                                cancellation.cancel();
+                                                break;
+                                            }
+                                        }
+                                        if tool_calls_enabled {
+                                            let update = match tool_codec
+                                                .stream_update(incremental_text.assembled())
+                                            {
+                                                Ok(update) => update,
+                                                Err(error) => {
+                                                    stream_failed = true;
+                                                    let _ = tx
+                                                        .send(Ok(create_error_chunk_event(
+                                                            &cid, &mname, &error,
+                                                        )))
+                                                        .await;
+                                                    break;
+                                                }
+                                            };
+                                            if let Some(update) = update {
+                                                let mut deltas = Vec::new();
+                                                if tool_choice_allows_name(&tool_choice, &update.name)
+                                                {
+                                                    if streamed_tool_call.is_none() {
+                                                        let id = format!(
+                                                            "call_{}",
+                                                            uuid::Uuid::new_v4().simple()
+                                                        );
+                                                        deltas.push(serde_json::json!({
+                                                            "index": update.index,
+                                                            "id": id,
+                                                            "type": "function",
+                                                            "function": {
+                                                                "name": update.name,
+                                                                "arguments": ""
+                                                            }
+                                                        }));
+                                                        streamed_tool_call = Some(
+                                                            StreamedToolCall {
+                                                                index: update.index,
+                                                                name: update.name.clone(),
+                                                                arguments_emitted: 0,
+                                                            },
+                                                        );
+                                                    }
+                                                    if let Some(streamed) =
+                                                        streamed_tool_call.as_mut()
+                                                    {
+                                                        if streamed.name == update.name
+                                                            && update.arguments.len()
+                                                                > streamed.arguments_emitted
+                                                        {
+                                                            let arguments = &update.arguments
+                                                                [streamed.arguments_emitted..];
+                                                            deltas.push(serde_json::json!({
+                                                                "index": streamed.index,
+                                                                "function": {
+                                                                    "arguments": arguments
+                                                                }
+                                                            }));
+                                                            streamed.arguments_emitted =
+                                                                update.arguments.len();
+                                                        }
+                                                    }
+                                                }
+                                                if !deltas.is_empty()
+                                                    && tx
+                                                        .send(Ok(create_tool_calls_chunk_event(
+                                                            &cid, &mname, &deltas,
+                                                        )))
+                                                        .await
+                                                        .is_err()
+                                                {
+                                                    client_disconnected = true;
+                                                    cancellation.cancel();
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     Some(Err(err_msg)) => {
                                         stream_failed = true;
                                         tracing::error!("Inference stream error: {}", err_msg);
-                                        let _ = tx
+                                        if tx
                                             .send(Ok(create_error_chunk_event(
                                                 &cid,
                                                 &mname,
                                                 &format!("Inference error: {err_msg}"),
                                             )))
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            client_disconnected = true;
+                                            cancellation.cancel();
+                                        }
                                         break;
                                     }
                                     None => break,
@@ -301,6 +475,7 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 // Emit SSE comment heartbeat to keep client socket active during CPU prefill
                                 if tx.send(Ok(create_keepalive_event())).await.is_err() {
                                     client_disconnected = true;
+                                    cancellation.cancel();
                                     break;
                                 }
                             }
@@ -316,10 +491,55 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                         metrics.record_inference_error();
                         return "error";
                     }
+                    let assembled = incremental_text.assembled().to_string();
                     if !assembled.is_empty() {
+                        if tool_calls_enabled && incremental_text.has_tool_call_start() {
+                            // The structured call is emitted below after the complete delimiter
+                            // body has been validated by the model profile codec.
+                        } else if tool_calls_enabled {
+                            let pending = incremental_text.finish();
+                            if let Some(pending) = pending {
+                                let pending = profile.tool_codec().strip(&pending);
+                                if !pending.is_empty()
+                                    && tx
+                                        .send(Ok(create_content_chunk_event(
+                                            &cid, &mname, &pending,
+                                        )))
+                                        .await
+                                        .is_err()
+                                {
+                                    client_disconnected = true;
+                                    cancellation.cancel();
+                                }
+                            }
+                        }
+                        if client_disconnected {
+                            metrics.record_generation(generation_started.elapsed());
+                            return "error";
+                        }
                         let thinking = mivi_tools::extract_thinking(&assembled);
                         let clean_reply = mivi_tools::strip_thinking(&assembled);
-                        let tool_calls = extract_tool_calls_for_choice(&assembled, &tool_choice);
+                        let tool_calls = match extract_tool_calls_for_choice(
+                            &assembled,
+                            &tool_choice,
+                            tool_codec,
+                        ) {
+                            Ok(tool_calls) => tool_calls,
+                            Err(error) => {
+                                metrics.record_inference_error();
+                                let _ = tx
+                                    .send(Ok(create_error_chunk_event(&cid, &mname, &error)))
+                                    .await;
+                                return "error";
+                            }
+                        };
+                        if let Err(error) = validate_tool_choice_result(&tool_choice, &tool_calls) {
+                            metrics.record_inference_error();
+                            let _ = tx
+                                .send(Ok(create_error_chunk_event(&cid, &mname, &error)))
+                                .await;
+                            return "error";
+                        }
                         if let Err(error) = validate_tool_calls_against_tools(
                             &tool_calls,
                             tool_definitions.as_deref().unwrap_or_default(),
@@ -336,21 +556,20 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                             .map(|tc| format!("{}(...)", tc.name))
                             .collect();
                         if tool_calls_enabled {
-                            if !tc_names.is_empty() {
-                                let values = tool_call_values(&assembled, &tool_choice);
-                                let _ = tx
+                            let values = tool_call_values(
+                                &assembled,
+                                &tool_choice,
+                                tool_codec,
+                                streamed_tool_call.as_ref(),
+                            );
+                            if !values.is_empty() {
+                                if tx
                                     .send(Ok(create_tool_calls_chunk_event(&cid, &mname, &values)))
-                                    .await;
-                            } else {
-                                let clean_reply = mivi_tools::strip_tool_calls(&clean_reply);
-                                if !clean_reply.is_empty() {
-                                    let _ = tx
-                                        .send(Ok(create_content_chunk_event(
-                                            &cid,
-                                            &mname,
-                                            &clean_reply,
-                                        )))
-                                        .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    cancellation.cancel();
+                                    return "error";
                                 }
                             }
                         }
@@ -368,6 +587,13 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                         } else {
                             "stop"
                         };
+                    }
+                    if let Err(error) = validate_tool_choice_result(&tool_choice, &[]) {
+                        metrics.record_inference_error();
+                        let _ = tx
+                            .send(Ok(create_error_chunk_event(&cid, &mname, &error)))
+                            .await;
+                        return "error";
                     }
                 }
                 Err(e) => {
@@ -404,7 +630,22 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
         Ok((output, p_tokens, c_tokens)) => {
             ctx.metrics.record_tokens(p_tokens, c_tokens);
             let thinking = mivi_tools::extract_thinking(&output);
-            let tool_calls_extracted = extract_tool_calls_for_choice(&output, &ctx.tool_choice);
+            let tool_calls_extracted = match extract_tool_calls_for_choice(
+                &output,
+                &ctx.tool_choice,
+                ctx.profile.tool_codec(),
+            ) {
+                Ok(tool_calls) => tool_calls,
+                Err(error) => {
+                    ctx.metrics.record_inference_error();
+                    return AppError::InferenceError(error).into_response();
+                }
+            };
+            if let Err(error) = validate_tool_choice_result(&ctx.tool_choice, &tool_calls_extracted)
+            {
+                ctx.metrics.record_inference_error();
+                return AppError::InferenceError(error).into_response();
+            }
             if let Err(error) = validate_tool_calls_against_tools(
                 &tool_calls_extracted,
                 ctx.tool_definitions.as_deref().unwrap_or_default(),
@@ -436,7 +677,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
             };
 
             let content = if tool_calls.is_some() || !ctx.tool_calls_enabled {
-                let cleaned = mivi_tools::strip_tool_calls(&output);
+                let cleaned = ctx.profile.tool_codec().strip(&output);
                 if cleaned.is_empty() {
                     None
                 } else {
@@ -459,6 +700,7 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
                         name: None,
                         thinking: thinking.clone(),
                         tool_calls,
+                        tool_call_id: None,
                     },
                     finish_reason: Some(finish_reason.to_string()),
                 }],
@@ -508,26 +750,48 @@ async fn handle_chat_blocking(ctx: ChatBlockingContext<'_>) -> Response {
     }
 }
 
-fn extract_tool_calls_for_choice(output: &str, choice: &ToolChoice) -> Vec<mivi_tools::ToolCall> {
+fn extract_tool_calls_for_choice(
+    output: &str,
+    choice: &ToolChoice,
+    codec: &dyn mivi_tools::ToolCallCodec,
+) -> Result<Vec<mivi_tools::ToolCall>, String> {
     if matches!(choice, ToolChoice::Disabled) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    mivi_tools::extract_tool_calls(output)
+    let calls = codec.extract(output)?;
+    if let ToolChoice::Named(expected) = choice {
+        if let Some(unexpected) = calls.iter().find(|call| {
+            call.name != expected.as_str() && call.name != mivi_tools::PARSE_ERROR_TOOL_NAME
+        }) {
+            return Err(format!(
+                "Model emitted tool '{}' but tool_choice requires '{}'",
+                unexpected.name, expected
+            ));
+        }
+    }
+    Ok(calls
         .into_iter()
         .filter(|call| match choice {
             ToolChoice::Named(name) => {
                 call.name == name.as_str() || call.name == mivi_tools::PARSE_ERROR_TOOL_NAME
             }
-            ToolChoice::Auto => true,
+            ToolChoice::Auto | ToolChoice::Required => true,
             ToolChoice::Disabled => false,
         })
-        .collect()
+        .collect())
 }
 
-fn tool_call_values(output: &str, choice: &ToolChoice) -> Vec<serde_json::Value> {
-    extract_tool_calls_for_choice(output, choice)
+fn tool_call_values(
+    output: &str,
+    choice: &ToolChoice,
+    codec: &dyn mivi_tools::ToolCallCodec,
+    streamed: Option<&StreamedToolCall>,
+) -> Vec<serde_json::Value> {
+    extract_tool_calls_for_choice(output, choice, codec)
+        .unwrap_or_default()
         .into_iter()
         .enumerate()
+        .filter(|(index, _)| streamed.is_none_or(|call| call.index != *index))
         .map(|(index, call)| {
             serde_json::json!({
                 "index": index,
@@ -540,4 +804,160 @@ fn tool_call_values(output: &str, choice: &ToolChoice) -> Vec<serde_json::Value>
             })
         })
         .collect()
+}
+
+struct StreamedToolCall {
+    index: usize,
+    name: String,
+    arguments_emitted: usize,
+}
+
+fn tool_choice_allows_name(choice: &ToolChoice, name: &str) -> bool {
+    match choice {
+        ToolChoice::Auto | ToolChoice::Required => true,
+        ToolChoice::Named(expected) => expected == name,
+        ToolChoice::Disabled => false,
+    }
+}
+
+/// Classifies generated text without exposing a partial tool-call marker to the client.
+///
+/// Text before a tool-call marker is safe to send immediately. The marker itself and everything
+/// after it stay buffered until the codec can parse a complete structured call.
+struct IncrementalToolText<'a> {
+    codec: &'a dyn mivi_tools::ToolCallCodec,
+    assembled: String,
+    emitted_bytes: usize,
+    tool_call_started: bool,
+}
+
+impl<'a> IncrementalToolText<'a> {
+    fn new(codec: &'a dyn mivi_tools::ToolCallCodec) -> Self {
+        Self {
+            codec,
+            assembled: String::new(),
+            emitted_bytes: 0,
+            tool_call_started: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &str) -> Option<String> {
+        self.assembled.push_str(chunk);
+        self.emit_safe_text(false)
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        self.emit_safe_text(true)
+    }
+
+    fn assembled(&self) -> &str {
+        &self.assembled
+    }
+
+    fn has_tool_call_start(&self) -> bool {
+        self.tool_call_started
+    }
+
+    fn emit_safe_text(&mut self, at_end: bool) -> Option<String> {
+        if self.tool_call_started {
+            return None;
+        }
+
+        let Some(delimiter) = self.codec.opening_delimiter() else {
+            return self.emit_all_at_end(at_end);
+        };
+        if delimiter.is_empty() {
+            return self.emit_all_at_end(at_end);
+        }
+
+        let safe_end = if let Some(start) = self.assembled.find(delimiter) {
+            self.tool_call_started = true;
+            start
+        } else if at_end {
+            self.assembled.len()
+        } else {
+            self.assembled
+                .len()
+                .saturating_sub(partial_delimiter_suffix_len(&self.assembled, delimiter))
+        };
+
+        if safe_end <= self.emitted_bytes {
+            return None;
+        }
+
+        let text = self.assembled[self.emitted_bytes..safe_end].to_string();
+        self.emitted_bytes = safe_end;
+        Some(text)
+    }
+
+    fn emit_all_at_end(&mut self, at_end: bool) -> Option<String> {
+        if !at_end || self.emitted_bytes >= self.assembled.len() {
+            return None;
+        }
+        let text = self.assembled[self.emitted_bytes..].to_string();
+        self.emitted_bytes = self.assembled.len();
+        Some(text)
+    }
+}
+
+fn partial_delimiter_suffix_len(text: &str, delimiter: &str) -> usize {
+    delimiter
+        .char_indices()
+        .skip(1)
+        .filter_map(|(index, _)| {
+            let prefix = &delimiter[..index];
+            text.ends_with(prefix).then_some(prefix.len())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::IncrementalToolText;
+    use crate::routes::{validate_context_budget, ContextBudgetError};
+    use mivi_tools::DelimitedPythonToolCallCodec;
+
+    #[test]
+    fn context_budget_accepts_exact_capacity() {
+        assert!(validate_context_budget(6, 2, 8).is_ok());
+    }
+
+    #[test]
+    fn context_budget_rejects_reserved_output_overflow() {
+        let error = validate_context_budget(7, 2, 8).expect_err("budget should be rejected");
+        assert!(matches!(
+            error,
+            ContextBudgetError {
+                prompt_tokens: 7,
+                requested_output_tokens: 2,
+                context_length: 8,
+            }
+        ));
+    }
+
+    #[test]
+    fn emits_safe_text_but_holds_split_tool_delimiters_and_body() {
+        let codec = DelimitedPythonToolCallCodec::new("<call>", "</call>");
+        let mut stream = IncrementalToolText::new(&codec);
+
+        assert_eq!(
+            stream.push("I will inspect "),
+            Some("I will inspect ".to_string())
+        );
+        assert_eq!(stream.push("<ca"), None);
+        assert_eq!(stream.push("ll>[read_file(path=\"README.md\")"), None);
+        assert_eq!(stream.push("]</call>"), None);
+        assert!(stream.has_tool_call_start());
+        assert_eq!(stream.finish(), None);
+    }
+
+    #[test]
+    fn flushes_plain_text_at_generation_end() {
+        let codec = DelimitedPythonToolCallCodec::new("<call>", "</call>");
+        let mut stream = IncrementalToolText::new(&codec);
+
+        assert_eq!(stream.push("plain"), Some("plain".to_string()));
+        assert_eq!(stream.finish(), None);
+    }
 }

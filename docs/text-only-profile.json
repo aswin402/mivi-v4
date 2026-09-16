@@ -1,0 +1,6 @@
+{
+  "kind": "text_only",
+  "start_of_text": "<BOS>",
+  "message_start": "<MSG>",
+  "message_end": "</MSG>"
+}

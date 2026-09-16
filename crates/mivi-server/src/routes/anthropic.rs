@@ -1,6 +1,8 @@
+use crate::engine_actor::GenerationCancellation;
 use crate::generation::{
     validate_sampling_parameters, validate_stop_sequences, GenerationOptions, ResponseMode,
 };
+use crate::model_profile::{ModelProfile, ModelProfileConfig};
 use crate::state::AppState;
 use axum::{
     extract::State,
@@ -9,14 +11,16 @@ use axum::{
     Json,
 };
 use futures::StreamExt;
+use mivi_protocol::{Message, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 use std::time::Instant;
-use tokio_stream::wrappers::ReceiverStream;
 
 /// Anthropic Message input.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,105 +90,294 @@ pub struct AnthropicResponse {
     pub usage: AnthropicUsage,
 }
 
-/// Convert an Anthropic request into ChatML prompt string.
-pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
-    let mut prompt = String::new();
+struct CancellationOnDrop(GenerationCancellation);
 
-    // 1. System prompt
-    let mut system_text = match &req.system {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(blocks)) => {
-            let mut acc = String::new();
-            for b in blocks {
-                if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
-                    acc.push_str(t);
+impl CancellationOnDrop {
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+impl Drop for CancellationOnDrop {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+struct AnthropicChunkStreamState {
+    receiver: tokio::sync::mpsc::Receiver<Result<String, String>>,
+    cancellation: CancellationOnDrop,
+    deadline: Pin<Box<tokio::time::Sleep>>,
+    first_token_deadline: Pin<Box<tokio::time::Sleep>>,
+    first_token_received: bool,
+    failed: bool,
+    stream_failed: Arc<AtomicBool>,
+    assembled_text: Arc<std::sync::Mutex<String>>,
+    tools_enabled: bool,
+}
+
+fn anthropic_chunk_stream(
+    receiver: tokio::sync::mpsc::Receiver<Result<String, String>>,
+    cancellation: GenerationCancellation,
+    request_timeout: Duration,
+    first_token_timeout: Duration,
+    tools_enabled: bool,
+    assembled_text: Arc<std::sync::Mutex<String>>,
+    stream_failed: Arc<AtomicBool>,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    futures::stream::unfold(
+        AnthropicChunkStreamState {
+            receiver,
+            cancellation: CancellationOnDrop(cancellation),
+            deadline: Box::pin(tokio::time::sleep(request_timeout)),
+            first_token_deadline: Box::pin(tokio::time::sleep(first_token_timeout)),
+            first_token_received: false,
+            failed: false,
+            stream_failed,
+            assembled_text,
+            tools_enabled,
+        },
+        |mut state| async move {
+            loop {
+                if state.failed {
+                    return None;
                 }
-            }
-            acc
-        }
-        _ => String::new(),
-    };
-    if let Some(ref tools) = req.tools {
-        if !tools.is_empty() {
-            if !system_text.is_empty() {
-                system_text.push_str("\n\n");
-            }
-            system_text.push_str("Available tools:\n");
-            for tool in tools {
-                let schema_str =
-                    serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string());
-                system_text.push_str(&format!(
-                    "- {}: {} | parameters: {}\n",
-                    tool.name,
-                    tool.description.as_deref().unwrap_or(""),
-                    schema_str
-                ));
-            }
-            system_text.push_str("\nTo invoke a tool, output: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
-        }
-    }
 
-    if !system_text.is_empty() {
-        prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", system_text));
-    }
-
-    // 2. Messages
-    for msg in &req.messages {
-        let content_str = match &msg.content {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(blocks) => {
-                let mut acc = String::new();
-                for block in blocks {
-                    let b_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match b_type {
-                        "text" => {
-                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                acc.push_str(text);
+                tokio::select! {
+                    _ = &mut state.first_token_deadline, if !state.first_token_received => {
+                        state.cancellation.cancel();
+                        state.failed = true;
+                        state.stream_failed.store(true, Ordering::Release);
+                        let data = serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": "Model did not produce a first token before the configured deadline."
                             }
-                        }
-                        "tool_use" => {
-                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let input =
-                                block.get("input").cloned().unwrap_or(serde_json::json!({}));
-                            acc.push_str(&format!(
-                                "<tool_call>{{\"name\":\"{}\",\"arguments\":{}}}</tool_call>",
-                                name, input
-                            ));
-                        }
-                        "tool_result" => {
-                            let content_str = block
-                                .get("content")
-                                .map(|c| {
-                                    if let Some(s) = c.as_str() {
-                                        s.to_string()
-                                    } else {
-                                        c.to_string()
-                                    }
-                                })
-                                .unwrap_or_default();
-                            acc.push_str(&format!("<tool_result>{}</tool_result>", content_str));
-                        }
-                        _ => {
-                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                acc.push_str(text);
+                        }).to_string();
+                        return Some((Ok(Event::default().event("error").data(data)), state));
+                    }
+                    _ = &mut state.deadline => {
+                        state.cancellation.cancel();
+                        state.failed = true;
+                        state.stream_failed.store(true, Ordering::Release);
+                        let data = serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": "Inference request timed out."
                             }
+                        }).to_string();
+                        return Some((Ok(Event::default().event("error").data(data)), state));
+                    }
+                    chunk = state.receiver.recv() => {
+                        match chunk {
+                            Some(Ok(chunk)) => {
+                                if !chunk.is_empty() {
+                                    state.first_token_received = true;
+                                }
+                                if let Ok(mut guard) = state.assembled_text.lock() {
+                                    guard.push_str(&chunk);
+                                }
+                                if state.tools_enabled {
+                                    continue;
+                                }
+                                let data = serde_json::json!({
+                                    "type": "content_block_delta",
+                                    "index": 0,
+                                    "delta": { "type": "text_delta", "text": chunk }
+                                }).to_string();
+                                return Some((
+                                    Ok(Event::default().event("content_block_delta").data(data)),
+                                    state,
+                                ));
+                            }
+                            Some(Err(error)) => {
+                                state.failed = true;
+                                state.stream_failed.store(true, Ordering::Release);
+                                let data = serde_json::json!({
+                                    "type": "error",
+                                    "error": { "type": "api_error", "message": error }
+                                }).to_string();
+                                return Some((Ok(Event::default().event("error").data(data)), state));
+                            }
+                            None => return None,
                         }
                     }
                 }
-                acc
             }
-            other => other.to_string(),
-        };
+        },
+    )
+}
 
-        prompt.push_str(&format!(
-            "<|im_start|>{}\n{}<|im_end|>\n",
-            msg.role, content_str
-        ));
+fn anthropic_value_to_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(blocks) => {
+            let mut text = String::new();
+            for block in blocks {
+                if let Some(block_text) = block.get("text").and_then(|value| value.as_str()) {
+                    text.push_str(block_text);
+                } else if let Some(block_content) = block.get("content") {
+                    if let Some(block_text) = anthropic_value_to_text(block_content) {
+                        text.push_str(&block_text);
+                    }
+                }
+            }
+            Some(text)
+        }
+        value => Some(value.to_string()),
+    }
+}
+
+fn canonical_anthropic_messages(req: &AnthropicRequest) -> Vec<Message> {
+    let mut messages = Vec::new();
+    if let Some(content) = req.system.as_ref().and_then(anthropic_value_to_text) {
+        if !content.is_empty() {
+            messages.push(Message {
+                role: "system".to_string(),
+                content: Some(content),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+        }
     }
 
-    // 3. Assistant generation suffix
-    prompt.push_str("<|im_start|>assistant\n");
-    prompt
+    for message in &req.messages {
+        let role = if message.role.eq_ignore_ascii_case("assistant") {
+            "assistant"
+        } else if message.role.eq_ignore_ascii_case("tool") {
+            "tool"
+        } else {
+            "user"
+        };
+
+        let Some(blocks) = message.content.as_array() else {
+            messages.push(Message {
+                role: role.to_string(),
+                content: anthropic_value_to_text(&message.content),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+            continue;
+        };
+
+        let mut text = String::new();
+        let mut reasoning = None;
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
+
+        for block in blocks {
+            match block.get("type").and_then(|value| value.as_str()) {
+                Some("text") => {
+                    if let Some(value) = block.get("text").and_then(|value| value.as_str()) {
+                        text.push_str(value);
+                    }
+                }
+                Some("thinking") => {
+                    reasoning = block
+                        .get("thinking")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned);
+                }
+                Some("tool_use") => {
+                    let Some(name) = block.get("name").and_then(|value| value.as_str()) else {
+                        continue;
+                    };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    tool_calls.push(ToolCall {
+                        id: block
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned),
+                        name: name.to_string(),
+                        arguments: block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                    });
+                }
+                Some("tool_result") => {
+                    tool_results.push(Message {
+                        role: "tool".to_string(),
+                        content: block.get("content").and_then(anthropic_value_to_text),
+                        name: None,
+                        tool_call_id: block
+                            .get("tool_use_id")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned),
+                        tool_calls: Vec::new(),
+                        reasoning: None,
+                    });
+                }
+                _ => {
+                    if let Some(value) = block.get("text").and_then(|value| value.as_str()) {
+                        text.push_str(value);
+                    }
+                }
+            }
+        }
+
+        if role == "assistant" {
+            if !text.is_empty() || !tool_calls.is_empty() || reasoning.is_some() {
+                messages.push(Message {
+                    role: role.to_string(),
+                    content: if text.is_empty() { None } else { Some(text) },
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls,
+                    reasoning,
+                });
+            }
+        } else {
+            if !text.is_empty() {
+                messages.push(Message {
+                    role: role.to_string(),
+                    content: Some(text),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning,
+                });
+            }
+            messages.extend(tool_results);
+        }
+    }
+
+    messages
+}
+
+fn canonical_anthropic_tools(req: &AnthropicRequest) -> Vec<ToolDefinition> {
+    req.tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|tool| ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.input_schema.clone(),
+        })
+        .collect()
+}
+
+/// Convert an Anthropic request into the legacy ChatML profile for compatibility callers.
+pub fn convert_anthropic_to_chatml(req: &AnthropicRequest) -> String {
+    let profile = ModelProfile::from_config(&ModelProfileConfig::Legacy)
+        .expect("legacy model profile must always be valid");
+    profile
+        .render_prompt(
+            &canonical_anthropic_messages(req),
+            &canonical_anthropic_tools(req),
+            false,
+        )
+        .unwrap_or_default()
 }
 
 /// POST /v1/messages route handler.
@@ -250,7 +443,29 @@ pub async fn anthropic_messages_handler(
         }
     }
 
-    let prompt = convert_anthropic_to_chatml(&req);
+    let profile = match ModelProfile::resolve(
+        state.engine.model_metadata(),
+        state.config.model_profile.as_ref(),
+    ) {
+        Ok(profile) => profile,
+        Err(message) => return anthropic_invalid_request(message),
+    };
+    let canonical_messages = canonical_anthropic_messages(&req);
+    if !profile.supports_tools()
+        && (req.tools.as_ref().is_some_and(|items| !items.is_empty())
+            || canonical_messages.iter().any(|message| {
+                !message.tool_calls.is_empty() || message.role.eq_ignore_ascii_case("tool")
+            }))
+    {
+        return anthropic_invalid_request(
+            "selected model profile does not support tool calls".to_string(),
+        );
+    }
+    let prompt =
+        match profile.render_prompt(&canonical_messages, &canonical_anthropic_tools(&req), false) {
+            Ok(prompt) => prompt,
+            Err(message) => return anthropic_invalid_request(message),
+        };
     let max_tokens = bounded_max_tokens(req.max_tokens, state.config.max_allowed_tokens);
     let options = GenerationOptions {
         temperature: req.temperature,
@@ -272,6 +487,11 @@ pub async fn anthropic_messages_handler(
     state
         .metrics
         .record_inference_accepted(slot_wait_started.elapsed());
+    let admitted_prompt_tokens =
+        match crate::routes::admit_model_context(&state.engine, &prompt, max_tokens).await {
+            Ok(prompt_tokens) => prompt_tokens,
+            Err(error) => return anthropic_invalid_request(error.to_string()),
+        };
     let model_name = state.model_name.clone();
     let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
@@ -295,23 +515,25 @@ pub async fn anthropic_messages_handler(
         });
 
     if let Some(prompt_text) = &last_user_prompt {
-        let approx_tokens = (prompt.len() / 4).max(1);
-        crate::logging::print_incoming_prompt(prompt_text, Some(approx_tokens), false);
+        crate::logging::print_incoming_prompt(prompt_text, admitted_prompt_tokens, false);
     }
 
     if req.stream {
         // SSE streaming response
         // Encode before starting generation so the engine actor cannot block on
         // the bounded stream buffer before it processes this usage request.
-        let input_tokens = state.engine.encode(&prompt).await.len();
+        let input_tokens = match admitted_prompt_tokens {
+            Some(prompt_tokens) => prompt_tokens,
+            None => state.engine.encode(&prompt).await.len(),
+        };
         let metrics = state.metrics.clone();
         let generation_started = Instant::now();
-        let stream_rx = match state
+        let (stream_rx, cancellation) = match state
             .engine
-            .generate_stream_with_options(&prompt, max_tokens, options.clone())
+            .generate_stream_with_options_cancelable(&prompt, max_tokens, options.clone())
             .await
         {
-            Ok(rx) => rx,
+            Ok(stream) => stream,
             Err(e) => {
                 metrics.record_generation(generation_started.elapsed());
                 state.metrics.record_inference_error();
@@ -357,54 +579,23 @@ pub async fn anthropic_messages_handler(
 
         // 2. content_block_delta stream with dynamic token counting
         let assembled_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let text_accum = assembled_text.clone();
         let stream_failed = Arc::new(AtomicBool::new(false));
-        let stream_failed_flag = stream_failed.clone();
-
-        let stream = ReceiverStream::new(stream_rx).filter_map(move |chunk_res| {
-            if stream_failed_flag.load(Ordering::Acquire) {
-                return futures::future::ready(None);
-            }
-            let chunk = match chunk_res {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    stream_failed_flag.store(true, Ordering::Release);
-                    let data = serde_json::json!({
-                        "type": "error",
-                        "error": { "type": "api_error", "message": error }
-                    })
-                    .to_string();
-                    return futures::future::ready(Some(Ok::<Event, Infallible>(
-                        Event::default().event("error").data(data),
-                    )));
-                }
-            };
-            if let Ok(mut guard) = text_accum.lock() {
-                guard.push_str(&chunk);
-            }
-            futures::future::ready(if tools_enabled {
-                None
-            } else {
-                let data = serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {
-                        "type": "text_delta",
-                        "text": chunk
-                    }
-                })
-                .to_string();
-                Some(Ok::<Event, Infallible>(
-                    Event::default().event("content_block_delta").data(data),
-                ))
-            })
-        });
+        let stream = anthropic_chunk_stream(
+            stream_rx,
+            cancellation,
+            Duration::from_secs(state.config.request_timeout_secs),
+            Duration::from_secs(state.config.first_token_timeout_secs),
+            tools_enabled,
+            assembled_text.clone(),
+            stream_failed.clone(),
+        );
 
         // 3. Close the text block, optionally emit structured tool-use blocks, and finish.
         let token_engine = state.engine.clone();
         let prompt_log_clone = last_user_prompt.clone();
         let text_final = assembled_text.clone();
         let validation_tools = tool_definitions.clone();
+        let output_profile = profile.clone();
         let stream_failed_final = stream_failed.clone();
         let post_generation_stream = futures::stream::once(async move {
             let _inference_permit = inference_permit;
@@ -427,20 +618,27 @@ pub async fn anthropic_messages_handler(
             metrics.record_tokens(input_tokens, out_tokens);
             let thinking = mivi_tools::extract_thinking(&output);
             let clean = if tools_enabled {
-                mivi_tools::strip_tool_calls(&mivi_tools::strip_thinking(&output))
+                output_profile
+                    .tool_codec()
+                    .strip(&mivi_tools::strip_thinking(&output))
             } else {
                 mivi_tools::strip_thinking(&output)
             };
-            let parsed_tools = if tools_enabled {
-                mivi_tools::extract_tool_calls(&output)
+            let (parsed_tools, parse_error) = if tools_enabled {
+                match output_profile.tool_codec().extract(&output) {
+                    Ok(tool_calls) => (tool_calls, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                }
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
-            let validation_error = if tools_enabled {
-                validate_anthropic_tool_calls(&parsed_tools, &validation_tools).err()
-            } else {
-                None
-            };
+            let validation_error = parse_error.or_else(|| {
+                if tools_enabled {
+                    validate_anthropic_tool_calls(&parsed_tools, &validation_tools).err()
+                } else {
+                    None
+                }
+            });
             let has_tools = validation_error.is_none() && !parsed_tools.is_empty();
             let mut events = Vec::new();
 
@@ -570,7 +768,13 @@ pub async fn anthropic_messages_handler(
                     .metrics
                     .record_tokens(prompt_tokens, completion_tokens);
                 let parsed_tools = if tools_enabled {
-                    mivi_tools::extract_tool_calls(&output_text)
+                    match profile.tool_codec().extract(&output_text) {
+                        Ok(tool_calls) => tool_calls,
+                        Err(error) => {
+                            state.metrics.record_inference_error();
+                            return anthropic_inference_error(error);
+                        }
+                    }
                 } else {
                     Vec::new()
                 };
@@ -581,7 +785,9 @@ pub async fn anthropic_messages_handler(
                 }
                 let has_tools = !parsed_tools.is_empty();
                 let clean_text = if tools_enabled {
-                    mivi_tools::strip_tool_calls(&output_text)
+                    profile
+                        .tool_codec()
+                        .strip(&mivi_tools::strip_thinking(&output_text))
                 } else {
                     output_text.clone()
                 };

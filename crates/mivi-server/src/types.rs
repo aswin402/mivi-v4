@@ -1,6 +1,7 @@
 //! OpenAI-compatible API request and response data types + Mivi extended endpoints.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 fn render_tool_calls(tool_calls: Option<&[serde_json::Value]>) -> Option<String> {
     let tool_calls = tool_calls?;
@@ -74,6 +75,66 @@ pub struct ChatCompletionRequest {
     pub reasoning_effort: Option<String>,
 }
 
+impl ChatCompletionRequest {
+    /// Normalize OpenAI function wrappers into model-neutral tool definitions.
+    pub fn to_canonical_tools(&self) -> Result<Vec<mivi_protocol::ToolDefinition>, String> {
+        canonical_tools_from_values(self.tools.as_deref())
+    }
+}
+
+/// Normalize an optional filtered OpenAI tool list into model-neutral definitions.
+pub fn canonical_tools_from_values(
+    tools: Option<&[Value]>,
+) -> Result<Vec<mivi_protocol::ToolDefinition>, String> {
+    tools
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| normalize_openai_tool(index, tool))
+        .collect()
+}
+
+fn normalize_openai_tool(
+    index: usize,
+    value: &Value,
+) -> Result<mivi_protocol::ToolDefinition, String> {
+    let tool_object = value
+        .as_object()
+        .ok_or_else(|| format!("tools[{index}] must be an object"))?;
+    if tool_object.get("type").and_then(Value::as_str) != Some("function") {
+        return Err(format!("tools[{index}].type must be 'function'"));
+    }
+
+    let function = tool_object
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("tools[{index}].function must be an object"))?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("tools[{index}].function.name must be a non-empty string"))?;
+    let parameters = function
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if !parameters.is_object() {
+        return Err(format!(
+            "tools[{index}].function.parameters must be a JSON object"
+        ));
+    }
+
+    Ok(mivi_protocol::ToolDefinition {
+        name: name.to_string(),
+        description: function
+            .get("description")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        parameters,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDto {
     pub role: String,
@@ -85,6 +146,64 @@ pub struct MessageDto {
     pub thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl MessageDto {
+    /// Convert an external API message without losing tool-call identity or null content.
+    ///
+    /// Model-specific rendering is intentionally deferred to a model adapter. The existing
+    /// `From<&MessageDto> for mivi_tokenizer::ChatMessage` implementation remains temporarily
+    /// available for the legacy formatter during the adapter migration.
+    pub fn to_canonical_message(&self) -> Result<mivi_protocol::Message, String> {
+        let tool_calls = self
+            .tool_calls
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(parse_openai_tool_call)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(mivi_protocol::Message {
+            role: self.role.clone(),
+            content: self.content.clone(),
+            name: self.name.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            tool_calls,
+            reasoning: self.thinking.clone(),
+        })
+    }
+}
+
+fn parse_openai_tool_call(value: &Value) -> Result<mivi_protocol::ToolCall, String> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let function = value
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "tool call must contain a function object".to_string())?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "tool call function.name must be a non-empty string".to_string())?;
+    let raw_arguments = function
+        .get("arguments")
+        .ok_or_else(|| "tool call function.arguments is required".to_string())?;
+    let arguments = match raw_arguments {
+        Value::String(raw) => serde_json::from_str(raw)
+            .map_err(|error| format!("tool call arguments must be valid JSON: {error}"))?,
+        value => value.clone(),
+    };
+
+    Ok(mivi_protocol::ToolCall {
+        id,
+        name: name.to_string(),
+        arguments,
+    })
 }
 
 fn deserialize_polymorphic_content<'de, D>(
@@ -130,6 +249,68 @@ impl From<&MessageDto> for mivi_tokenizer::ChatMessage {
     }
 }
 
+#[cfg(test)]
+mod canonical_message_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_message_preserves_tool_call_identity_and_null_content() {
+        let message = MessageDto {
+            role: "assistant".to_string(),
+            content: None,
+            name: None,
+            thinking: None,
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            })]),
+            tool_call_id: None,
+        };
+
+        let canonical = message.to_canonical_message().expect("valid tool call");
+
+        assert_eq!(canonical.role, "assistant");
+        assert_eq!(canonical.content, None);
+        assert_eq!(canonical.tool_calls.len(), 1);
+        assert_eq!(canonical.tool_calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(canonical.tool_calls[0].name, "read_file");
+        assert_eq!(canonical.tool_calls[0].arguments["path"], "README.md");
+    }
+
+    #[test]
+    fn canonical_tools_remove_openai_wrapper_without_losing_schema() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "messages": [],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }
+                }
+            }]
+        }))
+        .expect("valid OpenAI request");
+
+        let tools = request
+            .to_canonical_tools()
+            .expect("valid tool definitions");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read_file");
+        assert_eq!(tools[0].description.as_deref(), Some("Read a file"));
+        assert_eq!(tools[0].parameters["required"][0], "path");
+    }
+}
+
 impl From<MessageDto> for mivi_tokenizer::ChatMessage {
     fn from(m: MessageDto) -> Self {
         (&m).into()
@@ -155,6 +336,7 @@ mod tests {
                     "arguments": "{\"path\":\"README.md\"}"
                 }
             })]),
+            tool_call_id: None,
         };
 
         let chat_message: mivi_tokenizer::ChatMessage = (&message).into();
@@ -208,6 +390,15 @@ fn default_max_steps() -> usize {
     crate::config::ServerConfig::default().default_max_agent_steps
 }
 
+/// Runtime capabilities selected for the loaded model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCapabilityReport {
+    pub profile: Option<String>,
+    pub tool_codec: Option<String>,
+    pub supports_tools: bool,
+    pub supports_streaming: bool,
+}
+
 /// Telemetry status response for /v1/mivi/status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiviStatusResponse {
@@ -216,6 +407,8 @@ pub struct MiviStatusResponse {
     pub model: String,
     pub memory_rss_mb: f32,
     pub active_tools_count: usize,
+    pub context_length: Option<usize>,
+    pub capabilities: ModelCapabilityReport,
     pub status: String,
     pub uptime_seconds: u64,
 }
@@ -243,6 +436,14 @@ pub enum AppError {
     Unauthorized(String),
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
+    #[error(
+        "Context length exceeded: prompt uses {prompt_tokens} tokens and requested output reserves {requested_output_tokens}, but model context limit is {context_length}"
+    )]
+    ContextLengthExceeded {
+        prompt_tokens: usize,
+        requested_output_tokens: usize,
+        context_length: usize,
+    },
     #[error("Inference failed: {0}")]
     InferenceError(String),
     #[error("Service unavailable: {0}")]
@@ -267,6 +468,18 @@ impl axum::response::IntoResponse for AppError {
                 "invalid_request_error",
                 Some("invalid_request"),
                 m,
+            ),
+            AppError::ContextLengthExceeded {
+                prompt_tokens,
+                requested_output_tokens,
+                context_length,
+            } => (
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                Some("context_length_exceeded"),
+                format!(
+                    "Context length exceeded: prompt uses {prompt_tokens} tokens and requested output reserves {requested_output_tokens}, but model context limit is {context_length}"
+                ),
             ),
             AppError::InferenceError(m) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

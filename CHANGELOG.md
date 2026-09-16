@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.28] - 2026-09-16
+
+### Model-Agnostic Agent Compatibility
+
+- Added canonical model-neutral messages, tool calls, and tool definitions for API adapters.
+- Added metadata-driven and externally configurable model profiles, including native delimited tool calls and an explicit text-only profile.
+- Improved OpenAI, Anthropic, and internal-agent tool-call handling, streaming, cancellation, context admission, and capability reporting.
+- Preserved tool-call identities, null assistant content, tool results, and multi-turn native history.
+- Removed prompt-text-based BOS detection so custom model delimiters are handled by token identity.
+- Fixed `--no-safelock` exiting immediately when the disabled watchdog closes its channel.
+
 ## [v0.2.27] - 2026-09-07
 
 ### Correctness Fixes After v0.2.26 Review

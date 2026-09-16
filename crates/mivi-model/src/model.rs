@@ -341,8 +341,30 @@ impl Model {
     where
         F: FnMut(u32, &str) -> bool,
     {
+        self.generate_streaming_with_cancel(prompt, max_tokens, on_token, || false)
+    }
+
+    /// Prefill prompt tokens and generate tokens incrementally while allowing a caller to
+    /// cooperatively stop work during both prefill and token generation.
+    pub fn generate_streaming_with_cancel<F, C>(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        on_token: F,
+        should_cancel: C,
+    ) -> Result<String>
+    where
+        F: FnMut(u32, &str) -> bool,
+        C: FnMut() -> bool,
+    {
         self.reset_context();
-        self.generate_streaming_incremental(prompt, 0, max_tokens, on_token)
+        self.generate_streaming_incremental_with_cancel(
+            prompt,
+            0,
+            max_tokens,
+            on_token,
+            should_cancel,
+        )
     }
 
     /// Prefill prompt tokens starting from `start_pos` without resetting KV cache or recurrent states.
@@ -356,29 +378,56 @@ impl Model {
     where
         F: FnMut(u32, &str) -> bool,
     {
+        self.generate_streaming_incremental_with_cancel(
+            prompt,
+            start_pos,
+            max_tokens,
+            on_token,
+            || false,
+        )
+    }
+
+    /// Prefill prompt tokens starting from `start_pos` and generate tokens incrementally with
+    /// cooperative cancellation checks.
+    pub fn generate_streaming_incremental_with_cancel<F, C>(
+        &mut self,
+        prompt: &str,
+        start_pos: usize,
+        max_tokens: usize,
+        on_token: F,
+        should_cancel: C,
+    ) -> Result<String>
+    where
+        F: FnMut(u32, &str) -> bool,
+        C: FnMut() -> bool,
+    {
         let mut token_ids = self.tokenizer.encode(prompt);
         if token_ids.is_empty() {
             return Ok(String::new());
         }
 
-        // Prepend BOS token only for raw/completion prompts at start_pos 0, NOT for ChatML prompts.
-        let is_chatml = prompt.contains("<|im_start|>");
         let add_bos = match self.gguf.metadata.get("tokenizer.ggml.add_bos_token") {
             Some(GgufValue::Bool(b)) => *b,
             _ => false,
         };
-        if add_bos && start_pos == 0 && !is_chatml {
-            let bos_id = match self.gguf.metadata.get("tokenizer.ggml.bos_token_id") {
-                Some(v) => v.as_usize().unwrap_or(1) as u32,
-                None => 1,
-            };
-            if token_ids.first() != Some(&bos_id) {
-                token_ids.insert(0, bos_id);
-            }
+        let bos_id = self
+            .gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|value| value.as_usize().map(|id| id as u32))
+            .unwrap_or(1);
+        if should_prepend_bos(add_bos, start_pos, token_ids.first(), bos_id) {
+            token_ids.insert(0, bos_id);
         }
 
-        self.generate_tokens_incremental(&token_ids, start_pos, max_tokens, on_token)
-            .map(|(text, _)| text)
+        self.generate_tokens_incremental_with_cancel(
+            &token_ids,
+            start_pos,
+            max_tokens,
+            on_token,
+            should_cancel,
+        )
+        .map(|(text, _)| text)
     }
 
     /// Prefill given token IDs directly starting from `start_pos` (skipping re-tokenization)
@@ -389,12 +438,37 @@ impl Model {
         prompt_tokens: &[u32],
         start_pos: usize,
         max_tokens: usize,
-        mut on_token: F,
+        on_token: F,
     ) -> Result<(String, Vec<u32>)>
     where
         F: FnMut(u32, &str) -> bool,
     {
+        self.generate_tokens_incremental_with_cancel(
+            prompt_tokens,
+            start_pos,
+            max_tokens,
+            on_token,
+            || false,
+        )
+    }
+
+    /// Prefill given token IDs directly and generate tokens with cooperative cancellation checks.
+    pub fn generate_tokens_incremental_with_cancel<F, C>(
+        &mut self,
+        prompt_tokens: &[u32],
+        start_pos: usize,
+        max_tokens: usize,
+        mut on_token: F,
+        mut should_cancel: C,
+    ) -> Result<(String, Vec<u32>)>
+    where
+        F: FnMut(u32, &str) -> bool,
+        C: FnMut() -> bool,
+    {
         if prompt_tokens.is_empty() && start_pos == 0 {
+            return Ok((String::new(), Vec::new()));
+        }
+        if should_cancel() {
             return Ok((String::new(), Vec::new()));
         }
 
@@ -410,7 +484,7 @@ impl Model {
                 .get("tokenizer.ggml.bos_token_id")
                 .and_then(|v| v.as_usize().map(|u| u as u32))
                 .unwrap_or(1);
-            if add_bos && prompt_tokens.first() != Some(&bos_id) {
+            if should_prepend_bos(add_bos, start_pos, prompt_tokens.first(), bos_id) {
                 tokens_buf = Vec::with_capacity(prompt_tokens.len() + 1);
                 tokens_buf.push(bos_id);
                 tokens_buf.extend_from_slice(prompt_tokens);
@@ -461,6 +535,9 @@ impl Model {
 
         // 2. Prefill new prompt tokens (skipping already-cached prefix tokens)
         for i in start_prefill_idx..n_prompt {
+            if should_cancel() {
+                return Ok((String::new(), Vec::new()));
+            }
             let tok = prompt_tokens[i];
             let cur_pos = start_pos + i;
             let is_last = i + 1 == n_prompt;
@@ -531,6 +608,9 @@ impl Model {
 
         // Generation loop
         for step in 0..max_tokens {
+            if should_cancel() {
+                break;
+            }
             if pos >= self.config.max_seq_len {
                 break;
             }
@@ -769,6 +849,16 @@ fn checked_context_end(start_pos: usize, token_count: usize, max_seq_len: usize)
     Ok(end)
 }
 
+#[inline]
+fn should_prepend_bos(
+    add_bos: bool,
+    start_pos: usize,
+    first_token: Option<&u32>,
+    bos_id: u32,
+) -> bool {
+    add_bos && start_pos == 0 && first_token != Some(&bos_id)
+}
+
 /// Helper to check if `text` ends with any full stop sequence, returning the matched length.
 fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> {
     for st in stop_tokens {
@@ -828,6 +918,14 @@ mod prefix_cache_integration_tests {
         let stop_tokens = vec!["💥".to_string()];
 
         assert_eq!(longest_stop_prefix_len("x", &stop_tokens), 0);
+    }
+
+    #[test]
+    fn bos_insertion_uses_token_identity_instead_of_prompt_markup() {
+        assert!(!should_prepend_bos(true, 0, Some(&7), 7));
+        assert!(should_prepend_bos(true, 0, Some(&8), 7));
+        assert!(!should_prepend_bos(true, 1, Some(&8), 7));
+        assert!(!should_prepend_bos(false, 0, Some(&8), 7));
     }
 
     /// Integration test with real model: verify continuation preserves the prefix cache.

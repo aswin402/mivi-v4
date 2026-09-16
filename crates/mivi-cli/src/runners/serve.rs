@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use mivi_server::{create_router, AppState, ResourceWatchdog, WatchdogConfig};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -14,10 +14,13 @@ pub struct ServeArgs {
     pub workspace: PathBuf,
     pub cors_origins: Vec<String>,
     pub model: Option<PathBuf>,
+    pub model_profile: Option<PathBuf>,
     pub max_memory: f32,
     pub warn_memory: f32,
     pub max_concurrent_requests: usize,
     pub max_concurrent_tool_executions: usize,
+    pub request_timeout_secs: u64,
+    pub first_token_timeout_secs: u64,
     pub no_safelock: bool,
     pub kv_precision: Option<String>,
     pub ctx_size: Option<usize>,
@@ -55,6 +58,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         anyhow::bail!("Workspace path is not a directory: {:?}", workspace);
     }
 
+    let model_profile = args
+        .model_profile
+        .as_deref()
+        .map(load_model_profile)
+        .transpose()?;
+
     let max_concurrent_tool_executions = args.max_concurrent_tool_executions.max(1);
     let broker =
         mivi_tools::ToolBroker::with_max_concurrent_executions(max_concurrent_tool_executions);
@@ -83,9 +92,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     let engine = mivi_server::EngineActor::spawn(loaded_model);
 
     let server_config = mivi_server::ServerConfig {
+        model_profile,
         cors_allowed_origins: args.cors_origins,
         max_concurrent_requests: args.max_concurrent_requests.max(1),
         max_concurrent_tool_executions,
+        request_timeout_secs: args.request_timeout_secs.max(1),
+        first_token_timeout_secs: args.first_token_timeout_secs.max(1),
         ..mivi_server::ServerConfig::default()
     };
     let state = Arc::new(
@@ -125,10 +137,25 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
+fn load_model_profile(path: &Path) -> Result<mivi_server::ModelProfileConfig> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("Unable to read model profile '{}': {error}", path.display())
+    })?;
+    let profile = serde_json::from_str::<mivi_server::ModelProfileConfig>(&contents)
+        .map_err(|error| anyhow::anyhow!("Invalid model profile '{}': {error}", path.display()))?;
+    mivi_server::ModelProfile::from_config(&profile)
+        .map_err(|error| anyhow::anyhow!("Invalid model profile '{}': {error}", path.display()))?;
+    Ok(profile)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_bind_security;
+    use super::{load_model_profile, validate_bind_security, wait_for_safelock};
+    use mivi_server::ModelProfileConfig;
+    use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::Duration;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn loopback_bind_does_not_require_an_api_key() {
@@ -142,6 +169,37 @@ mod tests {
         assert!(validate_bind_security(public_ip, None).is_err());
         assert!(validate_bind_security(public_ip, Some("   ")).is_err());
         assert!(validate_bind_security(public_ip, Some("test-key")).is_ok());
+    }
+
+    #[test]
+    fn external_model_profile_is_loaded_and_validated() {
+        let mut file = NamedTempFile::new().expect("temporary profile");
+        write!(
+            file,
+            "{{\"kind\":\"delimited_python\",\"start_of_text\":\"<BOS>\",\"message_start\":\"<MSG>\",\"message_end\":\"</MSG>\",\"tool_call_start\":\"<CALL>\",\"tool_call_end\":\"</CALL>\"}}"
+        )
+        .expect("write profile");
+
+        let profile = load_model_profile(file.path()).expect("profile should load");
+
+        assert!(matches!(
+            profile,
+            ModelProfileConfig::DelimitedPython { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_watchdog_channel_does_not_trigger_safelock() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        drop(sender);
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(20), wait_for_safelock(receiver)).await;
+
+        assert!(
+            result.is_err(),
+            "closed watchdog channel must not resolve shutdown"
+        );
     }
 }
 
@@ -189,7 +247,7 @@ fn print_startup_banner(
     );
 }
 
-async fn shutdown_signal(mut safelock_rx: watch::Receiver<bool>, start_time: Instant) {
+async fn shutdown_signal(safelock_rx: watch::Receiver<bool>, start_time: Instant) {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {
             tracing::warn!("Failed to install Ctrl+C handler: {}", e);
@@ -211,13 +269,7 @@ async fn shutdown_signal(mut safelock_rx: watch::Receiver<bool>, start_time: Ins
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    let safelock_trigger = async {
-        while safelock_rx.changed().await.is_ok() {
-            if *safelock_rx.borrow() {
-                break;
-            }
-        }
-    };
+    let safelock_trigger = wait_for_safelock(safelock_rx);
 
     tokio::select! {
         _ = ctrl_c => {
@@ -241,4 +293,16 @@ async fn shutdown_signal(mut safelock_rx: watch::Receiver<bool>, start_time: Ins
         "  \x1b[2m⏹ [mivi] Server stopped. Total uptime: {}\x1b[0m\n",
         uptime_str
     );
+}
+
+async fn wait_for_safelock(mut safelock_rx: watch::Receiver<bool>) {
+    loop {
+        match safelock_rx.changed().await {
+            Ok(()) if *safelock_rx.borrow() => return,
+            Ok(()) => {}
+            // A disabled watchdog drops its sender. Channel closure is not a safelock event;
+            // keep waiting for Ctrl+C/SIGTERM in shutdown_signal instead.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
 }

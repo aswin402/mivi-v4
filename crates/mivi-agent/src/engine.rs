@@ -1,7 +1,11 @@
 use crate::state::{AgentPhase, AgentState};
 use crate::xml_utils::{escape_xml_attr, escape_xml_content};
-use mivi_tools::{extract_thinking, extract_tool_calls, ToolBroker, ToolCancellation, ToolResult};
+use mivi_tools::{
+    extract_thinking, LegacyJsonXmlToolCallCodec, ToolBroker, ToolCallCodec, ToolCancellation,
+    ToolResult,
+};
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
@@ -16,8 +20,10 @@ pub struct AgentLoop<'a> {
     pub broker: &'a ToolBroker,
     pub tool_timeout: Duration,
     pub timed_out_tools: usize,
+    last_tool_results: Vec<ToolResult>,
     allowed_tools: Option<HashSet<String>>,
     recent_actions: VecDeque<String>,
+    tool_codec: Arc<dyn ToolCallCodec>,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -27,8 +33,10 @@ impl<'a> AgentLoop<'a> {
             broker,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
             timed_out_tools: 0,
+            last_tool_results: Vec::new(),
             allowed_tools: None,
             recent_actions: VecDeque::with_capacity(STAGNATION_WINDOW_SIZE + 1),
+            tool_codec: Arc::new(LegacyJsonXmlToolCallCodec),
         }
     }
 
@@ -43,6 +51,17 @@ impl<'a> AgentLoop<'a> {
         self
     }
 
+    /// Select the model-specific tool-call syntax used for agent output parsing.
+    pub fn with_tool_codec(mut self, tool_codec: Arc<dyn ToolCallCodec>) -> Self {
+        self.tool_codec = tool_codec;
+        self
+    }
+
+    /// Tool results produced by the most recent call-bearing step.
+    pub fn last_tool_results(&self) -> &[ToolResult] {
+        &self.last_tool_results
+    }
+
     /// Process step output from model and execute requested actions.
     pub async fn step(&mut self, model_output: &str) -> String {
         if self.state.step_count >= self.state.max_steps {
@@ -53,6 +72,7 @@ impl<'a> AgentLoop<'a> {
             );
         }
         self.state.step_count += 1;
+        self.last_tool_results.clear();
 
         if let Some(think) = extract_thinking(model_output) {
             self.state
@@ -63,7 +83,16 @@ impl<'a> AgentLoop<'a> {
             }
         }
 
-        let calls = extract_tool_calls(model_output);
+        let calls = match self.tool_codec.extract(model_output) {
+            Ok(calls) => calls,
+            Err(error) => {
+                self.state.phase = AgentPhase::Failed;
+                return format!(
+                    "<error>Unable to parse model tool call: {}</error>",
+                    escape_xml_content(&error)
+                );
+            }
+        };
         if calls.is_empty() {
             // No tool call emitted -> complete or return thought
             self.state.phase = AgentPhase::Completed;
@@ -145,6 +174,7 @@ impl<'a> AgentLoop<'a> {
                 }
             };
 
+            self.last_tool_results.push(res.clone());
             let body = if res.success {
                 res.output
             } else {
@@ -228,6 +258,36 @@ mod tests {
 
         assert!(!executed.load(Ordering::SeqCst));
         assert!(result.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn model_specific_codec_parses_and_executes_native_style_tool_calls() {
+        let broker = ToolBroker::new();
+        broker
+            .register(
+                "echo",
+                std::sync::Arc::new(|arguments| {
+                    ToolResult::ok(
+                        "echo",
+                        arguments
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    )
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let codec = Arc::new(mivi_tools::DelimitedPythonToolCallCodec::new(
+            "<CALL>", "</CALL>",
+        ));
+        let mut agent = AgentLoop::new(state, &broker).with_tool_codec(codec);
+        let result = agent.step(r#"<CALL>[echo(value="works")]</CALL>"#).await;
+
+        assert!(result.contains("<tool_result name=\"echo\">works</tool_result>"));
+        assert_eq!(agent.state.phase, AgentPhase::Observing);
+        assert_eq!(agent.last_tool_results()[0].output, "works");
     }
 
     #[tokio::test]

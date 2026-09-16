@@ -54,6 +54,11 @@ mod tests {
             ToolChoice::Disabled
         );
         assert_eq!(
+            parse_tool_choice(Some(&tools), Some(&json!("required"))).unwrap(),
+            ToolChoice::Required
+        );
+        assert!(parse_tool_choice(None, Some(&json!("required"))).is_err());
+        assert_eq!(
             parse_tool_choice(
                 Some(&tools),
                 Some(&json!({
@@ -110,6 +115,7 @@ pub enum ResponseMode {
 pub enum ToolChoice {
     Disabled,
     Auto,
+    Required,
     Named(String),
 }
 
@@ -298,7 +304,8 @@ pub fn parse_tool_choice(
         Value::String(value) => match value.as_str() {
             "none" => Ok(ToolChoice::Disabled),
             "auto" => Ok(ToolChoice::Auto),
-            "required" => Err("tool_choice 'required' is not supported yet".to_string()),
+            "required" if tools.is_some_and(|items| !items.is_empty()) => Ok(ToolChoice::Required),
+            "required" => Err("tool_choice 'required' requires at least one tool".to_string()),
             other => Err(format!("unsupported tool_choice '{other}'")),
         },
         Value::Object(object) => {
@@ -367,6 +374,7 @@ pub fn filter_tools_for_choice(
     match choice {
         ToolChoice::Disabled => None,
         ToolChoice::Auto => tools,
+        ToolChoice::Required => tools,
         ToolChoice::Named(name) => tools.map(|items| {
             items
                 .into_iter()
@@ -379,6 +387,22 @@ pub fn filter_tools_for_choice(
                 })
                 .collect()
         }),
+    }
+}
+
+/// Enforce the part of `tool_choice` that can only be known after generation.
+pub fn validate_tool_choice_result(
+    choice: &ToolChoice,
+    calls: &[mivi_tools::ToolCall],
+) -> Result<(), String> {
+    match choice {
+        ToolChoice::Required if calls.is_empty() => {
+            Err("Model did not emit a required tool call".to_string())
+        }
+        ToolChoice::Named(name) if calls.is_empty() => Err(format!(
+            "Model did not emit the required tool call '{name}'"
+        )),
+        _ => Ok(()),
     }
 }
 

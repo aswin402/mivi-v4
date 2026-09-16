@@ -140,9 +140,9 @@ sizing a deployment.
 git clone https://github.com/aswin402/mivi-v4.git
 cd mivi-v4
 
-# Build release binary (uses low-memory 2 concurrent jobs)
+# Build release binary (uses low-memory one concurrent job)
 just build-release
-# Or: cargo build --release --jobs 2
+# Or: cargo build --release --jobs 1
 ```
 
 ### 3. System Diagnostics (`doctor`)
@@ -203,7 +203,22 @@ just serve
 # Example: --cors-origin http://localhost:3000
 # Tool handlers are bounded to 4 concurrent blocking executions by default;
 # tune with --max-concurrent-tool-executions when serving multiple agent requests.
+# Streaming and blocking inference requests default to a 300-second deadline;
+# tune with --request-timeout-secs for slower models or long agent runs.
+# First model output defaults to a 120-second deadline;
+# tune with --first-token-timeout-secs for long CPU prefill workloads.
+# For a model with a non-standard prompt/tool protocol, supply its declarative profile:
+# cargo run --release -- serve --model models/model.gguf --model-profile docs/lfm2.5-profile.json
+# For a model that supports chat but has no tool-call protocol, use a text-only profile:
+# cargo run --release -- serve --model models/model.gguf --model-profile docs/text-only-profile.json
+# Text-only profiles reject tool-enabled OpenAI/Anthropic requests and the internal tool agent.
 ```
+
+Model profiles are resolved from the explicit `--model-profile` file first, then from the loaded
+model's embedded chat-template metadata. A profile owns prompt delimiters, tool-call decoding, and
+capability reporting; HTTP routes do not identify models by name. To add a model family, provide a
+validated profile (or an isolated codec/profile implementation) and add it to the profile
+conformance tests. Use `kind: "text_only"` when the model has no tool-call protocol.
 
 ```text
   ╭──────────────────────────────────────────────────────────╮
@@ -326,11 +341,11 @@ Run the test suite:
 
 ```bash
 just test
-# Or: cargo test --workspace --jobs 2
+# Or: cargo test --workspace --jobs 1
 ```
 
 While iterating, prefer a focused package/test command such as
-`cargo test -p mivi-server --lib --jobs 2 -- --test-threads=2`. Test counts change as coverage
+`cargo test -p mivi-server --lib --jobs 1 -- --test-threads=2`. Test counts change as coverage
 evolves, so treat the command result—not a fixed example count—as the source of truth.
 
 ---
@@ -339,9 +354,9 @@ evolves, so treat the command result—not a fixed example count—as the source
 
 | Command | Description |
 |---|---|
-| `just build` | Compile workspace in debug mode (max 2 jobs) |
+| `just build` | Compile workspace in debug mode (one job) |
 | `just build-release` | Compile optimized release binary |
-| `just test` | Run the workspace test suite with two Cargo jobs and two test threads |
+| `just test` | Run the workspace test suite with one Cargo job and two test threads |
 | `just clippy` | Run Clippy linter with `-D warnings` |
 | `just fmt-check` | Verify code formatting with `rustfmt` |
 | `just verify` | Run full quality gate (`fmt-check` + `clippy` + `test`) |

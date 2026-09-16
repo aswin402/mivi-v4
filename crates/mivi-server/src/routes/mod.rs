@@ -4,8 +4,10 @@ pub mod agent;
 pub mod anthropic;
 pub mod chat;
 
+use crate::engine_actor::EngineHandle;
+use crate::model_profile::ModelProfile;
 use crate::state::AppState;
-use crate::types::MiviStatusResponse;
+use crate::types::{AppError, MiviStatusResponse, ModelCapabilityReport};
 use axum::{
     extract::{DefaultBodyLimit, Json, State},
     http::{HeaderValue, StatusCode},
@@ -19,7 +21,74 @@ use std::time::Duration;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 
-pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+pub use crate::config::DEFAULT_REQUEST_TIMEOUT_SECS;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContextBudgetError {
+    pub(crate) prompt_tokens: usize,
+    pub(crate) requested_output_tokens: usize,
+    pub(crate) context_length: usize,
+}
+
+impl std::fmt::Display for ContextBudgetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Context length exceeded: prompt uses {} tokens and requested output reserves {}, but model context limit is {}",
+            self.prompt_tokens, self.requested_output_tokens, self.context_length
+        )
+    }
+}
+
+impl ContextBudgetError {
+    pub(crate) fn into_openai_error(self) -> AppError {
+        AppError::ContextLengthExceeded {
+            prompt_tokens: self.prompt_tokens,
+            requested_output_tokens: self.requested_output_tokens,
+            context_length: self.context_length,
+        }
+    }
+}
+
+pub(crate) fn validate_context_budget(
+    prompt_tokens: usize,
+    requested_output_tokens: usize,
+    context_length: usize,
+) -> Result<(), ContextBudgetError> {
+    let required_tokens =
+        prompt_tokens
+            .checked_add(requested_output_tokens)
+            .ok_or(ContextBudgetError {
+                prompt_tokens,
+                requested_output_tokens,
+                context_length,
+            })?;
+    if required_tokens > context_length {
+        return Err(ContextBudgetError {
+            prompt_tokens,
+            requested_output_tokens,
+            context_length,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) async fn admit_model_context(
+    engine: &EngineHandle,
+    prompt: &str,
+    requested_output_tokens: usize,
+) -> Result<Option<usize>, ContextBudgetError> {
+    let Some(context_length) = engine
+        .model_metadata()
+        .and_then(|metadata| metadata.context_length)
+    else {
+        return Ok(None);
+    };
+
+    let prompt_tokens = engine.encode(prompt).await.len();
+    validate_context_budget(prompt_tokens, requested_output_tokens, context_length)?;
+    Ok(Some(prompt_tokens))
+}
 
 fn configured_cors_layer(origins: &[String]) -> CorsLayer {
     let allowed_origins = origins
@@ -93,7 +162,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         ))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            Duration::from_secs(state.config.request_timeout_secs),
         ))
         // Do not expose the unauthenticated loopback API to arbitrary browser origins.
         // Browser clients can opt into CORS through a separately configured deployment
@@ -157,7 +226,11 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "id": state.model_name,
                 "object": "model",
                 "owned_by": mivi_core::ENGINE_OWNER,
-                "permission": []
+                "permission": [],
+                "context_length": state
+                    .engine
+                    .model_metadata()
+                    .and_then(|metadata| metadata.context_length)
             }
         ]) } else { serde_json::json!([]) }
     }))
@@ -194,7 +267,11 @@ async fn get_model_info(
         "id": id,
         "object": "model",
         "owned_by": mivi_core::ENGINE_OWNER,
-        "permission": []
+        "permission": [],
+        "context_length": state
+            .engine
+            .model_metadata()
+            .and_then(|metadata| metadata.context_length)
     }))
     .into_response()
 }
@@ -586,10 +663,129 @@ mod tests {
             .get("access-control-allow-origin")
             .is_none());
     }
+
+    #[tokio::test]
+    async fn model_metadata_reports_context_length_to_clients() {
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+        let engine = crate::EngineHandle::with_capacity_and_metadata(
+            command_tx,
+            true,
+            1,
+            Some(crate::EngineModelMetadata {
+                context_length: Some(4096),
+                ..crate::EngineModelMetadata::default()
+            }),
+        );
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let app = create_router(state);
+
+        let models = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let models_body = axum::body::to_bytes(models.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models_json: serde_json::Value = serde_json::from_slice(&models_body).unwrap();
+        assert_eq!(models_json["data"][0]["context_length"], 4096);
+
+        let status = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/mivi/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_body = axum::body::to_bytes(status.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["context_length"], 4096);
+        assert_eq!(status_json["capabilities"]["profile"], "legacy");
+        assert_eq!(status_json["capabilities"]["tool_codec"], "legacy_json_xml");
+        assert_eq!(status_json["capabilities"]["supports_tools"], true);
+        assert_eq!(status_json["capabilities"]["supports_streaming"], true);
+    }
+
+    #[tokio::test]
+    async fn text_only_profile_reports_disabled_tool_capability() {
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+        let engine = crate::EngineHandle::new(command_tx, true);
+        let state = Arc::new(AppState::with_config(
+            "test-model",
+            ToolBroker::new(),
+            engine,
+            None,
+            crate::ServerConfig {
+                model_profile: Some(crate::model_profile::ModelProfileConfig::TextOnly {
+                    start_of_text: "<BOS>".to_string(),
+                    message_start: "<MSG>".to_string(),
+                    message_end: "</MSG>".to_string(),
+                }),
+                ..crate::ServerConfig::default()
+            },
+        ));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/mivi/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(status_json["capabilities"]["profile"], "text_only");
+        assert_eq!(status_json["capabilities"]["tool_codec"], "none");
+        assert_eq!(status_json["capabilities"]["supports_tools"], false);
+        assert_eq!(status_json["capabilities"]["supports_streaming"], true);
+    }
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
+    let capabilities = if state.engine.has_model() {
+        ModelProfile::resolve(
+            state.engine.model_metadata(),
+            state.config.model_profile.as_ref(),
+        )
+        .map(|profile| ModelCapabilityReport {
+            profile: Some(profile.capability_name().to_string()),
+            tool_codec: Some(profile.tool_codec_name().to_string()),
+            supports_tools: profile.supports_tools(),
+            supports_streaming: true,
+        })
+        .unwrap_or(ModelCapabilityReport {
+            profile: None,
+            tool_codec: None,
+            supports_tools: false,
+            supports_streaming: false,
+        })
+    } else {
+        ModelCapabilityReport {
+            profile: None,
+            tool_codec: None,
+            supports_tools: false,
+            supports_streaming: false,
+        }
+    };
 
     let resp = MiviStatusResponse {
         engine: mivi_core::ENGINE_NAME.to_string(),
@@ -597,6 +793,11 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         model: state.model_name.clone(),
         memory_rss_mb: mivi_core::estimate_process_memory_mb(),
         active_tools_count: get_builtin_tool_definitions().len(),
+        context_length: state
+            .engine
+            .model_metadata()
+            .and_then(|metadata| metadata.context_length),
+        capabilities,
         status: if !state.engine.is_closed() && state.engine.has_model() {
             "healthy"
         } else if !state.engine.is_closed() {

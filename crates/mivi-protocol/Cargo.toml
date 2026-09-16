@@ -1,0 +1,11 @@
+[package]
+name = "mivi-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Model-neutral conversation, tool, and generation protocol types"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -411,6 +411,8 @@ pub struct ServerConfig {
     pub channel_capacity: usize,           // default: 64
     pub max_concurrent_requests: usize,    // default: 1
     pub max_concurrent_tool_executions: usize, // default: 4
+    pub request_timeout_secs: u64,         // default: 300
+    pub first_token_timeout_secs: u64,     // default: 120
     pub agent_gen_tokens: usize,            // default: 512
     pub max_port_attempts: u16,             // default: 20
 }
@@ -422,6 +424,10 @@ When configured, the key protects all API, model, status, tools, metrics, and Ol
 Model context defaults to 16,384 tokens and is capped at 65,536 by the model loader.
 Blocking tool execution defaults to four concurrent handlers and can be configured with
 `mivi serve --max-concurrent-tool-executions`; zero is clamped to one.
+Inference requests default to a 300-second wall-clock deadline and can be configured with
+`mivi serve --request-timeout-secs`; the same deadline covers detached streaming generation.
+The first model output defaults to a 120-second deadline and can be configured with
+`mivi serve --first-token-timeout-secs`; the total request deadline remains the authoritative cap.
 Built-in handlers receive a cooperative cancellation signal when an agent tool timeout occurs.
 Custom handlers registered through the legacy API remain supported but cannot observe that signal.
 

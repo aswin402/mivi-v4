@@ -1,0 +1,9 @@
+{
+  "kind": "delimited_python",
+  "start_of_text": "<|startoftext|>",
+  "message_start": "<|im_start|>",
+  "message_end": "<|im_end|>",
+  "tool_call_start": "<|tool_call_start|>",
+  "tool_call_end": "<|tool_call_end|>",
+  "thinking_instruction": "Think concisely inside <think>...</think> before taking actions or answering."
+}

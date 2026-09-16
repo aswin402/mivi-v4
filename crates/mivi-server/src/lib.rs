@@ -6,6 +6,7 @@ pub mod engine_actor;
 pub mod generation;
 pub mod grammar;
 pub mod logging;
+pub mod model_profile;
 pub mod routes;
 pub mod state;
 pub mod streaming;
@@ -14,11 +15,14 @@ pub mod ui;
 pub mod watchdog;
 
 pub use auth::require_api_key;
-pub use config::ServerConfig;
-pub use engine_actor::{EngineActor, EngineCommand, EngineHandle};
+pub use config::{ServerConfig, DEFAULT_FIRST_TOKEN_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
+pub use engine_actor::{
+    EngineActor, EngineCommand, EngineHandle, EngineModelMetadata, GenerationCancellation,
+};
 pub use generation::{GenerationOptions, ResponseMode, ToolChoice};
 pub use grammar::{JsonConstraintState, ResponseFormat};
 pub use logging::{mivi_log_middleware, summarize_prompt, LogMetadata};
+pub use model_profile::{ModelProfile, ModelProfileConfig, ModelProfileKind};
 pub use routes::create_router;
 pub use state::{AppState, InferenceSlotUnavailable, MetricsSnapshot, ServerMetrics};
 pub use streaming::{
@@ -28,7 +32,8 @@ pub use streaming::{
 };
 pub use types::{
     AgentRunRequest, AppError, ChatCompletionRequest, ChatCompletionResponse, ChoiceDto,
-    MessageDto, MiviStatusResponse, OpenAiErrorDetail, OpenAiErrorResponse, UsageDto,
+    MessageDto, MiviStatusResponse, ModelCapabilityReport, OpenAiErrorDetail, OpenAiErrorResponse,
+    UsageDto,
 };
 pub use ui::serve_embedded_ui;
 pub use watchdog::{ResourceWatchdog, WatchdogConfig};

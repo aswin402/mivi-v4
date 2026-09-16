@@ -9,6 +9,7 @@ description = "OpenAI-compatible HTTP server with SSE streaming, grammar-constra
 [dependencies]
 mivi-core.workspace = true
 mivi-model.workspace = true
+mivi-protocol.workspace = true
 mivi-tokenizer.workspace = true
 mivi-tools.workspace = true
 mivi-agent.workspace = true
