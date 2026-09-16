@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.30] - 2026-09-16
+
+### Agent Prompt Fidelity & Built-in Tool Schema
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Preserve task intent in internal agent prompts**:
+  - *Inspiration*: OpenAI's role-based message model, where the user's message is passed as the task input
+    and tool selection is handled separately.
+  - *Source*: [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
+  - Removed an optional planning suffix that could distract small models from the user's exact task.
+- **Concise model-facing built-in tool schemas**:
+  - *Inspiration*: Liquid AI's tool-use flow, which keeps tool definitions explicit while leaving execution to
+    the external tool runner.
+  - *Source*: [Liquid AI LFM tool-use documentation](https://docs.liquid.ai/lfm/key-concepts/tool-use).
+  - Simplified the calculator schema descriptions and removed an illustrative expression that could be
+    copied as a tool argument by small models.
+- **Live agent verification**:
+  - *Inspiration*: model-native tool calls followed by tool results and a second generation.
+  - *Sources*: [Liquid AI tool-use documentation](https://docs.liquid.ai/lfm/key-concepts/tool-use),
+    [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
+  - Verified the 2.6B model through `/v1/mivi/agent`: `45 * 12` produced tool result `540` and a final
+    answer of `540`, including complete SSE termination.
+
 ## [v0.2.29] - 2026-09-16
 
 ### Internal Agent Reliability & Request-Scoped Sampling

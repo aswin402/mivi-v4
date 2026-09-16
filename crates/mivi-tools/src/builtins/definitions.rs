@@ -107,17 +107,37 @@ pub fn get_builtin_tool_definitions() -> Vec<ToolDefinition> {
             r#type: "function".to_string(),
             function: FunctionDefinition {
                 name: TOOL_CALCULATOR.to_string(),
-                description: Some(
-                    "Evaluates simple arithmetic expressions (+, -, *, /)".to_string(),
-                ),
+                description: Some("Evaluates arithmetic expressions.".to_string()),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "expression": { "type": "string", "description": "Math expression (e.g. '125 * 8 + 40')" }
+                        "expression": { "type": "string", "description": "Arithmetic expression to evaluate" }
                     },
                     "required": ["expression"]
                 }),
             },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_builtin_tool_definitions, TOOL_CALCULATOR};
+
+    #[test]
+    fn calculator_definition_uses_concise_model_neutral_descriptions() {
+        let calculator = get_builtin_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.function.name == TOOL_CALCULATOR)
+            .expect("calculator definition should be registered");
+
+        assert_eq!(
+            calculator.function.description.as_deref(),
+            Some("Evaluates arithmetic expressions.")
+        );
+        assert_eq!(
+            calculator.function.parameters["properties"]["expression"]["description"],
+            "Arithmetic expression to evaluate"
+        );
+    }
 }

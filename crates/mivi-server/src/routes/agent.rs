@@ -67,6 +67,24 @@ mod context_tests {
     }
 }
 
+#[cfg(test)]
+mod prompt_tests {
+    use super::native_agent_user_message;
+
+    #[test]
+    fn native_agent_prompt_preserves_task_without_optional_planning_instruction() {
+        let message = native_agent_user_message(
+            "Use the calculator tool to compute 45 * 12, then report only the final number.",
+            "",
+        );
+
+        assert_eq!(
+            message.content.as_deref(),
+            Some("Use the calculator tool to compute 45 * 12, then report only the final number.")
+        );
+    }
+}
+
 const MAX_CONTEXT_DOCS: usize = 16;
 const MAX_CONTEXT_DOC_BYTES: u64 = 512 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -95,7 +113,6 @@ fn native_agent_user_message(task: &str, context_prompt: &str) -> Message {
         content.push('\n');
         content.push_str(context_prompt);
     }
-    content.push_str("\nFormulate a plan and call appropriate tools if necessary.");
     Message {
         role: "user".to_string(),
         content: Some(content),
