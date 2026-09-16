@@ -322,6 +322,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_tool_choice_defaults_to_auto_and_accepts_required() {
+        let automatic: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "task": "Inspect the project"
+        }))
+        .expect("default agent tool choice should deserialize");
+        assert_eq!(automatic.tool_choice, AgentToolChoice::Auto);
+
+        let required: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "task": "Calculate 2 + 2",
+            "tool_choice": "required"
+        }))
+        .expect("required agent tool choice should deserialize");
+        assert_eq!(required.tool_choice, AgentToolChoice::Required);
+    }
+
+    #[test]
+    fn agent_tool_call_retries_round_trip_and_default_to_one() {
+        let automatic: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "task": "Calculate 2 + 2"
+        }))
+        .expect("default agent retry policy should deserialize");
+        assert_eq!(automatic.tool_call_retries, 1);
+
+        let configured: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "task": "Calculate 2 + 2",
+            "tool_call_retries": 2
+        }))
+        .expect("configured agent retry policy should deserialize");
+        let encoded = serde_json::to_value(configured).expect("retry policy should serialize");
+        assert_eq!(encoded["tool_call_retries"], 2);
+    }
+
+    #[test]
+    fn agent_sampling_controls_round_trip() {
+        let configured: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "task": "Calculate 2 + 2",
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "top_k": 50,
+            "min_p": 0.05,
+            "repetition_penalty": 1.1,
+            "presence_penalty": 0.2,
+            "frequency_penalty": 0.3,
+            "seed": 42
+        }))
+        .expect("agent sampling controls should deserialize");
+        let encoded = serde_json::to_value(configured).expect("sampling controls should serialize");
+        assert!((encoded["temperature"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert!((encoded["top_p"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        assert_eq!(encoded["top_k"], 50);
+        assert!((encoded["min_p"].as_f64().unwrap() - 0.05).abs() < 1e-6);
+        assert!((encoded["repetition_penalty"].as_f64().unwrap() - 1.1).abs() < 1e-6);
+        assert!((encoded["presence_penalty"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+        assert!((encoded["frequency_penalty"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert_eq!(encoded["seed"], 42);
+    }
+
+    #[test]
     fn assistant_tool_calls_are_preserved_as_model_markup() {
         let message = MessageDto {
             role: "assistant".to_string(),
@@ -374,12 +432,41 @@ pub struct UsageDto {
     pub total_tokens: usize,
 }
 
+/// Controls whether an internal agent may finish with plain text or must call a tool first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolChoice {
+    #[default]
+    Auto,
+    Required,
+}
+
 /// Request for executing a full autonomous agent task loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunRequest {
     pub task: String,
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
+    #[serde(default)]
+    pub tool_choice: AgentToolChoice,
+    #[serde(default = "default_tool_call_retries")]
+    pub tool_call_retries: usize,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
@@ -388,6 +475,10 @@ pub struct AgentRunRequest {
 
 fn default_max_steps() -> usize {
     crate::config::ServerConfig::default().default_max_agent_steps
+}
+
+fn default_tool_call_retries() -> usize {
+    1
 }
 
 /// Runtime capabilities selected for the loaded model.

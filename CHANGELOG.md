@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.29] - 2026-09-16
+
+### Internal Agent Reliability & Request-Scoped Sampling
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Bounded required-tool retries**:
+  - *Inspiration*: OpenAI-style `tool_choice: "required"` semantics, where a tool call is required before
+    the assistant can finish.
+  - *Source*: [OpenAI tool-choice API reference](https://platform.openai.com/docs/api-reference/chat/create).
+  - Added `tool_call_retries` to `/v1/mivi/agent` (default 1, bounded by the server). Retries apply only when
+    required tool output is missing, do not consume action steps, and fail closed when the budget is exhausted.
+- **Model-native multi-turn tool workflow**:
+  - *Inspiration*: Liquid AI's documented sequence of tool definitions, model tool call, external execution,
+    `tool`-role result, and a second generation for the final answer.
+  - *Source*: [Liquid AI LFM tool-use documentation](https://docs.liquid.ai/lfm/key-concepts/tool-use).
+  - Required mode now accepts normal final text after a tool call instead of incorrectly rejecting the final
+    response on the next agent turn.
+- **Request-scoped agent sampling**:
+  - *Inspiration*: the existing OpenAI-compatible generation controls and Liquid's prompting guidance for
+    tuning sampling without changing model adapters.
+  - *Sources*: [Liquid AI prompting guide](https://docs.liquid.ai/lfm/key-concepts/text-generation-and-prompting),
+    [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
+  - Added validated `temperature`, `top_p`, `top_k`, `min_p`, repetition/presence/frequency penalties, and
+    `seed` fields to internal agent requests. The values are forwarded to every generation step and remain
+    model-agnostic.
+
 ## [v0.2.28] - 2026-09-16
 
 ### Model-Agnostic Agent Compatibility

@@ -72,6 +72,7 @@ pub struct EngineModelMetadata {
     pub family: Option<String>,
     pub quantization_level: Option<String>,
     pub chat_template: Option<String>,
+    pub bos_token: Option<String>,
     pub context_length: Option<usize>,
 }
 
@@ -139,12 +140,23 @@ impl EngineModelMetadata {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
 
+        let bos_token = model
+            .gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|value| value.as_usize())
+            .and_then(|id| u32::try_from(id).ok())
+            .and_then(|id| model.tokenizer.vocab().get_token(id))
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
         Self {
             size_bytes: model.gguf.mmap.len() as u64,
             parameter_count,
             family,
             quantization_level,
             chat_template,
+            bos_token,
             context_length: Some(model.config.max_seq_len),
         }
     }

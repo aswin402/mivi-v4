@@ -24,6 +24,9 @@ pub struct AgentLoop<'a> {
     allowed_tools: Option<HashSet<String>>,
     recent_actions: VecDeque<String>,
     tool_codec: Arc<dyn ToolCallCodec>,
+    require_tool_call: bool,
+    has_tool_call: bool,
+    required_tool_call_missing: bool,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -37,6 +40,9 @@ impl<'a> AgentLoop<'a> {
             allowed_tools: None,
             recent_actions: VecDeque::with_capacity(STAGNATION_WINDOW_SIZE + 1),
             tool_codec: Arc::new(LegacyJsonXmlToolCallCodec),
+            require_tool_call: false,
+            has_tool_call: false,
+            required_tool_call_missing: false,
         }
     }
 
@@ -57,6 +63,28 @@ impl<'a> AgentLoop<'a> {
         self
     }
 
+    /// Require the model to emit at least one tool call before a step can complete.
+    pub fn with_required_tool_call(mut self, required: bool) -> Self {
+        self.require_tool_call = required;
+        self
+    }
+
+    /// Return whether the most recent step failed only because required tool use was missing.
+    pub fn required_tool_call_missing(&self) -> bool {
+        self.required_tool_call_missing
+    }
+
+    /// Re-arm a required-tool run for a bounded generation retry without consuming an action step.
+    pub fn retry_required_tool_call(&mut self) -> bool {
+        if !self.required_tool_call_missing {
+            return false;
+        }
+        self.required_tool_call_missing = false;
+        self.state.phase = AgentPhase::Observing;
+        self.state.step_count = self.state.step_count.saturating_sub(1);
+        true
+    }
+
     /// Tool results produced by the most recent call-bearing step.
     pub fn last_tool_results(&self) -> &[ToolResult] {
         &self.last_tool_results
@@ -73,6 +101,7 @@ impl<'a> AgentLoop<'a> {
         }
         self.state.step_count += 1;
         self.last_tool_results.clear();
+        self.required_tool_call_missing = false;
 
         if let Some(think) = extract_thinking(model_output) {
             self.state
@@ -94,10 +123,16 @@ impl<'a> AgentLoop<'a> {
             }
         };
         if calls.is_empty() {
+            if self.require_tool_call && !self.has_tool_call {
+                self.required_tool_call_missing = true;
+                self.state.phase = AgentPhase::Failed;
+                return "<error>Model did not emit a required tool call.</error>".to_string();
+            }
             // No tool call emitted -> complete or return thought
             self.state.phase = AgentPhase::Completed;
             return model_output.to_string();
         }
+        self.has_tool_call = true;
 
         // Check if explicitly calling finish
         if calls
@@ -288,6 +323,61 @@ mod tests {
         assert!(result.contains("<tool_result name=\"echo\">works</tool_result>"));
         assert_eq!(agent.state.phase, AgentPhase::Observing);
         assert_eq!(agent.last_tool_results()[0].output, "works");
+    }
+
+    #[tokio::test]
+    async fn required_tool_call_fails_when_model_returns_plain_text() {
+        let broker = ToolBroker::new();
+        let state = AgentState::new("test task", 3);
+        let mut agent = AgentLoop::new(state, &broker).with_required_tool_call(true);
+
+        let result = agent.step("I can answer that without a tool.").await;
+
+        assert_eq!(agent.state.phase, AgentPhase::Failed);
+        assert_eq!(
+            result,
+            "<error>Model did not emit a required tool call.</error>"
+        );
+        assert!(agent.required_tool_call_missing());
+        assert!(agent.retry_required_tool_call());
+        assert_eq!(agent.state.phase, AgentPhase::Observing);
+        assert_eq!(agent.state.step_count, 0);
+        assert!(!agent.required_tool_call_missing());
+    }
+
+    #[tokio::test]
+    async fn required_tool_call_allows_final_text_after_a_tool_call() {
+        let broker = ToolBroker::new();
+        broker
+            .register(
+                "echo",
+                Arc::new(|arguments| {
+                    ToolResult::ok(
+                        "echo",
+                        arguments
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    )
+                }),
+            )
+            .await;
+
+        let state = AgentState::new("test task", 3);
+        let codec = Arc::new(mivi_tools::DelimitedPythonToolCallCodec::new(
+            "<CALL>", "</CALL>",
+        ));
+        let mut agent = AgentLoop::new(state, &broker)
+            .with_tool_codec(codec)
+            .with_required_tool_call(true);
+
+        let tool_result = agent.step(r#"<CALL>[echo(value="works")]</CALL>"#).await;
+        assert!(tool_result.contains("<tool_result name=\"echo\">works</tool_result>"));
+        assert_eq!(agent.state.phase, AgentPhase::Observing);
+
+        let final_text = agent.step("The result is works.").await;
+        assert_eq!(final_text, "The result is works.");
+        assert_eq!(agent.state.phase, AgentPhase::Completed);
     }
 
     #[tokio::test]

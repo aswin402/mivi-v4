@@ -244,9 +244,10 @@ proxy/allowlist if a browser client is required.
 
 OpenAI-compatible requests support validated sampling parameters (`temperature`, `top_p`, `top_k`, `min_p`,
 `repetition_penalty`, presence/frequency penalties, and `seed`), custom stop sequences, `none`/`auto`/
-named tool choice, and non-streaming `response_format: {"type":"json_object"}`. JSON Schema responses,
-JSON streaming, and forced `tool_choice: "required"` are currently rejected explicitly. Anthropic
-`/v1/messages` supports validated sampling, `stop_sequences`, and structured streaming tool-use blocks.
+`required`/named tool choice, and non-streaming `response_format: {"type":"json_object"}`. JSON Schema
+responses and JSON streaming are rejected explicitly. `tool_choice: "required"` is validated after generation;
+models without constrained tool decoding may return an explicit inference error when they do not emit a tool call.
+Anthropic `/v1/messages` supports validated sampling, `stop_sequences`, and structured streaming tool-use blocks.
 
 Agent context documents must be relative to the configured `--workspace` and are size-bounded before being
 added to the prompt. On Unix, reads use descriptor-relative no-follow traversal to prevent symlink swaps.
@@ -323,9 +324,20 @@ curl -X POST http://127.0.0.1:8080/v1/mivi/agent \
   -H "Content-Type: application/json" \
   -d '{
     "task": "Calculate (45 * 12) + 180 and write the result to math_output.txt",
-    "max_steps": 5
+    "max_steps": 5,
+    "tool_choice": "required",
+    "tool_call_retries": 1,
+    "allowed_tools": ["calculator", "write_file"]
   }'
 ```
+
+The internal agent accepts `tool_choice: "auto"` (the default) or `"required"`. Required mode fails closed if
+the model never emits a tool call and may retry that missing-call response up to the configured
+`tool_call_retries` value (bounded by the server); retries do not consume agent action steps. Text-only model
+profiles reject this endpoint because they do not define a tool-call protocol.
+The endpoint also accepts the validated sampling controls `temperature`, `top_p`, `top_k`, `min_p`,
+`repetition_penalty`, `presence_penalty`, `frequency_penalty`, and `seed`; these options are applied to each
+generation step without embedding model-specific values in the agent route.
 
 ---
 

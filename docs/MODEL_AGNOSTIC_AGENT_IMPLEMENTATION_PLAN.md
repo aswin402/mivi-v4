@@ -49,6 +49,8 @@ The HTTP layer must not know whether a model uses ChatML, LFM2.5 Python-style ca
 - [x] Route Anthropic prompt rendering and tool-output parsing through the selected model profile.
 - [x] Route the internal agent loop through the selected tool codec and canonical native tool history.
 - [x] Bound each internal agent generation step with configured deadlines and cooperative cancellation.
+- [x] Add an explicit internal-agent tool policy with bounded retries for required tool calls.
+- [x] Pass validated request-scoped sampling controls through internal agent generations.
 - [x] Apply first-token, total-generation, and disconnect cancellation behavior to Anthropic streaming.
 - [x] Use tokenizer-derived prompt counts in request diagnostics instead of byte-length estimates.
 
@@ -100,7 +102,7 @@ can provide a separate JSON profile without changing the HTTP routes.
 ### Phase 0 — Reproduce and freeze the failure
 
 - [ ] Capture one real request from the failing client, including `stream`, `tools`, `tool_choice`, `parallel_tool_calls`, context size, and timeout.
-- [ ] Capture the complete raw SSE response until `[DONE]` or disconnect.
+- [x] Capture the complete raw SSE response until `[DONE]` or disconnect.
 - [x] Add a small red/green fixture test for the current failure:
   - agent tool request;
   - native LFM2.5 tool output;

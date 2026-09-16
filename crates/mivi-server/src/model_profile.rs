@@ -214,14 +214,34 @@ fn validate_delimited_value(name: &str, value: &str) -> Result<(), String> {
 
 fn config_from_metadata(metadata: Option<&EngineModelMetadata>) -> Option<ModelProfileConfig> {
     let template = metadata?.chat_template.as_deref()?;
-    Some(ModelProfileConfig::DelimitedPython {
-        start_of_text: template_token_containing(template, "startoftext")?,
-        message_start: template_token_containing(template, "im_start")?,
-        message_end: template_token_containing(template, "im_end")?,
-        tool_call_start: template_token_containing(template, "tool_call_start")?,
-        tool_call_end: template_token_containing(template, "tool_call_end")?,
-        thinking_instruction: None,
-    })
+    let start_of_text = template_token_containing(template, "startoftext").or_else(|| {
+        if template.contains("bos_token") {
+            metadata.and_then(|metadata| metadata.bos_token.clone())
+        } else {
+            None
+        }
+    })?;
+    let message_start = template_token_containing(template, "im_start")?;
+    let message_end = template_token_containing(template, "im_end")?;
+
+    match (
+        template_token_containing(template, "tool_call_start"),
+        template_token_containing(template, "tool_call_end"),
+    ) {
+        (Some(tool_call_start), Some(tool_call_end)) => Some(ModelProfileConfig::DelimitedPython {
+            start_of_text,
+            message_start,
+            message_end,
+            tool_call_start,
+            tool_call_end,
+            thinking_instruction: None,
+        }),
+        _ => Some(ModelProfileConfig::TextOnly {
+            start_of_text,
+            message_start,
+            message_end,
+        }),
+    }
 }
 
 /// Extract the model's literal special-token spelling from its embedded template. This keeps
@@ -651,6 +671,36 @@ mod tests {
         let profile = ModelProfile::from_metadata(Some(&metadata));
 
         assert_eq!(profile.kind(), ModelProfileKind::Legacy);
+    }
+
+    #[test]
+    fn chat_template_without_tool_protocol_is_text_only() {
+        let metadata = crate::engine_actor::EngineModelMetadata {
+            chat_template: Some("<|startoftext|><|im_start|>{{ messages }}<|im_end|>".to_string()),
+            ..Default::default()
+        };
+
+        let profile = ModelProfile::from_metadata(Some(&metadata));
+
+        assert_eq!(profile.kind(), ModelProfileKind::TextOnly);
+        assert_eq!(profile.tool_codec_name(), "none");
+        assert!(!profile.supports_tools());
+    }
+
+    #[test]
+    fn chat_template_bos_variable_uses_metadata_token() {
+        let metadata = crate::engine_actor::EngineModelMetadata {
+            chat_template: Some(
+                "{{- bos_token -}}<|im_start|>{{ messages }}<|im_end|>".to_string(),
+            ),
+            bos_token: Some("<|startoftext|>".to_string()),
+            ..Default::default()
+        };
+
+        let profile = ModelProfile::from_metadata(Some(&metadata));
+
+        assert_eq!(profile.kind(), ModelProfileKind::TextOnly);
+        assert!(!profile.supports_tools());
     }
 
     #[test]

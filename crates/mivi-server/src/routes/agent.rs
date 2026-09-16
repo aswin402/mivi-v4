@@ -1,7 +1,9 @@
 //! Agent task execution endpoint supporting tool loops and SSE streaming.
 
 use crate::engine_actor::GenerationCancellation;
-use crate::generation::GenerationOptions;
+use crate::generation::{
+    validate_additional_sampling_parameters, validate_sampling_parameters, GenerationOptions,
+};
 use crate::model_profile::ModelProfile;
 use crate::routes::chat::sse_response;
 use crate::state::AppState;
@@ -68,6 +70,7 @@ mod context_tests {
 const MAX_CONTEXT_DOCS: usize = 16;
 const MAX_CONTEXT_DOC_BYTES: u64 = 512 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const MAX_AGENT_TOOL_CALL_RETRIES: usize = 3;
 
 fn canonical_builtin_tool_definitions(
     allowed_tools: Option<&[String]>,
@@ -96,6 +99,20 @@ fn native_agent_user_message(task: &str, context_prompt: &str) -> Message {
     Message {
         role: "user".to_string(),
         content: Some(content),
+        name: None,
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        reasoning: None,
+    }
+}
+
+fn native_agent_tool_retry_message() -> Message {
+    Message {
+        role: "user".to_string(),
+        content: Some(
+            "The previous response did not contain a tool call. Call one of the available tools before producing a final answer."
+                .to_string(),
+        ),
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
@@ -166,12 +183,13 @@ async fn generate_agent_step(
     prompt: &str,
     max_tokens: usize,
     admitted_prompt_tokens: Option<usize>,
+    options: GenerationOptions,
     request_timeout: Duration,
     first_token_timeout: Duration,
     output_events: &mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
 ) -> Result<(String, usize, usize), String> {
     let (mut receiver, cancellation) = engine
-        .generate_stream_with_options_cancelable(prompt, max_tokens, GenerationOptions::default())
+        .generate_stream_with_options_cancelable(prompt, max_tokens, options)
         .await?;
     let cancellation = AgentGenerationCancellation(cancellation);
     let mut deadline = Box::pin(tokio::time::sleep(request_timeout));
@@ -269,9 +287,40 @@ pub async fn run_agent_task(
         )
         .into_response();
     }
+    if let Err(message) = validate_sampling_parameters(
+        req.temperature,
+        req.top_p,
+        req.presence_penalty,
+        req.frequency_penalty,
+    ) {
+        return crate::types::AppError::InvalidRequest(message).into_response();
+    }
+    if let Err(message) =
+        validate_additional_sampling_parameters(req.top_k, req.min_p, req.repetition_penalty)
+    {
+        return crate::types::AppError::InvalidRequest(message).into_response();
+    }
+    let agent_generation_options = GenerationOptions {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        top_k: req.top_k,
+        min_p: req.min_p,
+        repetition_penalty: req.repetition_penalty,
+        presence_penalty: req.presence_penalty,
+        frequency_penalty: req.frequency_penalty,
+        seed: req.seed,
+        ..GenerationOptions::default()
+    };
     let profile_codec = profile.tool_codec_handle();
     let allowed_tools = req.allowed_tools.clone();
     let canonical_tools = canonical_builtin_tool_definitions(allowed_tools.as_deref());
+    if req.tool_choice == AgentToolChoice::Required && canonical_tools.is_empty() {
+        return crate::types::AppError::InvalidRequest(
+            "tool_choice 'required' requires at least one available tool".to_string(),
+        )
+        .into_response();
+    }
+    let require_tool_call = req.tool_choice == AgentToolChoice::Required;
     let model_name = state.model_name.clone();
     let cid = format!("{}{}", mivi_core::AGENT_RUN_ID_PREFIX, uuid::Uuid::new_v4());
     let broker = state.broker.clone();
@@ -322,12 +371,15 @@ pub async fn run_agent_task(
         let agent_state = mivi_agent::AgentState::new(&req.task, max_steps);
         let mut agent = mivi_agent::AgentLoop::new(agent_state, &broker)
             .with_allowed_tools(allowed_tools)
-            .with_tool_codec(profile_codec);
+            .with_tool_codec(profile_codec)
+            .with_required_tool_call(require_tool_call);
         let thinking_msg = format!("Initializing agent for task: '{}'", req.task);
 
         send_sse_sequence_with_finish(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
             let mut finish_reason = "stop";
             let mut native_messages = vec![native_agent_user_message(&req.task, &context_prompt)];
+            let mut tool_call_retries_remaining =
+                req.tool_call_retries.min(MAX_AGENT_TOOL_CALL_RETRIES);
             let mut current_prompt =
                 match profile.render_prompt(&native_messages, &canonical_tools, false) {
                     Ok(prompt) => prompt,
@@ -340,7 +392,8 @@ pub async fn run_agent_task(
                     }
                 };
 
-            for _ in 0..max_steps {
+            let mut agent_steps = 0;
+            while agent_steps < max_steps {
                 let admitted_prompt_tokens = match crate::routes::admit_model_context(
                     &engine,
                     &current_prompt,
@@ -370,6 +423,7 @@ pub async fn run_agent_task(
                     &current_prompt,
                     agent_gen_tokens,
                     admitted_prompt_tokens,
+                    agent_generation_options.clone(),
                     request_timeout,
                     first_token_timeout,
                     &tx,
@@ -380,6 +434,30 @@ pub async fn run_agent_task(
                         metrics.record_generation(generation_started.elapsed());
                         metrics.record_tokens(prompt_tokens, completion_tokens);
                         let result = agent.step(&model_out).await;
+
+                        if agent.required_tool_call_missing() && tool_call_retries_remaining > 0 {
+                            tool_call_retries_remaining -= 1;
+                            let _ = agent.retry_required_tool_call();
+                            native_messages.push(native_agent_tool_retry_message());
+                            match profile.render_prompt(&native_messages, &canonical_tools, false) {
+                                Ok(prompt) => {
+                                    current_prompt = prompt;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    metrics.record_inference_error();
+                                    let _ = tx
+                                        .send(Ok(create_error_chunk_event(
+                                            &cid_clone, &mname, &error,
+                                        )))
+                                        .await;
+                                    finish_reason = "error";
+                                    break;
+                                }
+                            }
+                        }
+
+                        agent_steps += 1;
                         if tx
                             .send(Ok(create_content_chunk_event(&cid_clone, &mname, &result)))
                             .await
