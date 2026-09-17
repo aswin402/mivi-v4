@@ -104,8 +104,17 @@ async fn main() -> anyhow::Result<()> {
         Commands::Bench {
             model,
             kv_precision,
+            prefill_strategy,
+            prefill_tile_tokens,
+            bench_prompt_tokens,
         } => {
-            mivi_cli::run_bench(model, kv_precision)?;
+            mivi_cli::run_bench(
+                model,
+                kv_precision,
+                prefill_strategy,
+                prefill_tile_tokens,
+                bench_prompt_tokens,
+            )?;
         }
         Commands::Cache { action } => match action {
             mivi_cli::commands::CacheCommands::List { dir } => {

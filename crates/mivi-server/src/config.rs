@@ -58,7 +58,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             model_profile: None,
-            prefill_strategy: mivi_model::PrefillStrategy::default(),
+            prefill_strategy: mivi_model::PrefillStrategy::Chunked { tile_tokens: 64 },
             cors_allowed_origins: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_messages: DEFAULT_MAX_MESSAGES,
@@ -112,10 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn prefill_strategy_defaults_to_token_major() {
+    fn prefill_strategy_defaults_to_chunked_agent_prefill() {
         assert_eq!(
             ServerConfig::default().prefill_strategy,
-            mivi_model::PrefillStrategy::Token
+            mivi_model::PrefillStrategy::Chunked { tile_tokens: 64 }
         );
     }
 }

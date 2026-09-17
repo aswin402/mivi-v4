@@ -117,6 +117,14 @@ Run `just bench` to measure the local quantized matvec kernels. Supplying a mode
 enables the runner's model-generation and prefix-cache measurements. Throughput and latency
 depend on the CPU, SIMD features, compiler profile, model, context length, and KV precision;
 the project does not treat a single machine's numbers as a universal performance guarantee.
+For AI-agent troubleshooting, compare prompt prefill directly:
+
+```bash
+cargo run --release --jobs 1 -- bench \
+  --model models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf \
+  --prefill-strategy chunked \
+  --bench-prompt-tokens 2048
+```
 
 ### 💾 Memory Footprint
 
@@ -207,6 +215,8 @@ just serve
 # tune with --request-timeout-secs for slower models or long agent runs.
 # First model output defaults to a 120-second deadline;
 # tune with --first-token-timeout-secs for long CPU prefill workloads.
+# Server prompt prefill defaults to chunked 64-token tiles for large agent prompts;
+# use --prefill-strategy token only when comparing/debugging token-by-token prefill.
 # For a model with a non-standard prompt/tool protocol, supply its declarative profile:
 # cargo run --release -- serve --model models/model.gguf --model-profile docs/lfm2.5-profile.json
 # For a model that supports chat but has no tool-call protocol, use a text-only profile:

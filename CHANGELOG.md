@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.44] - 2026-09-17
+
+### Prefix Cache Root-Chain Retention
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Preserve reusable prefix roots under tight cache budgets**: prefix cache eviction now trims the
+  deepest tail chunks before evicting root chunks, because Mivi's hierarchical prefix lookup cannot
+  reuse later chunks after chunk 0 is gone.
+  - *Inspiration*: the live 1.2B benchmark showed warm/shared-prefix prefill recomputing almost the
+    full prompt because the 32 MB cache budget retained only late chunks that were unusable without
+    their prefix chain.
+  - *Sources*: [vLLM automatic prefix caching](https://docs.vllm.ai/en/latest/design/automatic_prefix_caching.html)
+    and [LMCache KV-cache reuse documentation](https://docs.lmcache.ai/).
+- **Optimize for repeated agent prompts**: coding agents resend stable system/tool/workspace prefixes
+  across turns, so retaining the earliest reusable chunks reduces TTFT more than retaining isolated
+  tail chunks.
+  - *Inspiration*: prefix caching guidance for repeated chat, RAG, and agent workloads where shared
+    prompt structure should skip repeated prefill computation.
+  - *Source*: [Modular Inference Handbook: Prefix caching](https://handbook.modular.com/inference-optimization/prefix-caching/).
+
+#### Fixed
+
+- Tight in-memory prefix caches no longer evict reusable root chunks before deeper tail chunks.
+- Warm/shared-prefix benchmark reuse now preserves a valid prefix chain instead of falling back to
+  full prefill when the cache budget prunes late in a long prompt.
+
+#### Added
+
+- Regression coverage proving a tight cache keeps the reusable root chain available for prefix lookup.
+
+## [v0.2.43] - 2026-09-17
+
+### Agent-Sized Prefill Benchmark Controls
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Benchmark the actual agent bottleneck**: `mivi bench --model` now accepts explicit prefill
+  strategy, tile size, and target prompt-token controls so local testing can reproduce
+  AI-agent-sized context prompts instead of relying on tiny canned prompts.
+  - *Inspiration*: the real failure mode was a client disconnect during thousands of prompt tokens
+    of CPU prefill, so the benchmark must measure prompt ingestion directly.
+  - *Sources*: [llama.cpp server prompt/batch options](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+    and [llama.cpp server batching design notes](https://github.com/crc-org/llama.cpp/blob/main/tools/server/README-dev.md).
+- **Keep comparisons model-agnostic**: synthetic workspace-context prompts are generated from the
+  active model tokenizer and do not depend on model-family names or hardcoded special tokens.
+  - *Inspiration*: local inference servers expose prompt-processing controls separately from model
+    quality so performance diagnosis stays reproducible.
+
+#### Added
+
+- `mivi bench --prefill-strategy <token|chunked>`.
+- `mivi bench --prefill-tile-tokens N`.
+- `mivi bench --bench-prompt-tokens N`.
+- Regression coverage for benchmark CLI defaults/configuration and synthetic prompt sizing.
+
+## [v0.2.42] - 2026-09-17
+
+### Agent-Ready Chunked Prefill Defaults
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Default server prefill to chunked execution**: `mivi serve` now defaults to the model-agnostic
+  chunked prefill path with 64-token tiles, reducing cold first-token latency for large AI-agent
+  prompts without requiring every user to discover `--prefill-strategy chunked` manually.
+  - *Inspiration*: local-agent servers need fast prompt ingestion because coding agents commonly
+    send thousands of workspace/context tokens before the model can produce its first answer.
+  - *Sources*: [llama.cpp server prompt/batch options](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+    and [llama.cpp server batching design notes](https://github.com/crc-org/llama.cpp/blob/main/tools/server/README-dev.md).
+- **Keep a conservative escape hatch**: `--prefill-strategy token` remains available for debugging,
+  profile comparisons, and any model path where token-by-token prefill is preferable.
+  - *Inspiration*: llama.cpp exposes separate runtime controls for prompt processing and generation
+    threads/batches; Mivi should keep prefill policy explicit and observable rather than burying it
+    in model-specific code.
+
+#### Changed
+
+- `mivi serve` defaults to `--prefill-strategy chunked --prefill-tile-tokens 64`.
+- `ServerConfig::default()` now uses chunked prefill for server/agent workloads.
+
+#### Added
+
+- Regression coverage for the CLI and server default prefill strategy.
+
 ## [v0.2.41] - 2026-09-17
 
 ### Streaming Disconnect & Error Lifecycle Metrics

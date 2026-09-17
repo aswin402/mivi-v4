@@ -72,8 +72,8 @@ pub enum Commands {
         /// Maximum context window in tokens (defaults to 16384, max 65536)
         #[arg(short = 'c', long)]
         ctx_size: Option<usize>,
-        /// Prompt prefill execution strategy: token or chunked (default: token)
-        #[arg(long, default_value = "token")]
+        /// Prompt prefill execution strategy: token or chunked (default: chunked)
+        #[arg(long, default_value = "chunked")]
         prefill_strategy: String,
         /// Number of prompt tokens per chunk when using chunked prefill (default: 64)
         #[arg(long, default_value = "64")]
@@ -121,6 +121,15 @@ pub enum Commands {
         /// KV Cache precision mode: f32, q8_0, tq4 (TurboQuant 4-bit), tq2 (TurboQuant 2-bit)
         #[arg(long)]
         kv_precision: Option<String>,
+        /// Prompt prefill execution strategy for the model benchmark: token or chunked
+        #[arg(long, default_value = "chunked")]
+        prefill_strategy: String,
+        /// Number of prompt tokens per chunk when benchmarking chunked prefill
+        #[arg(long, default_value = "64")]
+        prefill_tile_tokens: usize,
+        /// Approximate prompt size used for the focused model benchmark
+        #[arg(long, default_value = "2048")]
+        bench_prompt_tokens: usize,
     },
     /// Manage on-disk persistent KV cache files (.kvc)
     Cache {
@@ -236,6 +245,71 @@ mod tests {
                 assert_eq!(prefill_tile_tokens, 32);
             }
             _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_prefill_strategy_defaults_to_chunked() {
+        let cli = Cli::try_parse_from(["mivi", "serve"]).expect("server defaults should parse");
+
+        match cli.command {
+            Commands::Serve {
+                prefill_strategy,
+                prefill_tile_tokens,
+                ..
+            } => {
+                assert_eq!(prefill_strategy, "chunked");
+                assert_eq!(prefill_tile_tokens, 64);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn bench_prefill_options_default_to_agent_sized_chunked_prompt() {
+        let cli = Cli::try_parse_from(["mivi", "bench"]).expect("bench defaults should parse");
+
+        match cli.command {
+            Commands::Bench {
+                prefill_strategy,
+                prefill_tile_tokens,
+                bench_prompt_tokens,
+                ..
+            } => {
+                assert_eq!(prefill_strategy, "chunked");
+                assert_eq!(prefill_tile_tokens, 64);
+                assert_eq!(bench_prompt_tokens, 2048);
+            }
+            _ => panic!("expected bench command"),
+        }
+    }
+
+    #[test]
+    fn bench_prefill_options_are_configurable() {
+        let cli = Cli::try_parse_from([
+            "mivi",
+            "bench",
+            "--prefill-strategy",
+            "token",
+            "--prefill-tile-tokens",
+            "32",
+            "--bench-prompt-tokens",
+            "4096",
+        ])
+        .expect("bench prefill options should parse");
+
+        match cli.command {
+            Commands::Bench {
+                prefill_strategy,
+                prefill_tile_tokens,
+                bench_prompt_tokens,
+                ..
+            } => {
+                assert_eq!(prefill_strategy, "token");
+                assert_eq!(prefill_tile_tokens, 32);
+                assert_eq!(bench_prompt_tokens, 4096);
+            }
+            _ => panic!("expected bench command"),
         }
     }
 }

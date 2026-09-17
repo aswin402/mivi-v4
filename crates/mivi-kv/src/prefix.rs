@@ -132,12 +132,24 @@ impl PrefixCache {
     /// Create a prefix cache with an explicit maximum memory byte budget.
     pub fn with_budget(max_chunks: usize, chunk_size: usize, max_memory_bytes: usize) -> Self {
         Self {
-            chunk_size: if chunk_size > 0 { chunk_size } else { PREFIX_CHUNK_SIZE },
-            max_chunks: if max_chunks > 0 { max_chunks } else { DEFAULT_MAX_CACHED_CHUNKS },
+            chunk_size: if chunk_size > 0 {
+                chunk_size
+            } else {
+                PREFIX_CHUNK_SIZE
+            },
+            max_chunks: if max_chunks > 0 {
+                max_chunks
+            } else {
+                DEFAULT_MAX_CACHED_CHUNKS
+            },
             chunks: HashMap::with_capacity(max_chunks.min(32)),
             lru_order: VecDeque::with_capacity(max_chunks.min(32)),
             total_memory_bytes: 0,
-            max_memory_bytes: if max_memory_bytes > 0 { max_memory_bytes } else { DEFAULT_MAX_PREFIX_CACHE_BYTES },
+            max_memory_bytes: if max_memory_bytes > 0 {
+                max_memory_bytes
+            } else {
+                DEFAULT_MAX_PREFIX_CACHE_BYTES
+            },
         }
     }
 
@@ -170,7 +182,10 @@ impl PrefixCache {
     ///
     /// Returns `Some((matched_tokens_count, &PrefixChunk))` representing the deepest
     /// matched chunk boundary, or `None` if no prefix chunk was found.
-    pub fn find_longest_prefix<'a>(&'a mut self, tokens: &[u32]) -> Option<(usize, &'a PrefixChunk)> {
+    pub fn find_longest_prefix<'a>(
+        &'a mut self,
+        tokens: &[u32],
+    ) -> Option<(usize, &'a PrefixChunk)> {
         if tokens.len() < self.chunk_size {
             return None;
         }
@@ -197,7 +212,9 @@ impl PrefixCache {
         if let Some((matched_len, match_hash)) = deepest_match {
             // Touch LRU order
             self.touch(&match_hash);
-            self.chunks.get(&match_hash).map(|chunk| (matched_len, chunk))
+            self.chunks
+                .get(&match_hash)
+                .map(|chunk| (matched_len, chunk))
         } else {
             None
         }
@@ -218,17 +235,6 @@ impl PrefixCache {
             return hash;
         }
 
-        // Evict LRU chunk if at max capacity
-        if self.chunks.len() >= self.max_chunks {
-            if let Some(oldest_hash) = self.lru_order.pop_front() {
-                if let Some(evicted_chunk) = self.chunks.remove(&oldest_hash) {
-                    self.total_memory_bytes = self
-                        .total_memory_bytes
-                        .saturating_sub(evicted_chunk.memory_bytes());
-                }
-            }
-        }
-
         let chunk = PrefixChunk {
             chunk_index,
             hash,
@@ -240,6 +246,18 @@ impl PrefixCache {
         self.chunks.insert(hash, chunk);
         self.lru_order.push_back(hash);
         self.total_memory_bytes = self.total_memory_bytes.saturating_add(chunk_mem);
+        while self.chunks.len() > self.max_chunks {
+            if let Some(eviction_hash) = self.select_eviction_hash() {
+                self.remove_from_lru(&eviction_hash);
+                if let Some(evicted_chunk) = self.chunks.remove(&eviction_hash) {
+                    self.total_memory_bytes = self
+                        .total_memory_bytes
+                        .saturating_sub(evicted_chunk.memory_bytes());
+                }
+            } else {
+                break;
+            }
+        }
         self.prune_to_bytes(self.max_memory_bytes);
         hash
     }
@@ -255,8 +273,9 @@ impl PrefixCache {
     pub fn prune_to_bytes(&mut self, target_bytes: usize) -> usize {
         let mut evicted = 0;
         while self.total_memory_bytes > target_bytes && !self.lru_order.is_empty() {
-            if let Some(oldest_hash) = self.lru_order.pop_front() {
-                if let Some(removed) = self.chunks.remove(&oldest_hash) {
+            if let Some(eviction_hash) = self.select_eviction_hash() {
+                self.remove_from_lru(&eviction_hash);
+                if let Some(removed) = self.chunks.remove(&eviction_hash) {
                     self.total_memory_bytes = self
                         .total_memory_bytes
                         .saturating_sub(removed.memory_bytes());
@@ -267,9 +286,29 @@ impl PrefixCache {
         evicted
     }
 
+    fn select_eviction_hash(&self) -> Option<u64> {
+        let mut selected = None;
+        let mut selected_index = 0usize;
+        for hash in &self.lru_order {
+            if let Some(chunk) = self.chunks.get(hash) {
+                if selected.is_none() || chunk.chunk_index > selected_index {
+                    selected = Some(*hash);
+                    selected_index = chunk.chunk_index;
+                }
+            }
+        }
+        selected.or_else(|| self.lru_order.front().copied())
+    }
+
+    fn remove_from_lru(&mut self, hash: &u64) {
+        if let Some(pos) = self.lru_order.iter().position(|entry| entry == hash) {
+            self.lru_order.remove(pos);
+        }
+    }
+
     /// Move a chunk hash to the back of the LRU queue.
     fn touch(&mut self, hash: &u64) {
-        if let Some(pos) = self.lru_order.iter().position(|h| h == hash) {
+        if let Some(pos) = self.lru_order.iter().position(|entry| entry == hash) {
             self.lru_order.remove(pos);
             self.lru_order.push_back(*hash);
         }
@@ -342,7 +381,6 @@ impl PrefixCache {
 
         None
     }
-
 }
 
 #[cfg(test)]
@@ -437,6 +475,33 @@ mod tests {
         let _h2 = cache.insert_chunk(0, &c2, 0, state);
         assert_eq!(cache.len(), 2);
         assert!(!cache.chunks.contains_key(&h0));
+    }
+
+    #[test]
+    fn tight_prefix_cache_preserves_reusable_root_chain() {
+        let mut cache = PrefixCache::new(2, 64);
+        let c0: Vec<u32> = (0..64).collect();
+        let c1: Vec<u32> = (64..128).collect();
+        let c2: Vec<u32> = (128..192).collect();
+
+        let state0 = HybridStateSnapshot::new(64, 0, vec![], vec![], vec![], vec![]);
+        let state1 = HybridStateSnapshot::new(128, 0, vec![], vec![], vec![], vec![]);
+        let state2 = HybridStateSnapshot::new(192, 0, vec![], vec![], vec![], vec![]);
+
+        let h0 = cache.insert_chunk(0, &c0, 0, state0);
+        let h1 = cache.insert_chunk(h0, &c1, 1, state1);
+        let _h2 = cache.insert_chunk(h1, &c2, 2, state2);
+
+        let mut prompt = Vec::new();
+        prompt.extend_from_slice(&c0);
+        prompt.extend_from_slice(&c1);
+        prompt.extend_from_slice(&[999, 1000, 1001]);
+
+        let (matched_len, chunk) = cache
+            .find_longest_prefix(&prompt)
+            .expect("root prefix chain should remain reusable");
+        assert_eq!(matched_len, 128);
+        assert_eq!(chunk.hash, h1);
     }
     #[test]
     fn test_suffix_match_finds_cached_chunk() {
@@ -538,5 +603,4 @@ mod tests {
 
         assert!(cache.memory_usage_bytes() >= state_bytes + token_bytes);
     }
-
 }

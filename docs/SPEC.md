@@ -428,6 +428,8 @@ Inference requests default to a 300-second wall-clock deadline and can be config
 `mivi serve --request-timeout-secs`; the same deadline covers detached streaming generation.
 The first model output defaults to a 120-second deadline and can be configured with
 `mivi serve --first-token-timeout-secs`; the total request deadline remains the authoritative cap.
+Server prompt prefill defaults to chunked 64-token tiles and can be configured with
+`mivi serve --prefill-strategy token|chunked --prefill-tile-tokens N`.
 Built-in handlers receive a cooperative cancellation signal when an agent tool timeout occurs.
 Custom handlers registered through the legacy API remain supported but cannot observe that signal.
 

@@ -77,6 +77,10 @@ info model="models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf":
 bench:
     cargo run --release --jobs 1 -- bench
 
+# Benchmark model prefill using an agent-sized synthetic workspace prompt
+bench-agent model="models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" strategy="chunked" prompt_tokens="2048" tile_tokens="64":
+    cargo run --release --jobs 1 -- bench --model {{model}} --prefill-strategy {{strategy}} --prefill-tile-tokens {{tile_tokens}} --bench-prompt-tokens {{prompt_tokens}}
+
 # Generate the synthetic test GGUF model fixture (models/mivi-tiny-test.gguf)
 generate-fixture:
     python3 training/export/generate_fixture.py
