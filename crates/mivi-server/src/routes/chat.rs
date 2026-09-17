@@ -200,6 +200,7 @@ pub async fn chat_completions(
     if is_streaming {
         let ctx = ChatStreamContext {
             prompt,
+            admitted_prompt_tokens,
             max_tokens,
             options,
             tool_choice,
@@ -244,6 +245,7 @@ pub async fn chat_completions(
 
 struct ChatStreamContext {
     prompt: String,
+    admitted_prompt_tokens: Option<usize>,
     max_tokens: usize,
     options: GenerationOptions,
     tool_choice: ToolChoice,
@@ -285,6 +287,7 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let engine = ctx.engine;
     let metrics = ctx.metrics;
     let prompt = ctx.prompt;
+    let admitted_prompt_tokens = ctx.admitted_prompt_tokens;
     let max_tokens = ctx.max_tokens;
     let options = ctx.options;
     let tool_choice = ctx.tool_choice;
@@ -503,6 +506,12 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                         return "error";
                     }
                     let assembled = incremental_text.assembled().to_string();
+                    let prompt_tokens = match admitted_prompt_tokens {
+                        Some(prompt_tokens) => prompt_tokens,
+                        None => engine.encode(&prompt).await.len(),
+                    };
+                    let completion_tokens = engine.encode(&assembled).await.len();
+                    metrics.record_tokens(prompt_tokens, completion_tokens);
                     if !assembled.is_empty() {
                         if tool_calls_enabled && incremental_text.has_tool_call_start() {
                             // The structured call is emitted below after the complete delimiter

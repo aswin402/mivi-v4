@@ -73,6 +73,8 @@ pub struct EngineModelMetadata {
     pub quantization_level: Option<String>,
     pub chat_template: Option<String>,
     pub bos_token: Option<String>,
+    pub tool_call_start_token: Option<String>,
+    pub tool_call_end_token: Option<String>,
     pub context_length: Option<usize>,
 }
 
@@ -150,6 +152,9 @@ impl EngineModelMetadata {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
 
+        let tool_call_start_token = find_tool_delimiter_token(model.tokenizer.vocab(), false);
+        let tool_call_end_token = find_tool_delimiter_token(model.tokenizer.vocab(), true);
+
         Self {
             size_bytes: model.gguf.mmap.len() as u64,
             parameter_count,
@@ -157,9 +162,29 @@ impl EngineModelMetadata {
             quantization_level,
             chat_template,
             bos_token,
+            tool_call_start_token,
+            tool_call_end_token,
             context_length: Some(model.config.max_seq_len),
         }
     }
+}
+
+fn find_tool_delimiter_token(vocab: &mivi_tokenizer::Vocab, end: bool) -> Option<String> {
+    let marker = if end { "end" } else { "start" };
+    (0..vocab.len() as u32).find_map(|id| {
+        let token = vocab.get_token(id)?;
+        let normalized = token.to_ascii_lowercase();
+        if token.starts_with("<|")
+            && token.ends_with("|>")
+            && normalized.contains("tool")
+            && normalized.contains("call")
+            && normalized.contains(marker)
+        {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn tensor_element_count(dims: &[usize]) -> Option<u64> {

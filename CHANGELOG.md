@@ -9,6 +9,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.40] - 2026-09-17
+
+### Accurate Streaming Request Lifecycle Logs
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Separate response start from response completion**: SSE requests now report header latency
+  when the response opens and total request latency when the body closes, preventing long-running
+  generations from appearing to finish in microseconds.
+  - *Inspiration*: streaming-server observability that distinguishes time-to-first-byte from
+    end-to-end request duration for agent workloads.
+  - *Sources*: [Axum SSE response streaming](https://docs.rs/axum/0.7/axum/response/sse/index.html)
+    and [HTTP streaming body semantics](https://docs.rs/axum/0.7/axum/body/struct.Body.html).
+- **Detect streaming at the transport boundary**: the middleware recognizes `text/event-stream`
+  responses in addition to route metadata, keeping the behavior model- and provider-agnostic.
+  - *Inspiration*: content-type based protocol detection so future streaming endpoints do not need
+    duplicated logging assumptions.
+  - *Source*: [WHATWG Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html).
+
+#### Fixed
+
+- Streaming OpenAI, Anthropic, and native-agent responses no longer log the time to create SSE
+  headers as if it were the completed request duration.
+- Native-agent SSE responses are now explicitly marked as streaming in their route metadata.
+
+#### Added
+
+- Regression coverage for identifying SSE responses without relying on route-specific metadata.
+
+## [v0.2.39] - 2026-09-17
+
+### Streaming Token Accounting
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Measure the complete serving path**: OpenAI-compatible streaming responses now record the
+  admitted prompt tokens and the raw generated output tokens using the active runtime tokenizer,
+  matching the existing blocking and native-agent accounting without model-specific assumptions.
+  - *Inspiration*: serving metrics that separate request latency, time-to-first-token, and token
+    throughput so agent performance can be diagnosed from evidence.
+  - *Sources*: [llama.cpp server monitoring](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+    and [vLLM metrics documentation](https://docs.vllm.ai/en/latest/usage/metrics.html).
+- **Count once at stream completion**: accounting occurs after the generation stream closes and
+  before response validation, so tool-call markup and ordinary text are measured consistently.
+  - *Inspiration*: protocol-independent runtime instrumentation that works for future models and
+    codecs.
+  - *Source*: [OpenAI-compatible streaming conventions in llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+#### Fixed
+
+- Streaming chat and streaming tool-call requests no longer leave
+  `prompt_tokens_total` and `completion_tokens_total` at zero in `/metrics`.
+
+#### Added
+
+- Regression coverage requiring nonzero prompt and completion token counters for a completed
+  streaming chat response.
+
+## [v0.2.38] - 2026-09-17
+
+### Automatic Model-Agnostic Tool Profile Discovery
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Separate prompt metadata from output-protocol metadata**: GGUF chat templates can describe
+  how tools are listed in the prompt without spelling out the delimiters the model emits. Mivi now
+  supplements the template with semantically named tool delimiter tokens discovered in the loaded
+  tokenizer vocabulary.
+  - *Inspiration*: keeping model protocol data at the metadata/adapter boundary instead of
+    identifying models by name or embedding LFM2.5 branches in HTTP routes.
+  - *Sources*: [GGUF metadata specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
+    and [LFM2.5 tool-template discussion](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/discussions/12).
+- **Explicit configuration remains authoritative**: external profile files still override automatic
+  discovery, preserving support for future models with different delimiters and incomplete metadata.
+  - *Inspiration*: declarative model adapters and the explicit profile escape hatch documented in
+    the model-agnostic agent plan.
+  - *Source*: [LFM2.5 chat template](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/blob/main/chat_template.jinja).
+
+#### Fixed
+
+- LFM2.5 GGUF files with tool delimiter tokens in the vocabulary but no output delimiters in the
+  embedded chat template no longer silently resolve to `text_only`.
+- Default server startup now exposes tool capability for such models without requiring a
+  model-specific command-line profile.
+
+#### Added
+
+- Regression coverage for completing a chat-template profile from tokenizer tool markers.
+
 ## [v0.2.37] - 2026-09-17
 
 ### Agent Latency Telemetry

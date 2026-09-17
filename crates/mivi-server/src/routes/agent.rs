@@ -584,6 +584,7 @@ pub async fn run_agent_task(
     let log_meta = crate::logging::LogMetadata {
         prompt_summary: Some(task_summary),
         is_agent: true,
+        is_streaming: true,
         ..Default::default()
     };
     resp.extensions_mut().insert(log_meta);

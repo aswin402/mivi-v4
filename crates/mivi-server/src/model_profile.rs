@@ -225,8 +225,10 @@ fn config_from_metadata(metadata: Option<&EngineModelMetadata>) -> Option<ModelP
     let message_end = template_token_containing(template, "im_end")?;
 
     match (
-        template_token_containing(template, "tool_call_start"),
-        template_token_containing(template, "tool_call_end"),
+        template_token_containing(template, "tool_call_start")
+            .or_else(|| metadata.and_then(|value| value.tool_call_start_token.clone())),
+        template_token_containing(template, "tool_call_end")
+            .or_else(|| metadata.and_then(|value| value.tool_call_end_token.clone())),
     ) {
         (Some(tool_call_start), Some(tool_call_end)) => Some(ModelProfileConfig::DelimitedPython {
             start_of_text,
@@ -751,6 +753,24 @@ mod tests {
         assert_eq!(profile.kind(), ModelProfileKind::TextOnly);
         assert_eq!(profile.tool_codec_name(), "none");
         assert!(!profile.supports_tools());
+    }
+
+    #[test]
+    fn vocabulary_tool_markers_complete_a_template_without_output_delimiters() {
+        let metadata = crate::engine_actor::EngineModelMetadata {
+            chat_template: Some(
+                "<|startoftext|><|im_start|>{{ messages }}<|im_end|>".to_string(),
+            ),
+            tool_call_start_token: Some("<|tool_call_start|>".to_string()),
+            tool_call_end_token: Some("<|tool_call_end|>".to_string()),
+            ..Default::default()
+        };
+
+        let profile = ModelProfile::from_metadata(Some(&metadata));
+
+        assert_eq!(profile.kind(), ModelProfileKind::DelimitedPython);
+        assert_eq!(profile.tool_codec_name(), "delimited_python");
+        assert!(profile.supports_tools());
     }
 
     #[test]

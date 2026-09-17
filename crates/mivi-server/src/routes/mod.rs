@@ -642,6 +642,8 @@ mod tests {
         assert!(payload["time_to_first_token_microseconds_total"]
             .as_u64()
             .is_some());
+        assert!(payload["prompt_tokens_total"].as_u64().unwrap() > 0);
+        assert!(payload["completion_tokens_total"].as_u64().unwrap() > 0);
     }
 
     #[test]

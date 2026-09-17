@@ -192,6 +192,133 @@ pub fn print_interaction_box(
     let _ = std::io::stdout().flush();
 }
 
+/// Detect a streaming response even when a route did not attach logging metadata.
+///
+/// SSE is a transport detail, so the content type is the reliable fallback for
+/// future streaming routes and model providers.
+fn response_is_streaming(response: &Response) -> bool {
+    response
+        .extensions()
+        .get::<LogMetadata>()
+        .is_some_and(|meta| meta.is_streaming)
+        || response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+            })
+}
+
+/// Keep the request log honest: headers are available before an SSE body finishes.
+fn wrap_streaming_body(
+    response: Response,
+    started: Instant,
+    method: &str,
+    path: &str,
+    extra_info: String,
+) -> Response {
+    use futures::StreamExt;
+
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let method = method.to_owned();
+    let path = path.to_owned();
+    let body_stream = Box::pin(body.into_data_stream());
+
+    let tracked_stream = futures::stream::unfold(
+        (body_stream, false, method, path, extra_info),
+        move |(mut body_stream, completion_logged, method, path, extra_info)| async move {
+            match body_stream.next().await {
+                Some(Ok(bytes)) => Some((
+                    Ok(bytes),
+                    (body_stream, completion_logged, method, path, extra_info),
+                )),
+                Some(Err(error)) => {
+                    if !completion_logged {
+                        print_stream_completion(
+                            &method,
+                            &path,
+                            status,
+                            started,
+                            "body error",
+                            &extra_info,
+                        );
+                    }
+                    Some((Err(error), (body_stream, true, method, path, extra_info)))
+                }
+                None => {
+                    if !completion_logged {
+                        print_stream_completion(
+                            &method,
+                            &path,
+                            status,
+                            started,
+                            "complete",
+                            &extra_info,
+                        );
+                    }
+                    None
+                }
+            }
+        },
+    );
+
+    Response::from_parts(parts, Body::from_stream(tracked_stream))
+}
+
+fn print_stream_completion(
+    method: &str,
+    path: &str,
+    status: axum::http::StatusCode,
+    started: Instant,
+    outcome: &str,
+    extra_info: &str,
+) {
+    use std::io::Write;
+
+    let status_code = status.as_u16();
+    let status_str = if status.is_success() {
+        format!("{}{}{}", ansi::GREEN, status_code, ansi::RESET)
+    } else if status.is_client_error() {
+        format!("{}{}{}", ansi::YELLOW, status_code, ansi::RESET)
+    } else if status.is_server_error() {
+        format!("{}{}{}", ansi::RED, status_code, ansi::RESET)
+    } else {
+        format!("{}{}{}", ansi::CYAN, status_code, ansi::RESET)
+    };
+    let symbol = if status.is_success() {
+        format!("{}←{}", ansi::DIM, ansi::RESET)
+    } else {
+        format!("{}✗{}", ansi::RED, ansi::RESET)
+    };
+    let method_str = format!("{}{}{}", ansi::CYAN, method, ansi::RESET);
+    let duration = started.elapsed();
+    let duration_str = if duration.as_secs() > 0 {
+        format!("{:.2}s", duration.as_secs_f64())
+    } else if duration.as_millis() > 0 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}µs", duration.as_micros())
+    };
+
+    println!(
+        "  {} {} {:<24} {:<10} {:>6} {} {}{}{}",
+        symbol,
+        method_str,
+        path,
+        status_str,
+        format!("{}{}{}", ansi::DIM, duration_str, ansi::RESET),
+        extra_info,
+        ansi::DIM,
+        outcome,
+        ansi::RESET
+    );
+    let _ = std::io::stdout().flush();
+}
+
 /// Axum middleware for minimal, beautiful Hono-style request/response logging.
 pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
     use std::io::Write;
@@ -224,6 +351,7 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
 
     let response = next.run(req).await;
     let elapsed = start.elapsed();
+    let is_streaming = response_is_streaming(&response);
 
     let status = response.status();
     let status_code = status.as_u16();
@@ -320,13 +448,18 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
         format!("{}✗{}", ansi::RED, ansi::RESET)
     };
 
+    let duration_display = if is_streaming {
+        format!("headers {duration_str}")
+    } else {
+        duration_str
+    };
     println!(
         "  {} {} {:<24} {:<10} {:>6}{}",
         symbol,
         method_str,
         path,
         status_str,
-        format!("{}{}{}", ansi::DIM, duration_str, ansi::RESET),
+        format!("{}{}{}", ansi::DIM, duration_display, ansi::RESET),
         extra_info
     );
 
@@ -342,7 +475,11 @@ pub async fn mivi_log_middleware(req: Request<Body>, next: Next) -> Response {
         }
     }
 
-    response
+    if is_streaming {
+        wrap_streaming_body(response, start, method.as_str(), &path, extra_info)
+    } else {
+        response
+    }
 }
 
 /// Helper to format a safe prompt summary string for terminal logs
@@ -379,5 +516,15 @@ mod tests {
             summarize_prompt("line1\nline2\tline3\r", 30),
             "line1 line2 line3"
         );
+    }
+
+    #[test]
+    fn event_stream_content_type_is_classified_as_streaming() {
+        let response = Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::empty())
+            .expect("valid response");
+
+        assert!(response_is_streaming(&response));
     }
 }
