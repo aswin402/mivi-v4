@@ -42,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
             no_safelock,
             kv_precision,
             ctx_size,
+            prefill_strategy,
+            prefill_tile_tokens,
         } => {
             mivi_cli::run_serve(mivi_cli::ServeArgs {
                 port,
@@ -59,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
                 no_safelock,
                 kv_precision,
                 ctx_size,
+                prefill_strategy,
+                prefill_tile_tokens,
             })
             .await?;
         }

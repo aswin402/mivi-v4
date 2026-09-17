@@ -507,6 +507,7 @@ mod tests {
         assert_eq!(payload["inference_requests_total"], 0);
         assert_eq!(payload["inference_requests_rejected_total"], 0);
         assert_eq!(payload["generation_count"], 0);
+        assert_eq!(payload["first_token_count"], 0);
         assert_eq!(payload["tool_timeouts_total"], 0);
     }
 
@@ -594,6 +595,53 @@ mod tests {
         assert_eq!(payload["generation_count"], 1);
         assert!(payload["prompt_tokens_total"].as_u64().unwrap() > 0);
         assert!(payload["completion_tokens_total"].as_u64().unwrap() > 0);
+        assert_eq!(payload["first_token_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_records_streaming_first_token() {
+        let engine = crate::EngineActor::spawn_mock();
+        let state = Arc::new(AppState::new("test-model", ToolBroker::new(), engine, None));
+        let app = create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("[DONE]"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["first_token_count"], 1);
+        assert!(payload["time_to_first_token_microseconds_total"]
+            .as_u64()
+            .is_some());
     }
 
     #[test]

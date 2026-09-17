@@ -9,14 +9,16 @@ pub mod loader;
 pub mod lora;
 pub mod model;
 pub mod pld;
+pub mod prefill;
 pub mod sampler;
 pub mod ssm;
 pub mod transformer;
 pub mod weights;
 
 pub use config::{
-    BlockType, GenerationConfig, ModelConfig, DEFAULT_MAX_LORA_RANK, DEFAULT_N_EXPERTS,
-    DEFAULT_RMS_NORM_EPS, DEFAULT_ROPE_BASE, DEFAULT_SSM_A_VAL, RECENT_TOKENS_WINDOW,
+    BlockType, GenerationConfig, ModelConfig, PrefillStrategy, DEFAULT_MAX_LORA_RANK,
+    DEFAULT_N_EXPERTS, DEFAULT_RMS_NORM_EPS, DEFAULT_ROPE_BASE, DEFAULT_SSM_A_VAL,
+    RECENT_TOKENS_WINDOW,
 };
 pub use expert_cache::{
     ExpertHeatStat, ExpertHeatTracker, ExpertKey, ExpertPinningManager, ExpertPinningStrategy,
@@ -27,13 +29,14 @@ pub use gguf::{GgufError, GgufFile, GgufValue, TensorInfo};
 pub use grammar::{JsonGrammar, JsonScope, TokenBitMask, ToolCallGrammar};
 pub use loader::safe_f32_slice;
 pub use lora::{ActiveAdapters, LoraAdapter, LoraWeightPair};
-pub use model::{Model, ModelError, Result};
+pub use model::{ForwardProfileSnapshot, Model, ModelError, Result};
 pub use pld::{
     PromptLookupProposer, ReasoningSpecRouter, SpeculativeMode, TreeDraftCandidate,
-    TreePldProposer, TreeVerifier, DEFAULT_PLD_DRAFT_SIZE, DEFAULT_PLD_NGRAM_SIZE,
-    MAX_TREE_DEPTH, REASONING_DRAFT_DEPTH,
+    TreePldProposer, TreeVerifier, DEFAULT_PLD_DRAFT_SIZE, DEFAULT_PLD_NGRAM_SIZE, MAX_TREE_DEPTH,
+    REASONING_DRAFT_DEPTH,
 };
+pub use prefill::{add_rows_in_place, rms_norm_rows, swiglu_rows, TileActivations, TileError};
 pub use sampler::{Sampler, SamplerConfig};
-pub use ssm::{ssm_forward, SsmParams};
-pub use transformer::{attention_forward, AttentionParams};
+pub use ssm::{ssm_forward, ssm_forward_tile, SsmParams};
+pub use transformer::{attention_forward, attention_forward_tile, AttentionParams};
 pub use weights::{LayerWeights, ModelWeights, QuantizedTensor};

@@ -99,6 +99,24 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn required_tool_choice_uses_codec_opening_delimiter() {
+        let codec = mivi_tools::DelimitedPythonToolCallCodec::new(
+            "<|tool_call_start|>",
+            "<|tool_call_end|>",
+        );
+
+        assert_eq!(
+            forced_tool_call_prefix(&ToolChoice::Required, &codec).as_deref(),
+            Some("<|tool_call_start|>")
+        );
+        assert_eq!(
+            forced_tool_call_prefix(&ToolChoice::Named("read_file".to_string()), &codec).as_deref(),
+            Some("<|tool_call_start|>")
+        );
+        assert_eq!(forced_tool_call_prefix(&ToolChoice::Auto, &codec), None);
+    }
 }
 use serde_json::Value;
 
@@ -130,6 +148,8 @@ pub struct GenerationOptions {
     pub frequency_penalty: Option<f32>,
     pub seed: Option<u64>,
     pub stop_tokens: Option<Vec<String>>,
+    /// Prefix supplied by the selected protocol codec when the API requires structured output.
+    pub forced_output_prefix: Option<String>,
     pub response_mode: ResponseMode,
 }
 
@@ -145,8 +165,25 @@ impl Default for GenerationOptions {
             frequency_penalty: None,
             seed: None,
             stop_tokens: None,
+            forced_output_prefix: None,
             response_mode: ResponseMode::Text,
         }
+    }
+}
+
+/// Return the codec-defined opening delimiter for a required tool response.
+///
+/// The delimiter is model/profile data, not a model-family constant. Optional tool use remains
+/// unconstrained so the model can choose a normal text answer.
+pub fn forced_tool_call_prefix(
+    choice: &ToolChoice,
+    codec: &dyn mivi_tools::ToolCallCodec,
+) -> Option<String> {
+    match choice {
+        ToolChoice::Required | ToolChoice::Named(_) => {
+            codec.opening_delimiter().map(ToOwned::to_owned)
+        }
+        ToolChoice::Disabled | ToolChoice::Auto => None,
     }
 }
 

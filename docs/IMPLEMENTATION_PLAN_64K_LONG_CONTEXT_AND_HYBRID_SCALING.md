@@ -116,6 +116,12 @@ Scaling transformer context windows traditionally triggers a **quadratic compute
   - Verify that selective layer mapping (`layer_map`) continues to allocate memory exclusively for the 6 attention layers.
 
 ### 📋 Phase 3: Chunked Tiled Prefill & Cache-Blocking
+
+> **Current status (2026-09-17):** An initial opt-in, model-agnostic layer-ordered tile path is
+> implemented and equivalence-tested on the tiny hybrid GGUF. It preserves SSM recurrence and
+> causal KV state but currently uses a reference batch projection kernel; the historical 512/1024
+> cache-blocked SIMD optimization and its performance targets remain future work.
+
 - [ ] **Cache-Friendly Chunking Loop** (`crates/mivi-model/src/model.rs`):
   - Break cold prompt sequences into chunks of `CHUNK_SIZE = 512` or `1024` tokens.
   - Compute SSM states and Attention KV projections chunk-by-chunk, keeping intermediate activations resident in CPU L2/L3 cache (16MB–32MB).

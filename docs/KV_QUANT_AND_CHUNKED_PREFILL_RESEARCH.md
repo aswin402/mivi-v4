@@ -6,6 +6,20 @@
 1. **Quantized Attention KV Cache (`Q8_0`, `Q4_0`, and Asymmetric KIVI-style compression)**
 2. **High-Throughput Chunked Prefill & SIMD Tiled GEMM (Sarathi & llama.cpp `n_ubatch` architecture)**
 
+> **Measured implementation status (2026-09-17):** Mivi now has an opt-in, model-agnostic
+> layer-ordered chunked prefill path with ordered SSM state updates, causal attention, and exact
+> prefix-cache boundaries. The checked batch projection kernel reuses decoded rows, transposes
+> tile inputs, and uses SIMD FMA plus two-way Rayon row splitting. On the 1.2B Q4 model with two
+> runtime threads, cold prefill measured 9.08 tok/s token-major versus 9.04 tok/s with tile size
+> 64, so token-major remains the default because the difference is within measurement noise. The earlier
+> 6x–10x figures below are design targets, not current results; format-specific SIMD kernels are
+> required before claiming a speedup. A bounded two-thread sweep on the final code showed strong
+> tile-size sensitivity while completing for both local models: LFM2.5 1.2B Q4 cold chunked
+> prefill measured `8.15/6.49/8.96/8.90/9.02` tok/s for tiles `1/2/8/32/64`, versus
+> token-major `9.08` tok/s. A separate local Mivi Q4 model measured token-major `17.13` tok/s
+> and chunked `19.20/13.69/27.92/29.84/34.65` tok/s for tiles `1/2/8/32/64`. These are
+> model-dependent measurements, not a universal tile recommendation.
+
 ---
 
 ## 1. Deep Research Synthesis

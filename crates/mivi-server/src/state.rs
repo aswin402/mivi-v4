@@ -23,6 +23,8 @@ pub struct ServerMetrics {
     inference_slot_wait_microseconds_total: AtomicU64,
     generation_latency_microseconds_total: AtomicU64,
     generation_count: AtomicU64,
+    time_to_first_token_microseconds_total: AtomicU64,
+    first_token_count: AtomicU64,
     prompt_tokens_total: AtomicU64,
     completion_tokens_total: AtomicU64,
     tool_timeouts_total: AtomicU64,
@@ -36,6 +38,8 @@ pub struct MetricsSnapshot {
     pub inference_slot_wait_microseconds_total: u64,
     pub generation_latency_microseconds_total: u64,
     pub generation_count: u64,
+    pub time_to_first_token_microseconds_total: u64,
+    pub first_token_count: u64,
     pub prompt_tokens_total: u64,
     pub completion_tokens_total: u64,
     pub tool_timeouts_total: u64,
@@ -62,6 +66,12 @@ impl ServerMetrics {
         self.generation_latency_microseconds_total
             .fetch_add(duration_microseconds(elapsed), Ordering::Relaxed);
         self.generation_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_time_to_first_token(&self, elapsed: Duration) {
+        self.time_to_first_token_microseconds_total
+            .fetch_add(duration_microseconds(elapsed), Ordering::Relaxed);
+        self.first_token_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_tokens(&self, prompt_tokens: usize, completion_tokens: usize) {
@@ -94,6 +104,10 @@ impl ServerMetrics {
                 .generation_latency_microseconds_total
                 .load(Ordering::Relaxed),
             generation_count: self.generation_count.load(Ordering::Relaxed),
+            time_to_first_token_microseconds_total: self
+                .time_to_first_token_microseconds_total
+                .load(Ordering::Relaxed),
+            first_token_count: self.first_token_count.load(Ordering::Relaxed),
             prompt_tokens_total: self.prompt_tokens_total.load(Ordering::Relaxed),
             completion_tokens_total: self.completion_tokens_total.load(Ordering::Relaxed),
             tool_timeouts_total: self.tool_timeouts_total.load(Ordering::Relaxed),
@@ -115,6 +129,24 @@ pub struct AppState {
     pub config: ServerConfig,
     pub metrics: Arc<ServerMetrics>,
     inference_slots: Arc<Semaphore>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerMetrics;
+    use std::time::Duration;
+
+    #[test]
+    fn records_time_to_first_token_samples() {
+        let metrics = ServerMetrics::default();
+
+        metrics.record_time_to_first_token(Duration::from_millis(12));
+        metrics.record_time_to_first_token(Duration::from_millis(8));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.time_to_first_token_microseconds_total, 20_000);
+        assert_eq!(snapshot.first_token_count, 2);
+    }
 }
 
 impl AppState {

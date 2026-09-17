@@ -72,6 +72,12 @@ pub enum Commands {
         /// Maximum context window in tokens (defaults to 16384, max 65536)
         #[arg(short = 'c', long)]
         ctx_size: Option<usize>,
+        /// Prompt prefill execution strategy: token or chunked (default: token)
+        #[arg(long, default_value = "token")]
+        prefill_strategy: String,
+        /// Number of prompt tokens per chunk when using chunked prefill (default: 64)
+        #[arg(long, default_value = "64")]
+        prefill_tile_tokens: usize,
     },
     /// Interactive terminal chat with local model
     Chat {
@@ -204,6 +210,31 @@ mod tests {
                 first_token_timeout_secs,
                 ..
             } => assert_eq!(first_token_timeout_secs, 9),
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_prefill_strategy_is_configurable() {
+        let cli = Cli::try_parse_from([
+            "mivi",
+            "serve",
+            "--prefill-strategy",
+            "chunked",
+            "--prefill-tile-tokens",
+            "32",
+        ])
+        .expect("server should accept model-agnostic prefill configuration");
+
+        match cli.command {
+            Commands::Serve {
+                prefill_strategy,
+                prefill_tile_tokens,
+                ..
+            } => {
+                assert_eq!(prefill_strategy, "chunked");
+                assert_eq!(prefill_tile_tokens, 32);
+            }
             _ => panic!("expected serve command"),
         }
     }

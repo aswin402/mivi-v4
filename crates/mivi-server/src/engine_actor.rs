@@ -381,6 +381,17 @@ impl EngineActor {
         config: &ServerConfig,
         mock_mode: bool,
     ) -> std::io::Result<EngineHandle> {
+        config
+            .prefill_strategy
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        if let Some(model) = model.as_mut() {
+            model
+                .set_prefill_strategy(config.prefill_strategy)
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+                })?;
+        }
         let channel_capacity = config.channel_capacity.max(1);
         let (tx, rx) = mpsc::channel(channel_capacity);
         let has_model = model.is_some() || mock_mode;
@@ -465,9 +476,14 @@ fn handle_generate(
         apply_generation_options(m, &options);
 
         let p_tok = m.tokenizer.encode(&prompt).len();
+        let forced_prefix = options
+            .forced_output_prefix
+            .as_deref()
+            .filter(|prefix| !prefix.is_empty());
+        let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
         let res = match options.response_mode {
-            ResponseMode::Text => m.generate(&prompt, max_tokens),
-            ResponseMode::JsonObject => m.generate_with_json_grammar(&prompt, max_tokens),
+            ResponseMode::Text => m.generate(&model_prompt, max_tokens),
+            ResponseMode::JsonObject => m.generate_with_json_grammar(&model_prompt, max_tokens),
         };
         let res = match res {
             Ok(out) => {
@@ -478,6 +494,7 @@ fn handle_generate(
                         return;
                     }
                 }
+                let out = prepend_forced_prefix(out, forced_prefix);
                 let c_tok = m.tokenizer.encode(&out).len();
                 Ok((out, p_tok, c_tok))
             }
@@ -512,11 +529,24 @@ fn handle_generate_stream(
         let checkpoint = SamplingCheckpoint::capture(m, options.seed);
         apply_generation_options(m, &options);
 
+        let forced_prefix = options
+            .forced_output_prefix
+            .as_deref()
+            .filter(|prefix| !prefix.is_empty());
+        let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
+        if let Some(prefix) = forced_prefix {
+            if cancellation.is_cancelled()
+                || responder.blocking_send(Ok(prefix.to_string())).is_err()
+            {
+                checkpoint.restore(m);
+                return;
+            }
+        }
         let res = if options.response_mode == ResponseMode::JsonObject {
             Err("json_object response format is not supported for streaming".to_string())
         } else {
             m.generate_streaming_with_cancel(
-                &prompt,
+                &model_prompt,
                 max_tokens,
                 |_, text| {
                     !cancellation.is_cancelled()
@@ -547,6 +577,32 @@ fn handle_generate_stream(
     } else if !cancellation.is_cancelled() {
         let _ = responder.blocking_send(Err(ERR_NO_MODEL.to_string()));
     }
+}
+
+fn prompt_with_forced_prefix(prompt: &str, prefix: Option<&str>) -> String {
+    match prefix {
+        Some(prefix) => {
+            let mut model_prompt = String::with_capacity(prompt.len() + prefix.len());
+            model_prompt.push_str(prompt);
+            model_prompt.push_str(prefix);
+            model_prompt
+        }
+        None => prompt.to_string(),
+    }
+}
+
+fn prepend_forced_prefix(mut output: String, prefix: Option<&str>) -> String {
+    let Some(prefix) = prefix else {
+        return output;
+    };
+    if output.starts_with(prefix) {
+        return output;
+    }
+    let mut combined = String::with_capacity(prefix.len() + output.len());
+    combined.push_str(prefix);
+    combined.push_str(&output);
+    output.clear();
+    combined
 }
 
 struct SamplingCheckpoint {
@@ -673,5 +729,13 @@ mod tests {
 
         let engine = EngineActor::spawn_with_config(None, &config);
         assert_eq!(engine.stream_buffer_capacity, 1);
+    }
+
+    #[test]
+    fn invalid_prefill_strategy_is_rejected_before_spawn() {
+        let mut config = ServerConfig::default();
+        config.prefill_strategy = mivi_model::PrefillStrategy::Chunked { tile_tokens: 0 };
+
+        assert!(EngineActor::try_spawn_with_config(None, &config).is_err());
     }
 }

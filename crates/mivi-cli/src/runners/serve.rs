@@ -24,6 +24,8 @@ pub struct ServeArgs {
     pub no_safelock: bool,
     pub kv_precision: Option<String>,
     pub ctx_size: Option<usize>,
+    pub prefill_strategy: String,
+    pub prefill_tile_tokens: usize,
 }
 
 fn validate_bind_security(ip: std::net::IpAddr, api_key: Option<&str>) -> Result<()> {
@@ -65,6 +67,22 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .transpose()?;
 
     let max_concurrent_tool_executions = args.max_concurrent_tool_executions.max(1);
+    let prefill_strategy = mivi_model::PrefillStrategy::parse(
+        &args.prefill_strategy,
+        args.prefill_tile_tokens,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let server_config = mivi_server::ServerConfig {
+        model_profile,
+        prefill_strategy,
+        cors_allowed_origins: args.cors_origins,
+        max_concurrent_requests: args.max_concurrent_requests.max(1),
+        max_concurrent_tool_executions,
+        request_timeout_secs: args.request_timeout_secs.max(1),
+        first_token_timeout_secs: args.first_token_timeout_secs.max(1),
+        ..mivi_server::ServerConfig::default()
+    };
+
     let broker =
         mivi_tools::ToolBroker::with_max_concurrent_executions(max_concurrent_tool_executions);
     mivi_tools::register_builtin_tools(&broker, &workspace).await;
@@ -89,17 +107,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .map(|model| model.config.name.clone())
         .unwrap_or_else(|| mivi_core::DEFAULT_MODEL_ID.to_string());
 
-    let engine = mivi_server::EngineActor::spawn(loaded_model);
-
-    let server_config = mivi_server::ServerConfig {
-        model_profile,
-        cors_allowed_origins: args.cors_origins,
-        max_concurrent_requests: args.max_concurrent_requests.max(1),
-        max_concurrent_tool_executions,
-        request_timeout_secs: args.request_timeout_secs.max(1),
-        first_token_timeout_secs: args.first_token_timeout_secs.max(1),
-        ..mivi_server::ServerConfig::default()
-    };
+    let engine = mivi_server::EngineActor::try_spawn_with_config(loaded_model, &server_config)?;
     let state = Arc::new(
         AppState::with_config(model_name.clone(), broker, engine, api_key, server_config)
             .with_workspace(workspace),

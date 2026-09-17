@@ -349,12 +349,7 @@ fn render_delimited_python_prompt(
     let mut injected_tools = false;
 
     if needs_injected_system {
-        write!(
-            output,
-            "{message_start}system\n{}",
-            mivi_core::DEFAULT_SYSTEM_PROMPT
-        )
-        .unwrap();
+        write!(output, "{message_start}system\n").unwrap();
         append_native_system_instructions(
             &mut output,
             tools,
@@ -460,8 +455,11 @@ fn append_native_system_instructions(
     injected_tools: &mut bool,
 ) -> Result<(), String> {
     if !tools.is_empty() {
-        let tools_json = serde_json::to_string(tools).map_err(|error| error.to_string())?;
-        write!(output, "\nList of tools: {tools_json}").unwrap();
+        let tools_json = json_with_template_spacing(tools)?;
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        write!(output, "List of tools: {tools_json}").unwrap();
         *injected_tools = true;
     }
     if enable_thinking {
@@ -472,6 +470,39 @@ fn append_native_system_instructions(
         output.push_str(instruction);
     }
     Ok(())
+}
+
+/// Match the one-line separator formatting emitted by common Jinja `tojson` filters while
+/// retaining serde_json's escaping and serialization behavior.
+fn json_with_template_spacing<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, String> {
+    let compact = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    let mut spaced = String::with_capacity(compact.len() + compact.len() / 8);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for character in compact.chars() {
+        if in_string {
+            spaced.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+        }
+        spaced.push(character);
+        if matches!(character, ',' | ':') {
+            spaced.push(' ');
+        }
+    }
+
+    Ok(spaced)
 }
 
 fn format_python_tool_calls(calls: &[mivi_protocol::ToolCall]) -> Result<String, String> {
@@ -595,6 +626,41 @@ mod tests {
             .expect("native prompt should render");
 
         assert!(prompt.contains("List of tools:"));
+    }
+
+    #[test]
+    fn native_tools_without_system_use_only_the_configured_tool_system_content() {
+        let config = ModelProfileConfig::DelimitedPython {
+            start_of_text: "<|startoftext|>".to_string(),
+            message_start: "<|im_start|>".to_string(),
+            message_end: "<|im_end|>".to_string(),
+            tool_call_start: "<|tool_call_start|>".to_string(),
+            tool_call_end: "<|tool_call_end|>".to_string(),
+            thinking_instruction: None,
+        };
+        let profile = ModelProfile::from_config(&config).expect("profile should validate");
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: Some("Use the calculator".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+        }];
+        let tools = vec![ToolDefinition {
+            name: "calculator".to_string(),
+            description: Some("Evaluates arithmetic expressions.".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let prompt = profile
+            .render_prompt(&messages, &tools, false)
+            .expect("native tool prompt should render");
+
+        assert!(prompt.starts_with(
+            "<|startoftext|><|im_start|>system\nList of tools: [{\"name\": \"calculator\""
+        ));
+        assert!(!prompt.contains(mivi_core::DEFAULT_SYSTEM_PROMPT));
     }
 
     #[test]
@@ -802,5 +868,39 @@ mod tests {
                 assert!(error.contains("cannot render tools"));
             }
         }
+    }
+
+    #[test]
+    fn native_tool_json_uses_chat_template_separator_spacing() {
+        let profile = ModelProfile::from_config(&ModelProfileConfig::DelimitedPython {
+            start_of_text: "<BOS>".to_string(),
+            message_start: "<MSG>".to_string(),
+            message_end: "</MSG>".to_string(),
+            tool_call_start: "<CALL>".to_string(),
+            tool_call_end: "</CALL>".to_string(),
+            thinking_instruction: None,
+        })
+        .expect("profile should validate");
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+        }];
+        let tools = vec![ToolDefinition {
+            name: "lookup".to_string(),
+            description: Some("Look something up".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let prompt = profile
+            .render_prompt(&messages, &tools, false)
+            .expect("tool prompt should render");
+
+        assert!(prompt.contains(
+            r#"List of tools: [{"name": "lookup", "description": "Look something up", "parameters": {"type": "object"}}]"#
+        ));
     }
 }

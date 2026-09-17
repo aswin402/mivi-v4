@@ -114,6 +114,8 @@ struct AnthropicChunkStreamState {
     stream_failed: Arc<AtomicBool>,
     assembled_text: Arc<std::sync::Mutex<String>>,
     tools_enabled: bool,
+    metrics: Arc<crate::state::ServerMetrics>,
+    generation_started: Instant,
 }
 
 fn anthropic_chunk_stream(
@@ -124,6 +126,8 @@ fn anthropic_chunk_stream(
     tools_enabled: bool,
     assembled_text: Arc<std::sync::Mutex<String>>,
     stream_failed: Arc<AtomicBool>,
+    metrics: Arc<crate::state::ServerMetrics>,
+    generation_started: Instant,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
     futures::stream::unfold(
         AnthropicChunkStreamState {
@@ -136,6 +140,8 @@ fn anthropic_chunk_stream(
             stream_failed,
             assembled_text,
             tools_enabled,
+            metrics,
+            generation_started,
         },
         |mut state| async move {
             loop {
@@ -174,6 +180,11 @@ fn anthropic_chunk_stream(
                         match chunk {
                             Some(Ok(chunk)) => {
                                 if !chunk.is_empty() {
+                                    if !state.first_token_received {
+                                        state.metrics.record_time_to_first_token(
+                                            state.generation_started.elapsed(),
+                                        );
+                                    }
                                     state.first_token_received = true;
                                 }
                                 if let Ok(mut guard) = state.assembled_text.lock() {
@@ -588,6 +599,8 @@ pub async fn anthropic_messages_handler(
             tools_enabled,
             assembled_text.clone(),
             stream_failed.clone(),
+            metrics.clone(),
+            generation_started,
         );
 
         // 3. Close the text block, optionally emit structured tool-use blocks, and finish.

@@ -18,6 +18,54 @@ pub enum BlockType {
     Attention,
 }
 
+/// Runtime strategy used to process prompt tokens before generation.
+///
+/// `Chunked` is intentionally model-agnostic. Its tile size is a runtime
+/// choice, while the loaded model metadata determines the actual layer layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrefillStrategy {
+    Token,
+    Chunked { tile_tokens: usize },
+}
+
+impl PrefillStrategy {
+    /// Parse the model-agnostic strategy name used by CLI/server configuration.
+    pub fn parse(strategy: &str, tile_tokens: usize) -> Result<Self, String> {
+        match strategy.trim().to_ascii_lowercase().as_str() {
+            "token" => Ok(Self::Token),
+            "chunked" => Self::chunked(tile_tokens),
+            other => Err(format!(
+                "unsupported prefill strategy {other:?}; expected token or chunked"
+            )),
+        }
+    }
+
+    pub fn chunked(tile_tokens: usize) -> Result<Self, String> {
+        if tile_tokens == 0 {
+            return Err("prefill tile size must be greater than zero".to_string());
+        }
+        Ok(Self::Chunked { tile_tokens })
+    }
+
+    pub fn validate(self) -> Result<(), String> {
+        match self {
+            Self::Token => Ok(()),
+            Self::Chunked { tile_tokens } if tile_tokens > 0 => Ok(()),
+            Self::Chunked { .. } => Err("prefill tile size must be greater than zero".to_string()),
+        }
+    }
+
+    pub fn is_chunked(self) -> bool {
+        matches!(self, Self::Chunked { .. })
+    }
+}
+
+impl Default for PrefillStrategy {
+    fn default() -> Self {
+        Self::Token
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub name: String,
@@ -151,6 +199,41 @@ impl Default for GenerationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefill_strategy_defaults_to_token() {
+        assert_eq!(PrefillStrategy::default(), PrefillStrategy::Token);
+    }
+
+    #[test]
+    fn prefill_strategy_rejects_zero_tile_size() {
+        assert!(PrefillStrategy::chunked(0).is_err());
+        assert!(PrefillStrategy::Chunked { tile_tokens: 0 }
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn prefill_strategy_accepts_positive_tile_size() {
+        assert_eq!(
+            PrefillStrategy::chunked(64).unwrap(),
+            PrefillStrategy::Chunked { tile_tokens: 64 }
+        );
+    }
+
+    #[test]
+    fn prefill_strategy_parses_server_values() {
+        assert_eq!(
+            PrefillStrategy::parse("CHUNKED", 32).unwrap(),
+            PrefillStrategy::Chunked { tile_tokens: 32 }
+        );
+        assert_eq!(
+            PrefillStrategy::parse(" token ", 0).unwrap(),
+            PrefillStrategy::Token
+        );
+        assert!(PrefillStrategy::parse("unknown", 32).is_err());
+        assert!(PrefillStrategy::parse("chunked", 0).is_err());
+    }
 
     #[test]
     fn test_config_validate_success() {

@@ -9,6 +9,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.37] - 2026-09-17
+
+### Agent Latency Telemetry
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Measure the agent-facing boundary**: added cumulative time-to-first-token microseconds and
+  sample counts to the server metrics snapshot, making prefill and responsiveness measurable
+  without assuming a model family, prompt format, or provider.
+  - *Inspiration*: separating TTFT from decode throughput in local inference benchmarking and
+    exposing runtime monitoring data for serving diagnosis.
+  - *Sources*: [llama.cpp server monitoring and metrics](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+    and [Liquid AI hardware evaluation guidance](https://github.com/Liquid4All/docs/blob/main/guides/hardware-evaluation.mdx).
+- **Instrument every streaming protocol boundary**: OpenAI chat, native agent steps, and
+  Anthropic streaming now record the first non-empty model output; blocking responses remain
+  total-latency-only because they do not expose an observable first-token event.
+  - *Inspiration*: protocol-independent observability at the engine/stream boundary, so future
+    models can be compared using the same server measurements.
+  - *Source*: [vLLM automatic prefix-caching performance model](https://docs.vllm.ai/en/v0.10.1/features/automatic_prefix_caching.html).
+
+#### Added
+
+- `time_to_first_token_microseconds_total` and `first_token_count` in `/metrics`.
+- Unit and streaming integration coverage for TTFT accounting.
+
+#### Fixed
+
+- Agent telemetry now records the first emitted chunk rather than accidentally measuring the
+  final chunk of a completed response.
+
+## [v0.2.35] - 2026-09-17
+
+### Agent Tool-Call Compatibility
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Template-compatible native tool lists**: LFM2.5's documented Jinja `tojson` representation
+  uses one-line JSON with separator spacing. Mivi now preserves that representation instead of
+  compacting tool definitions, which prevents small models from corrupting function names and
+  arguments.
+  - *Inspiration*: model-native chat-template fidelity and the project's live LFM2.5 diagnosis.
+  - *Source*: [Liquid LFM2.5-1.2B model card](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/blob/main/README.md).
+- **Codec-driven required tool use**: required and named tool choices now derive the forced output
+  prefix from the selected tool codec. The implementation does not identify models by name and
+  remains usable with future delimiter-based model profiles.
+  - *Inspiration*: structured decoding and the protocol-specific parser boundary used by
+    llama.cpp's LFM2/LFM2.5 support.
+  - *Sources*: [llama.cpp LFM2.5 parser issue](https://github.com/ggml-org/llama.cpp/issues/23838)
+    and [Liquid's tool-call template discussion](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/discussions/12).
+- **Measured agent validation**: with the local official LFM2.5 1.2B Q4 model, two runtime
+  threads, and chunked prefill, Mivi now emits a valid `get_candidate_status` call and completes
+  the calculator agent loop (`45 * 12 = 540`). Optional `auto` tool choice remains optional by
+  design; clients that require a tool must send `tool_choice: "required"`.
+
+#### Added
+
+- Server configuration for `--prefill-strategy` and `--prefill-tile-tokens`.
+- Regression coverage for codec-derived prefixes, native tool-list formatting, and profile prompt
+  fidelity.
+
+#### Fixed
+
+- Required tool calls could previously fail after sampling because Mivi validated them only after
+  generation; the selected codec prefix is now supplied before decoding.
+- Agent runs could repeatedly force a tool call after a tool had already executed; only the first
+  required agent step is constrained, allowing the final natural-language response.
+
+## [v0.2.34] - 2026-09-17
+
+### Small-Batch Prefill Projection Optimization
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Loop-order correction for tiled projections**:
+  - Small tiles now compute full-width SIMD dot products per input row instead of invoking a
+    SIMD helper once per input column over a tiny batch slice. This keeps the implementation
+    model-agnostic and removes the tile-size-specific performance cliff.
+  - *Inspiration*: llama.cpp's batched/ubatch prefill approach and the project's measured
+    chunked-prefill research.
+  - *Sources*: [llama.cpp](https://github.com/ggerganov/llama.cpp) and
+    [KV/chunked-prefill research](docs/KV_QUANT_AND_CHUNKED_PREFILL_RESEARCH.md).
+- **Evidence-driven optimization**:
+  - The Mivi Q4 model's tile-2 cold prefill improved from `1.68` to `13.69` tok/s and its
+    tile-8 result improved from `9.82` to `27.92` tok/s. The LFM2.5 1.2B Q4 tile-2 run now
+    completes at `6.49` tok/s instead of exceeding the prior 180-second benchmark budget, and
+    its final-code tile-8 result is `8.96` tok/s. The token-major default remains unchanged
+    because chunked performance is still model- and tile-dependent.
+  - *Inspiration*: stage-level profiling and separate prefill/TTFT/decode measurements.
+  - *Source*: [Liquid AI hardware evaluation guide](https://github.com/Liquid4All/docs/blob/main/guides/hardware-evaluation.mdx).
+
+#### Changed
+
+- Added a regression test that selects full-input dot products for small batches and retains
+  across-batch FMA for larger tiles.
+- Revalidated model output/state equivalence after the quantized projection change.
+
+#### Known Limitations
+
+- The batch kernel is still generic rather than format-specific Q4_K/Q6_K microcode, so reliable
+  speedups for every model and tile size are not established.
+- Active LoRA adapters and quantized-KV equivalence remain on the existing follow-up path.
+
+## [v0.2.33] - 2026-09-17
+
+### Opt-In Hybrid Chunked Prefill
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Model-agnostic tiled prefill**:
+  - Added `PrefillStrategy` with token-major fallback and opt-in chunked execution selected by
+    `MIVI_PREFILL_STRATEGY` and `MIVI_PREFILL_TILE_TOKENS`; no model-family or fixed-layer branch
+    was added.
+  - *Inspiration*: llama.cpp micro-batched prefill (`n_ubatch`) and the project’s earlier
+    chunked-prefill research.
+  - *Sources*: [llama.cpp](https://github.com/ggerganov/llama.cpp) and
+    [KV/chunked-prefill research](docs/KV_QUANT_AND_CHUNKED_PREFILL_RESEARCH.md).
+- **Hybrid state correctness**:
+  - Batched projections now preserve ordered SSM convolution state, causal attention, selective KV
+    positions, final-row logits, and 64-token prefix-cache snapshot boundaries.
+  - *Inspiration*: LMCache-style prefix state reuse and the existing hybrid SSM/attention design.
+  - *Sources*: [LMCache](https://github.com/LMCache/LMCache) and the
+    [64K hybrid scaling plan](docs/IMPLEMENTATION_PLAN_64K_LONG_CONTEXT_AND_HYBRID_SCALING.md).
+- **Measured, conservative rollout**:
+  - Added token-vs-chunked equivalence tests for prompt lengths 63/64/65 and tile sizes 1/2/8/64.
+  - Added input transposition, SIMD FMA across tile rows, and two-way Rayon output-row splitting
+    to the batch kernel. On the 1.2B Q4 model with two runtime threads, cold prefill measured
+    9.08 tok/s token-major versus 9.04 tok/s with tile-64 chunked prefill: effectively within
+    measurement noise, so chunked mode remains opt-in. Profiling still shows SSM as the dominant
+    stage at roughly 62–65%.
+  - *Inspiration*: measured TTFT/prefill/decode separation from the previous benchmark work.
+  - *Source*: [Liquid AI hardware evaluation guide](https://github.com/Liquid4All/docs/blob/main/guides/hardware-evaluation.mdx).
+  - A bounded two-thread sweep also exposed strong tile-size sensitivity: on the LFM2.5 1.2B
+    Q4 model, cold chunked prefill was `8.15/3.33/8.90/10.12` tok/s for tiles `1/8/32/64`
+    respectively, while tile `2` exceeded the 180-second run budget. On the separate local
+    Mivi Q4 model, cold token-major prefill was `17.13` tok/s and chunked tiles `1/2/8/32/64`
+    measured `19.20/1.68/9.82/29.84/34.65` tok/s. These results are evidence for explicit
+    runtime selection and future auto-tuning, not a universal tile-size recommendation.
+
+#### Added
+
+- Reusable tile activation buffers and checked batched quantized projection APIs for F32, F16,
+  BF16, Q8_0, Q4_K, and Q6_K.
+- Ordered SSM and causal GQA attention tile paths with deterministic tiny-GGUF equivalence gates.
+
+#### Known Limitations
+
+- The batch kernel now reuses decoded rows and SIMD-accumulates across transposed tile inputs,
+  but it is still a generic path rather than format-specific Q4_K/Q6_K microkernels; it has not
+  demonstrated a reliable larger-Q4 speedup yet.
+- Small tiles can regress severely because the generic batched path pays setup/dequantization
+  overhead without enough reuse; tile `2` exceeded the bounded LFM benchmark timeout and reached
+  only `1.68` tok/s on the separate Mivi model. Chunked execution is therefore opt-in and has no
+  hardcoded automatic tile choice.
+- Active LoRA adapters intentionally use the proven token-major fallback.
+- Quantized-KV equivalence and format-specific tiled SIMD optimization remain follow-up work.
+
+## [v0.2.32] - 2026-09-17
+
+### Opt-In Forward Stage Profiling
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Forward-stage diagnostics**:
+  - Added disabled-by-default profiling for embedding, attention, SSM, and final-logits stages.
+  - The focused benchmark now reports stage durations and relative shares so optimizations can be
+    selected from measurements instead of assumptions.
+  - *Inspiration*: separate time-to-first-token, prefill, and decode measurements in local hybrid
+    inference systems.
+  - *Source*: [Liquid AI hardware evaluation guide](https://github.com/Liquid4All/docs/blob/main/guides/hardware-evaluation.mdx).
+- **Model-agnostic instrumentation**:
+  - Profiling is exposed through the generic `Model` API and is not tied to LFM2.5 names, tensor
+    shapes, or a specific tool-calling format.
+  - *Inspiration*: Liquid AI's hybrid convolution and GQA architecture guidance.
+  - *Source*: [LFM2.5-1.2B-Instruct model card](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct).
+
+## [v0.2.31] - 2026-09-17
+
+### Focused Prefill and First-Output Benchmarking
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Separated model latency measurements**:
+  - Added isolated prompt-prefill throughput, first emitted-text latency, total generation time,
+    decode throughput estimates, effective prompt-token counts, and prefix-cache visibility to
+    `mivi bench --model`.
+  - *Inspiration*: benchmarking time-to-first-token separately from decode throughput for hybrid
+    local inference runtimes.
+  - *Source*: [Liquid AI hardware evaluation guide](https://github.com/Liquid4All/docs/blob/main/guides/hardware-evaluation.mdx).
+- **Reproducible, model-agnostic diagnostics**:
+  - Removed unrelated synthetic demo claims from the model benchmark so its output represents
+    measured latency rather than unsupported feature status.
+  - The benchmark uses generic prompt fixtures and reports when a model produces no visible output;
+    it does not hardcode a model family or claim response quality.
+  - *Inspiration*: model-provided templates and runtime-specific compatibility should be tested
+    independently from performance measurement.
+  - *Sources*: [Liquid AI tool-use documentation](https://docs.liquid.ai/lfm/key-concepts/tool-use),
+    [Liquid AI migration guide](https://github.com/Liquid4All/docs/blob/main/guides/migration-guide.mdx).
+
 ## [v0.2.30] - 2026-09-16
 
 ### Agent Prompt Fidelity & Built-in Tool Schema

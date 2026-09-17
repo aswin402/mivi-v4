@@ -1,19 +1,21 @@
 use crate::config::{
-    BlockType, GenerationConfig, ModelConfig, DEFAULT_MAX_LORA_RANK, DEFAULT_N_EXPERTS,
-    RECENT_TOKENS_WINDOW,
+    BlockType, GenerationConfig, ModelConfig, PrefillStrategy, DEFAULT_MAX_LORA_RANK,
+    DEFAULT_N_EXPERTS, RECENT_TOKENS_WINDOW,
 };
 use crate::gguf::{GgufFile, GgufValue};
 use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve_model_weights};
 use crate::lora::ActiveAdapters;
+use crate::prefill::TileActivations;
 use crate::sampler::Sampler;
-use crate::ssm::ssm_forward;
-use crate::transformer::attention_forward;
+use crate::ssm::{ssm_forward, ssm_forward_tile};
+use crate::transformer::{attention_forward, attention_forward_tile};
 use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
 use mivi_kv::{compute_chunk_hash, KvCache};
 use mivi_tokenizer::{Tokenizer, EOS_TOKEN_ID};
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -44,6 +46,27 @@ pub enum ModelError {
 
 pub type Result<T> = std::result::Result<T, ModelError>;
 
+/// Aggregate timings for the forward stages of a model run.
+///
+/// This is opt-in diagnostic data. It is disabled by default so normal inference does not
+/// create timing timestamps on every layer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForwardProfileSnapshot {
+    pub tokens: usize,
+    pub embedding: Duration,
+    pub attention: Duration,
+    pub ssm: Duration,
+    pub logits: Duration,
+}
+
+impl ForwardProfileSnapshot {
+    /// Return the time spent in the measured forward stages.
+    #[inline]
+    pub fn total_stage_time(self) -> Duration {
+        self.embedding + self.attention + self.ssm + self.logits
+    }
+}
+
 pub struct Model {
     pub config: ModelConfig,
     pub gguf: GgufFile,
@@ -55,6 +78,8 @@ pub struct Model {
     pub active_adapters: ActiveAdapters,
     pub rope_cache: mivi_core::RopeCache,
     pub prefix_cache: mivi_kv::PrefixCache,
+    prefill_strategy: PrefillStrategy,
+    forward_profile: Option<ForwardProfileSnapshot>,
 }
 
 impl Model {
@@ -192,7 +217,74 @@ impl Model {
             active_adapters,
             rope_cache,
             prefix_cache: mivi_kv::PrefixCache::default(),
+            prefill_strategy: PrefillStrategy::default(),
+            forward_profile: None,
         })
+    }
+
+    /// Set the prompt-prefill execution strategy.
+    pub fn set_prefill_strategy(&mut self, strategy: PrefillStrategy) -> Result<()> {
+        strategy.validate().map_err(ModelError::InvalidConfig)?;
+        self.prefill_strategy = strategy;
+        Ok(())
+    }
+
+    /// Return the configured prompt-prefill execution strategy.
+    #[inline]
+    pub fn prefill_strategy(&self) -> PrefillStrategy {
+        self.prefill_strategy
+    }
+
+    /// Enable aggregate forward-stage timing for diagnostic benchmarks.
+    pub fn enable_forward_profile(&mut self) {
+        self.forward_profile = Some(ForwardProfileSnapshot::default());
+    }
+
+    /// Disable aggregate forward-stage timing and release its diagnostic state.
+    pub fn disable_forward_profile(&mut self) {
+        self.forward_profile = None;
+    }
+
+    /// Clear the current aggregate forward-stage timings while keeping profiling enabled.
+    pub fn reset_forward_profile(&mut self) {
+        if let Some(profile) = self.forward_profile.as_mut() {
+            *profile = ForwardProfileSnapshot::default();
+        }
+    }
+
+    /// Return the current aggregate forward-stage timings, if profiling is enabled.
+    #[inline]
+    pub fn forward_profile(&self) -> Option<ForwardProfileSnapshot> {
+        self.forward_profile
+    }
+
+    #[inline]
+    fn record_forward_profile(
+        &mut self,
+        embedding: Duration,
+        attention: Duration,
+        ssm: Duration,
+        logits: Duration,
+    ) {
+        self.record_forward_profile_batch(1, embedding, attention, ssm, logits);
+    }
+
+    #[inline]
+    fn record_forward_profile_batch(
+        &mut self,
+        tokens: usize,
+        embedding: Duration,
+        attention: Duration,
+        ssm: Duration,
+        logits: Duration,
+    ) {
+        if let Some(profile) = self.forward_profile.as_mut() {
+            profile.tokens += tokens;
+            profile.embedding += embedding;
+            profile.attention += attention;
+            profile.ssm += ssm;
+            profile.logits += logits;
+        }
     }
 
     /// Core forward pass for a single token.
@@ -215,8 +307,10 @@ impl Model {
         }
 
         let dim = self.config.dim;
+        let profile_enabled = self.forward_profile.is_some();
 
         // 1. Embedding lookup: token_embd
+        let embedding_start = profile_enabled.then(Instant::now);
         let emb = &self.weights.token_embd;
         let type_size = emb.quant_type.type_size().unwrap_or(mivi_quant::F32_BYTES);
         let block_size = emb.quant_type.block_size().unwrap_or(1);
@@ -227,11 +321,17 @@ impl Model {
         }
         let row_bytes = &self.gguf.mmap[row_offset..row_offset + row_bytes_len];
         mivi_quant::dequantize_slice(emb.quant_type, row_bytes, &mut self.state.x)?;
+        let embedding_elapsed = embedding_start
+            .map(|start| start.elapsed())
+            .unwrap_or_default();
 
         // 2. Iterate through layers
+        let mut attention_elapsed = Duration::ZERO;
+        let mut ssm_elapsed = Duration::ZERO;
         for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
             match layer {
                 LayerWeights::Attention(w) => {
+                    let stage_start = profile_enabled.then(Instant::now);
                     let params = crate::transformer::AttentionParams {
                         layer: layer_idx,
                         pos,
@@ -242,8 +342,12 @@ impl Model {
                         rope: &self.rope_cache,
                     };
                     attention_forward(&mut self.state, &mut self.kv_cache, &params)?;
+                    if let Some(start) = stage_start {
+                        attention_elapsed += start.elapsed();
+                    }
                 }
                 LayerWeights::Ssm(w) => {
+                    let stage_start = profile_enabled.then(Instant::now);
                     let params = crate::ssm::SsmParams {
                         layer: layer_idx,
                         weights: w,
@@ -252,15 +356,41 @@ impl Model {
                         adapters: &self.active_adapters,
                     };
                     ssm_forward(&mut self.state, &params)?;
+                    if let Some(start) = stage_start {
+                        ssm_elapsed += start.elapsed();
+                    }
                 }
             }
         }
 
         if !compute_logits {
+            self.record_forward_profile(
+                embedding_elapsed,
+                attention_elapsed,
+                ssm_elapsed,
+                Duration::ZERO,
+            );
             return Ok(None);
         }
 
-        // 3. Final RMSNorm (SIMD accelerated)
+        // 3. Final RMSNorm and output projection (SIMD accelerated)
+        let logits_start = profile_enabled.then(Instant::now);
+        self.compute_logits_from_state()?;
+
+        self.record_forward_profile(
+            embedding_elapsed,
+            attention_elapsed,
+            ssm_elapsed,
+            logits_start
+                .map(|start| start.elapsed())
+                .unwrap_or_default(),
+        );
+
+        Ok(Some(&self.state.logits))
+    }
+
+    fn compute_logits_from_state(&mut self) -> Result<()> {
+        let dim = self.config.dim;
         if let Some(ref final_norm) = self.weights.output_norm {
             if final_norm.len() != dim {
                 return Err(ModelError::DimMismatch(format!(
@@ -279,7 +409,6 @@ impl Model {
             self.state.xb.copy_from_slice(&self.state.x);
         }
 
-        // 4. Output projection to vocabulary logits (falls back to tied token_embd)
         let head = self
             .weights
             .output_proj
@@ -309,8 +438,7 @@ impl Model {
                 );
             }
         }
-
-        Ok(Some(&self.state.logits))
+        Ok(())
     }
 
     /// Returns slice of unnormalized logits over vocabulary with ZERO heap allocations.
@@ -323,6 +451,343 @@ impl Model {
     pub fn reset_context(&mut self) {
         self.state.reset();
         self.kv_cache.reset();
+    }
+
+    fn run_prefill<C>(
+        &mut self,
+        prompt_tokens: &[u32],
+        start_pos: usize,
+        start_prefill_idx: usize,
+        chained_hash: &mut u64,
+        should_cancel: &mut C,
+    ) -> Result<bool>
+    where
+        C: FnMut() -> bool,
+    {
+        let strategy = self.prefill_strategy;
+        match strategy {
+            PrefillStrategy::Token => self.run_token_prefill(
+                prompt_tokens,
+                start_pos,
+                start_prefill_idx,
+                chained_hash,
+                should_cancel,
+            ),
+            PrefillStrategy::Chunked { tile_tokens: _ }
+                if !self.active_adapters.active.is_empty() =>
+            {
+                self.run_token_prefill(
+                    prompt_tokens,
+                    start_pos,
+                    start_prefill_idx,
+                    chained_hash,
+                    should_cancel,
+                )
+            }
+            PrefillStrategy::Chunked { tile_tokens } => self
+                .run_chunked_prefill(
+                    prompt_tokens,
+                    start_pos,
+                    start_prefill_idx,
+                    *chained_hash,
+                    tile_tokens,
+                    should_cancel,
+                )
+                .map(|(completed, next_hash)| {
+                    *chained_hash = next_hash;
+                    completed
+                }),
+        }
+    }
+
+    fn run_token_prefill<C>(
+        &mut self,
+        prompt_tokens: &[u32],
+        start_pos: usize,
+        start_prefill_idx: usize,
+        chained_hash: &mut u64,
+        should_cancel: &mut C,
+    ) -> Result<bool>
+    where
+        C: FnMut() -> bool,
+    {
+        let n_prompt = prompt_tokens.len();
+        for i in start_prefill_idx..n_prompt {
+            if should_cancel() {
+                return Ok(false);
+            }
+            let tok = prompt_tokens[i];
+            let cur_pos = start_pos + i;
+            let is_last = i + 1 == n_prompt;
+            let _ = self.forward_step(tok, cur_pos, is_last)?;
+
+            if n_prompt >= 500 && (i + 1) % 500 == 0 {
+                use std::io::Write;
+                let pct = ((i + 1) * 100) / n_prompt;
+                println!(
+                    "    \x1b[2m│  ⏳ prefill progress: [{}/{}] ({}%)\x1b[0m",
+                    i + 1,
+                    n_prompt,
+                    pct
+                );
+                let _ = std::io::stdout().flush();
+            }
+
+            // Record a snapshot exactly at each prefix-cache chunk boundary.
+            if start_pos == 0
+                && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0
+                && (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
+            {
+                let chunk_idx = (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE - 1;
+                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
+                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
+
+                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
+                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
+                    let snapshot = mivi_kv::HybridStateSnapshot::new(
+                        cur_pos + 1,
+                        cached_standalone_hash,
+                        k_exp,
+                        v_exp,
+                        conv_exp,
+                        ssm_exp,
+                    );
+
+                    *chained_hash = self.prefix_cache.insert_chunk(
+                        *chained_hash,
+                        &cached_tokens,
+                        chunk_idx,
+                        snapshot,
+                    );
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn embed_prefill_tile(
+        &self,
+        prompt_tokens: &[u32],
+        start: usize,
+        end: usize,
+        tile: &mut TileActivations,
+    ) -> Result<()> {
+        let dim = self.config.dim;
+        let embedding = &self.weights.token_embd;
+        let type_size = embedding
+            .quant_type
+            .type_size()
+            .unwrap_or(mivi_quant::F32_BYTES);
+        let block_size = embedding.quant_type.block_size().unwrap_or(1);
+        let row_bytes =
+            (dim / block_size)
+                .checked_mul(type_size)
+                .ok_or(ModelError::ExecutionFailed(
+                    "embedding row size overflow".to_string(),
+                ))?;
+        let rows = end.saturating_sub(start);
+        let output_len = rows.checked_mul(dim).ok_or(ModelError::ExecutionFailed(
+            "embedding tile size overflow".to_string(),
+        ))?;
+        if rows == 0 || rows > tile.tile_tokens() {
+            return Err(ModelError::DimMismatch(format!(
+                "invalid embedding tile row count: {rows}"
+            )));
+        }
+
+        for (row, &token_id) in prompt_tokens[start..end].iter().enumerate() {
+            if (token_id as usize) >= self.config.vocab_size {
+                return Err(ModelError::InvalidToken(token_id));
+            }
+            let row_offset = embedding
+                .offset
+                .checked_add((token_id as usize).checked_mul(row_bytes).ok_or(
+                    ModelError::ExecutionFailed("embedding offset overflow".to_string()),
+                )?)
+                .ok_or(ModelError::ExecutionFailed(
+                    "embedding offset overflow".to_string(),
+                ))?;
+            let row_end = row_offset
+                .checked_add(row_bytes)
+                .ok_or(ModelError::ExecutionFailed(
+                    "embedding row end overflow".to_string(),
+                ))?;
+            if row_end > self.gguf.mmap.len() {
+                return Err(ModelError::InvalidToken(token_id));
+            }
+            let row_bytes = &self.gguf.mmap[row_offset..row_end];
+            let output_start = row * dim;
+            mivi_quant::dequantize_slice(
+                embedding.quant_type,
+                row_bytes,
+                &mut tile.current[output_start..output_start + dim],
+            )?;
+        }
+        debug_assert_eq!(output_len, rows * dim);
+        Ok(())
+    }
+
+    fn run_chunked_prefill<C>(
+        &mut self,
+        prompt_tokens: &[u32],
+        start_pos: usize,
+        start_prefill_idx: usize,
+        mut chained_hash: u64,
+        tile_tokens: usize,
+        should_cancel: &mut C,
+    ) -> Result<(bool, u64)>
+    where
+        C: FnMut() -> bool,
+    {
+        if tile_tokens == 0 {
+            return Err(ModelError::InvalidConfig(
+                "prefill tile size must be greater than zero".to_string(),
+            ));
+        }
+        let n_prompt = prompt_tokens.len();
+        if start_prefill_idx >= n_prompt {
+            return Ok((true, chained_hash));
+        }
+
+        let tile_capacity = tile_tokens.min(n_prompt - start_prefill_idx);
+        let mut tile = TileActivations::with_kv_dim(
+            tile_capacity,
+            self.config.dim,
+            self.config.hidden_dim,
+            self.config.kv_dim,
+        )
+        .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
+        let mut cursor = start_prefill_idx;
+
+        while cursor < n_prompt {
+            if should_cancel() {
+                return Ok((false, chained_hash));
+            }
+
+            let mut end = cursor.saturating_add(tile_capacity).min(n_prompt);
+            if start_pos == 0 {
+                let absolute_start = start_pos + cursor;
+                let next_boundary = ((absolute_start / mivi_kv::PREFIX_CHUNK_SIZE) + 1)
+                    * mivi_kv::PREFIX_CHUNK_SIZE;
+                let boundary_index = next_boundary.saturating_sub(start_pos).min(n_prompt);
+                end = end.min(boundary_index.max(cursor + 1));
+            }
+            let rows = end - cursor;
+            let profile_enabled = self.forward_profile.is_some();
+            let embedding_start = profile_enabled.then(Instant::now);
+            self.embed_prefill_tile(prompt_tokens, cursor, end, &mut tile)?;
+            let embedding_elapsed = embedding_start
+                .map(|start| start.elapsed())
+                .unwrap_or_default();
+            let absolute_start = start_pos + cursor;
+            let mut attention_elapsed = Duration::ZERO;
+            let mut ssm_elapsed = Duration::ZERO;
+
+            for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
+                match layer {
+                    LayerWeights::Attention(w) => {
+                        let stage_start = profile_enabled.then(Instant::now);
+                        let params = crate::transformer::AttentionParams {
+                            layer: layer_idx,
+                            pos: absolute_start,
+                            weights: w,
+                            mmap: &self.gguf.mmap,
+                            config: &self.config,
+                            adapters: &self.active_adapters,
+                            rope: &self.rope_cache,
+                        };
+                        attention_forward_tile(
+                            &mut tile,
+                            &mut self.state,
+                            &mut self.kv_cache,
+                            &params,
+                            absolute_start,
+                            rows,
+                        )?;
+                        if let Some(start) = stage_start {
+                            attention_elapsed += start.elapsed();
+                        }
+                    }
+                    LayerWeights::Ssm(w) => {
+                        let stage_start = profile_enabled.then(Instant::now);
+                        let params = crate::ssm::SsmParams {
+                            layer: layer_idx,
+                            weights: w,
+                            mmap: &self.gguf.mmap,
+                            config: &self.config,
+                            adapters: &self.active_adapters,
+                        };
+                        ssm_forward_tile(&mut tile, &mut self.state, &params, rows)?;
+                        if let Some(start) = stage_start {
+                            ssm_elapsed += start.elapsed();
+                        }
+                    }
+                }
+            }
+
+            let logits_start = profile_enabled.then(Instant::now);
+            if end == n_prompt {
+                let final_row = tile
+                    .final_current_row(rows)
+                    .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
+                self.state.x.copy_from_slice(final_row);
+                self.compute_logits_from_state()?;
+            }
+            let logits_elapsed = logits_start
+                .map(|start| start.elapsed())
+                .unwrap_or_default();
+            self.record_forward_profile_batch(
+                rows,
+                embedding_elapsed,
+                attention_elapsed,
+                ssm_elapsed,
+                logits_elapsed,
+            );
+
+            if n_prompt >= 500 && end % 500 == 0 {
+                use std::io::Write;
+                let pct = (end * 100) / n_prompt;
+                println!(
+                    "    \x1b[2m│  ⏳ prefill progress: [{}/{}] ({}%)\x1b[0m",
+                    end, n_prompt, pct
+                );
+                let _ = std::io::stdout().flush();
+            }
+
+            let boundary_pos = start_pos + end;
+            if start_pos == 0
+                && boundary_pos % mivi_kv::PREFIX_CHUNK_SIZE == 0
+                && boundary_pos / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
+            {
+                let chunk_idx = boundary_pos / mivi_kv::PREFIX_CHUNK_SIZE - 1;
+                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
+                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
+                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(boundary_pos) {
+                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
+                    let snapshot = mivi_kv::HybridStateSnapshot::new(
+                        boundary_pos,
+                        cached_standalone_hash,
+                        k_exp,
+                        v_exp,
+                        conv_exp,
+                        ssm_exp,
+                    );
+                    chained_hash = self.prefix_cache.insert_chunk(
+                        chained_hash,
+                        &cached_tokens,
+                        chunk_idx,
+                        snapshot,
+                    );
+                }
+            }
+            cursor = end;
+        }
+
+        Ok((true, chained_hash))
     }
 
     /// Get the current position in the KV cache.
@@ -534,59 +999,14 @@ impl Model {
         }
 
         // 2. Prefill new prompt tokens (skipping already-cached prefix tokens)
-        for i in start_prefill_idx..n_prompt {
-            if should_cancel() {
-                return Ok((String::new(), Vec::new()));
-            }
-            let tok = prompt_tokens[i];
-            let cur_pos = start_pos + i;
-            let is_last = i + 1 == n_prompt;
-            let _ = self.forward_step(tok, cur_pos, is_last)?;
-
-            if n_prompt >= 500 && (i + 1) % 500 == 0 {
-                use std::io::Write;
-                let pct = ((i + 1) * 100) / n_prompt;
-                println!(
-                    "    \x1b[2m│  ⏳ prefill progress: [{}/{}] ({}%)\x1b[0m",
-                    i + 1,
-                    n_prompt,
-                    pct
-                );
-                let _ = std::io::stdout().flush();
-            }
-
-            // If we reached a chunk boundary (e.g. 64, 128, 192), record a snapshot into PrefixCache
-            // Only snapshot within the prefix cache's maximum chunk capacity to avoid wasteful allocations
-            if start_pos == 0
-                && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0
-                && (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
-            {
-                let chunk_idx = (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE - 1;
-                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
-                // Hash and retain exactly the same token chunk used by prefix lookup.
-                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
-
-                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
-                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
-                    let snapshot = mivi_kv::HybridStateSnapshot::new(
-                        cur_pos + 1,
-                        cached_standalone_hash,
-                        k_exp,
-                        v_exp,
-                        conv_exp,
-                        ssm_exp,
-                    );
-
-                    chained_hash = self.prefix_cache.insert_chunk(
-                        chained_hash,
-                        &cached_tokens,
-                        chunk_idx,
-                        snapshot,
-                    );
-                }
-            }
+        if !self.run_prefill(
+            prompt_tokens,
+            start_pos,
+            start_prefill_idx,
+            &mut chained_hash,
+            &mut should_cancel,
+        )? {
+            return Ok((String::new(), Vec::new()));
         }
         let mut pos = context_end;
 
@@ -928,6 +1348,99 @@ mod prefix_cache_integration_tests {
         assert!(!should_prepend_bos(false, 0, Some(&8), 7));
     }
 
+    #[test]
+    fn forward_profile_snapshot_sums_stage_durations() {
+        let profile = ForwardProfileSnapshot {
+            tokens: 3,
+            embedding: std::time::Duration::from_millis(1),
+            attention: std::time::Duration::from_millis(2),
+            ssm: std::time::Duration::from_millis(3),
+            logits: std::time::Duration::from_millis(4),
+        };
+
+        assert_eq!(
+            profile.total_stage_time(),
+            std::time::Duration::from_millis(10)
+        );
+    }
+
+    /// Compare real-model token and chunked prefill across cache boundaries.
+    /// Run with:
+    ///   MIVI_TEST_MODEL=models/mivi-tiny-test.gguf cargo test -p mivi-model test_chunked_prefill_matches_token_path --lib --jobs 1 -- --ignored
+    #[test]
+    #[ignore]
+    fn test_chunked_prefill_matches_token_path() {
+        let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
+        for prompt_len in [63usize, 64, 65] {
+            for tile_tokens in [1usize, 2, 8, 64] {
+                let mut token_model =
+                    Model::load_with_options(std::path::Path::new(&model_path), None, None)
+                        .expect("failed to load token model");
+                let mut chunked_model =
+                    Model::load_with_options(std::path::Path::new(&model_path), None, None)
+                        .expect("failed to load chunked model");
+                chunked_model
+                    .set_prefill_strategy(PrefillStrategy::Chunked { tile_tokens })
+                    .unwrap();
+                token_model.sampler.config.temperature = 0.0;
+                chunked_model.sampler.config.temperature = 0.0;
+
+                let vocab_limit = token_model.config.vocab_size.max(2) - 1;
+                let prompt_tokens = (0..prompt_len)
+                    .map(|idx| (idx % vocab_limit) as u32)
+                    .collect::<Vec<_>>();
+                let _ = token_model
+                    .generate_tokens_incremental(&prompt_tokens, 0, 0, |_, _| true)
+                    .unwrap();
+                let _ = chunked_model
+                    .generate_tokens_incremental(&prompt_tokens, 0, 0, |_, _| true)
+                    .unwrap();
+
+                assert_eq!(token_model.current_pos(), chunked_model.current_pos());
+                assert_eq!(token_model.current_pos(), prompt_len);
+                for (actual, expected) in chunked_model
+                    .state
+                    .logits
+                    .iter()
+                    .zip(token_model.state.logits.iter())
+                {
+                    assert!((actual - expected).abs() < 1e-3);
+                }
+                let (token_k, token_v) = token_model.kv_cache.export_state(prompt_len).unwrap();
+                let (chunked_k, chunked_v) =
+                    chunked_model.kv_cache.export_state(prompt_len).unwrap();
+                assert_eq!(token_k.len(), chunked_k.len());
+                assert_eq!(token_v.len(), chunked_v.len());
+                for (actual, expected) in chunked_k.iter().zip(token_k.iter()) {
+                    assert!((actual - expected).abs() < 1e-3);
+                }
+                for (actual, expected) in chunked_v.iter().zip(token_v.iter()) {
+                    assert!((actual - expected).abs() < 1e-3);
+                }
+                for (actual, expected) in chunked_model
+                    .state
+                    .conv_states
+                    .iter()
+                    .zip(token_model.state.conv_states.iter())
+                {
+                    assert!((actual - expected).abs() < 1e-3);
+                }
+                assert_eq!(
+                    token_model.prefix_cache.len(),
+                    chunked_model.prefix_cache.len()
+                );
+
+                let (_, token_ids) = token_model
+                    .generate_tokens_incremental(&[], prompt_len, 3, |_, _| true)
+                    .unwrap();
+                let (_, chunked_ids) = chunked_model
+                    .generate_tokens_incremental(&[], prompt_len, 3, |_, _| true)
+                    .unwrap();
+                assert_eq!(token_ids, chunked_ids);
+            }
+        }
+    }
+
     /// Integration test with real model: verify continuation preserves the prefix cache.
     /// Suffix snapshots are intentionally not restored because token-byte matching
     /// alone cannot prove that the cached hybrid state has the same causal context.
@@ -968,4 +1481,5 @@ mod prefix_cache_integration_tests {
         );
         assert!(model.prefix_cache.len() >= cached, "cache should persist");
     }
+
 }

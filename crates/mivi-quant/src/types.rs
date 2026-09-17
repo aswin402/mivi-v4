@@ -180,6 +180,59 @@ pub fn validate_matvec_args(
     Ok(())
 }
 
+/// Validate row-major matrix-matrix multiplication buffers.
+///
+/// The output layout is `[batch, rows]`, the input layout is `[batch, cols]`,
+/// and the quantized weights layout is `[rows, cols]`.
+pub fn validate_matmul_args(
+    out: &[f32],
+    weights: &[u8],
+    inputs: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    row_bytes: usize,
+    block_size: usize,
+) -> Result<()> {
+    if !cols.is_multiple_of(block_size) {
+        return Err(QuantError::DimensionMisaligned {
+            dim: cols,
+            block_size,
+        });
+    }
+
+    let expected_out = batch
+        .checked_mul(rows)
+        .ok_or(QuantError::ArithmeticOverflow)?;
+    if out.len() < expected_out {
+        return Err(QuantError::BufferTooSmall {
+            expected: expected_out,
+            actual: out.len(),
+        });
+    }
+
+    let expected_inputs = batch
+        .checked_mul(cols)
+        .ok_or(QuantError::ArithmeticOverflow)?;
+    if inputs.len() < expected_inputs {
+        return Err(QuantError::BufferTooSmall {
+            expected: expected_inputs,
+            actual: inputs.len(),
+        });
+    }
+
+    let expected_weights = rows
+        .checked_mul(row_bytes)
+        .ok_or(QuantError::ArithmeticOverflow)?;
+    if weights.len() < expected_weights {
+        return Err(QuantError::BufferTooSmall {
+            expected: expected_weights,
+            actual: weights.len(),
+        });
+    }
+    Ok(())
+}
+
 use rayon::prelude::*;
 
 /// Generic helper for parallel or serial row matrix-vector multiplication.
@@ -271,5 +324,14 @@ mod tests {
         for &val in &out[n..] {
             assert_eq!(val, 0.0);
         }
+    }
+
+    #[test]
+    fn test_validate_matmul_args_checks_all_shapes() {
+        assert!(validate_matmul_args(&[0.0; 4], &[0; 8], &[0.0; 4], 2, 2, 2, 4, 1).is_ok());
+        assert!(validate_matmul_args(&[0.0; 3], &[0; 8], &[0.0; 4], 2, 2, 2, 4, 1).is_err());
+        assert!(validate_matmul_args(&[0.0; 4], &[0; 8], &[0.0; 3], 2, 2, 2, 4, 1).is_err());
+        assert!(validate_matmul_args(&[0.0; 4], &[0; 7], &[0.0; 4], 2, 2, 2, 4, 1).is_err());
+        assert!(validate_matmul_args(&[0.0; 4], &[0; 8], &[0.0; 4], 2, 2, 3, 4, 2).is_err());
     }
 }

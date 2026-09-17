@@ -7,6 +7,9 @@ pub struct ServerConfig {
     /// Optional explicit model protocol profile. When absent, the loaded model metadata is used.
     #[serde(default)]
     pub model_profile: Option<ModelProfileConfig>,
+    /// Prompt-prefill execution strategy applied to the loaded model.
+    #[serde(default)]
+    pub prefill_strategy: mivi_model::PrefillStrategy,
     /// Explicit browser origins allowed to access the HTTP API. Empty means disabled.
     pub cors_allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
@@ -55,6 +58,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             model_profile: None,
+            prefill_strategy: mivi_model::PrefillStrategy::default(),
             cors_allowed_origins: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_messages: DEFAULT_MAX_MESSAGES,
@@ -105,5 +109,13 @@ mod tests {
         assert_eq!(config.max_concurrent_tool_executions, 1);
         assert_eq!(config.request_timeout_secs, 1);
         assert_eq!(config.first_token_timeout_secs, 1);
+    }
+
+    #[test]
+    fn prefill_strategy_defaults_to_token_major() {
+        assert_eq!(
+            ServerConfig::default().prefill_strategy,
+            mivi_model::PrefillStrategy::Token
+        );
     }
 }

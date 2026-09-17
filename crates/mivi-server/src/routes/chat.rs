@@ -2,8 +2,8 @@
 
 use crate::engine_actor::EngineHandle;
 use crate::generation::{
-    filter_tools_for_choice, parse_response_mode, parse_stop_sequences, parse_tool_choice,
-    validate_additional_sampling_parameters, validate_openai_tool_definitions,
+    filter_tools_for_choice, forced_tool_call_prefix, parse_response_mode, parse_stop_sequences,
+    parse_tool_choice, validate_additional_sampling_parameters, validate_openai_tool_definitions,
     validate_sampling_parameters, validate_tool_calls_against_tools, validate_tool_choice_result,
     GenerationOptions, ResponseMode, ToolChoice,
 };
@@ -97,7 +97,7 @@ pub async fn chat_completions(
         Ok(stops) => stops,
         Err(message) => return AppError::InvalidRequest(message).into_response(),
     };
-    let options = GenerationOptions {
+    let mut options = GenerationOptions {
         temperature: req.temperature,
         top_p: req.top_p,
         top_k: req.top_k,
@@ -107,6 +107,7 @@ pub async fn chat_completions(
         frequency_penalty: req.frequency_penalty,
         seed: req.seed,
         stop_tokens,
+        forced_output_prefix: None,
         response_mode,
     };
 
@@ -170,6 +171,11 @@ pub async fn chat_completions(
         )
         .into_response();
     }
+    options.forced_output_prefix = if tool_calls_enabled {
+        forced_tool_call_prefix(&tool_choice, profile.tool_codec())
+    } else {
+        None
+    };
 
     let enable_thinking = req
         .reasoning_effort
@@ -354,6 +360,11 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 match chunk_res {
                                     Some(Ok(word)) => {
                                         if !word.is_empty() {
+                                            if !first_token_received {
+                                                metrics.record_time_to_first_token(
+                                                    generation_started.elapsed(),
+                                                );
+                                            }
                                             first_token_received = true;
                                         }
                                         let incremental_content = incremental_text.push(&word);

@@ -2,7 +2,8 @@
 
 use crate::engine_actor::GenerationCancellation;
 use crate::generation::{
-    validate_additional_sampling_parameters, validate_sampling_parameters, GenerationOptions,
+    forced_tool_call_prefix, validate_additional_sampling_parameters, validate_sampling_parameters,
+    GenerationOptions,
 };
 use crate::model_profile::ModelProfile;
 use crate::routes::chat::sse_response;
@@ -203,8 +204,9 @@ async fn generate_agent_step(
     options: GenerationOptions,
     request_timeout: Duration,
     first_token_timeout: Duration,
+    generation_started: Instant,
     output_events: &mpsc::Sender<std::result::Result<Event, std::convert::Infallible>>,
-) -> Result<(String, usize, usize), String> {
+) -> Result<(String, usize, usize, Option<Duration>), String> {
     let (mut receiver, cancellation) = engine
         .generate_stream_with_options_cancelable(prompt, max_tokens, options)
         .await?;
@@ -212,6 +214,7 @@ async fn generate_agent_step(
     let mut deadline = Box::pin(tokio::time::sleep(request_timeout));
     let mut first_token_deadline = Box::pin(tokio::time::sleep(first_token_timeout));
     let mut first_token_received = false;
+    let mut first_token_latency = None;
     let mut output = String::new();
 
     loop {
@@ -231,7 +234,8 @@ async fn generate_agent_step(
             chunk = receiver.recv() => {
                 match chunk {
                     Some(Ok(chunk)) => {
-                        if !chunk.is_empty() {
+                        if !chunk.is_empty() && !first_token_received {
+                            first_token_latency = Some(generation_started.elapsed());
                             first_token_received = true;
                         }
                         output.push_str(&chunk);
@@ -248,7 +252,12 @@ async fn generate_agent_step(
         None => engine.encode(prompt).await.len(),
     };
     let completion_tokens = engine.encode(&output).await.len();
-    Ok((output, prompt_tokens, completion_tokens))
+    Ok((
+        output,
+        prompt_tokens,
+        completion_tokens,
+        first_token_latency,
+    ))
 }
 
 fn load_context_documents(workspace: &Path, paths: &[String]) -> Result<String, String> {
@@ -317,17 +326,6 @@ pub async fn run_agent_task(
     {
         return crate::types::AppError::InvalidRequest(message).into_response();
     }
-    let agent_generation_options = GenerationOptions {
-        temperature: req.temperature,
-        top_p: req.top_p,
-        top_k: req.top_k,
-        min_p: req.min_p,
-        repetition_penalty: req.repetition_penalty,
-        presence_penalty: req.presence_penalty,
-        frequency_penalty: req.frequency_penalty,
-        seed: req.seed,
-        ..GenerationOptions::default()
-    };
     let profile_codec = profile.tool_codec_handle();
     let allowed_tools = req.allowed_tools.clone();
     let canonical_tools = canonical_builtin_tool_definitions(allowed_tools.as_deref());
@@ -338,6 +336,23 @@ pub async fn run_agent_task(
         .into_response();
     }
     let require_tool_call = req.tool_choice == AgentToolChoice::Required;
+    let forced_output_prefix = if require_tool_call {
+        forced_tool_call_prefix(&crate::generation::ToolChoice::Required, profile.tool_codec())
+    } else {
+        None
+    };
+    let agent_generation_options = GenerationOptions {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        top_k: req.top_k,
+        min_p: req.min_p,
+        repetition_penalty: req.repetition_penalty,
+        presence_penalty: req.presence_penalty,
+        frequency_penalty: req.frequency_penalty,
+        seed: req.seed,
+        forced_output_prefix,
+        ..GenerationOptions::default()
+    };
     let model_name = state.model_name.clone();
     let cid = format!("{}{}", mivi_core::AGENT_RUN_ID_PREFIX, uuid::Uuid::new_v4());
     let broker = state.broker.clone();
@@ -435,20 +450,31 @@ pub async fn run_agent_task(
                 };
 
                 let generation_started = Instant::now();
+                let generation_options = if agent.last_tool_results().is_empty() {
+                    agent_generation_options.clone()
+                } else {
+                    let mut options = agent_generation_options.clone();
+                    options.forced_output_prefix = None;
+                    options
+                };
                 match generate_agent_step(
                     &engine,
                     &current_prompt,
                     agent_gen_tokens,
                     admitted_prompt_tokens,
-                    agent_generation_options.clone(),
+                    generation_options,
                     request_timeout,
                     first_token_timeout,
+                    generation_started,
                     &tx,
                 )
                 .await
                 {
-                    Ok((model_out, prompt_tokens, completion_tokens)) => {
+                    Ok((model_out, prompt_tokens, completion_tokens, first_token_latency)) => {
                         metrics.record_generation(generation_started.elapsed());
+                        if let Some(first_token_latency) = first_token_latency {
+                            metrics.record_time_to_first_token(first_token_latency);
+                        }
                         metrics.record_tokens(prompt_tokens, completion_tokens);
                         let result = agent.step(&model_out).await;
 
