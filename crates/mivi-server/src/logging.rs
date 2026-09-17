@@ -1,6 +1,7 @@
 //! Hono-style minimal, colored terminal logging middleware and formatters.
 
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// ANSI Color Escape Sequences
@@ -34,6 +35,7 @@ pub struct LogMetadata {
     pub tool_calls: Option<Vec<String>>,
     pub is_agent: bool,
     pub is_streaming: bool,
+    pub stream_metrics: Option<Arc<crate::state::ServerMetrics>>,
     pub step_count: Option<usize>,
     pub finish_reason: Option<String>,
 }
@@ -223,43 +225,33 @@ fn wrap_streaming_body(
     use futures::StreamExt;
 
     let status = response.status();
+    let stream_metrics = response
+        .extensions()
+        .get::<LogMetadata>()
+        .and_then(|meta| meta.stream_metrics.clone());
     let (parts, body) = response.into_parts();
-    let method = method.to_owned();
-    let path = path.to_owned();
+    let lifecycle = StreamLifecycleLog {
+        logged: false,
+        method: method.to_owned(),
+        path: path.to_owned(),
+        status,
+        started,
+        extra_info,
+        metrics: stream_metrics,
+    };
     let body_stream = Box::pin(body.into_data_stream());
 
     let tracked_stream = futures::stream::unfold(
-        (body_stream, false, method, path, extra_info),
-        move |(mut body_stream, completion_logged, method, path, extra_info)| async move {
+        (body_stream, lifecycle),
+        move |(mut body_stream, mut lifecycle)| async move {
             match body_stream.next().await {
-                Some(Ok(bytes)) => Some((
-                    Ok(bytes),
-                    (body_stream, completion_logged, method, path, extra_info),
-                )),
+                Some(Ok(bytes)) => Some((Ok(bytes), (body_stream, lifecycle))),
                 Some(Err(error)) => {
-                    if !completion_logged {
-                        print_stream_completion(
-                            &method,
-                            &path,
-                            status,
-                            started,
-                            "body error",
-                            &extra_info,
-                        );
-                    }
-                    Some((Err(error), (body_stream, true, method, path, extra_info)))
+                    lifecycle.finish(StreamLifecycleOutcome::BodyError);
+                    Some((Err(error), (body_stream, lifecycle)))
                 }
                 None => {
-                    if !completion_logged {
-                        print_stream_completion(
-                            &method,
-                            &path,
-                            status,
-                            started,
-                            "complete",
-                            &extra_info,
-                        );
-                    }
+                    lifecycle.finish(StreamLifecycleOutcome::Complete);
                     None
                 }
             }
@@ -267,6 +259,64 @@ fn wrap_streaming_body(
     );
 
     Response::from_parts(parts, Body::from_stream(tracked_stream))
+}
+
+enum StreamLifecycleOutcome {
+    Complete,
+    BodyError,
+    ClientDisconnected,
+}
+
+impl StreamLifecycleOutcome {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::BodyError => "body error",
+            Self::ClientDisconnected => "client disconnected",
+        }
+    }
+}
+
+struct StreamLifecycleLog {
+    logged: bool,
+    method: String,
+    path: String,
+    status: axum::http::StatusCode,
+    started: Instant,
+    extra_info: String,
+    metrics: Option<Arc<crate::state::ServerMetrics>>,
+}
+
+impl StreamLifecycleLog {
+    fn finish(&mut self, outcome: StreamLifecycleOutcome) {
+        if self.logged {
+            return;
+        }
+        if let Some(metrics) = &self.metrics {
+            match outcome {
+                StreamLifecycleOutcome::Complete => metrics.record_stream_completion(),
+                StreamLifecycleOutcome::BodyError => metrics.record_stream_body_error(),
+                StreamLifecycleOutcome::ClientDisconnected => {
+                    metrics.record_stream_client_disconnect();
+                }
+            }
+        }
+        print_stream_completion(
+            &self.method,
+            &self.path,
+            self.status,
+            self.started,
+            outcome.label(),
+            &self.extra_info,
+        );
+        self.logged = true;
+    }
+}
+
+impl Drop for StreamLifecycleLog {
+    fn drop(&mut self) {
+        self.finish(StreamLifecycleOutcome::ClientDisconnected);
+    }
 }
 
 fn print_stream_completion(
@@ -496,6 +546,10 @@ pub fn summarize_prompt(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ServerMetrics;
+    use axum::body::Bytes;
+    use futures::StreamExt;
+    use std::sync::Arc;
 
     #[test]
     fn test_summarize_prompt_short() {
@@ -526,5 +580,114 @@ mod tests {
             .expect("valid response");
 
         assert!(response_is_streaming(&response));
+    }
+
+    #[tokio::test]
+    async fn dropping_streaming_body_records_client_disconnect() {
+        let metrics = Arc::new(ServerMetrics::default());
+        let stream = futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n")),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data: second\n\n")),
+        ]);
+        let mut response = Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(stream))
+            .expect("valid response");
+        response.extensions_mut().insert(LogMetadata {
+            is_streaming: true,
+            stream_metrics: Some(metrics.clone()),
+            ..Default::default()
+        });
+
+        let wrapped = wrap_streaming_body(
+            response,
+            Instant::now(),
+            "POST",
+            "/v1/chat/completions",
+            String::new(),
+        );
+        let mut body = wrapped.into_body().into_data_stream();
+
+        let first_chunk = body
+            .next()
+            .await
+            .expect("first chunk exists")
+            .expect("first chunk is valid");
+        assert_eq!(first_chunk, Bytes::from_static(b"data: first\n\n"));
+
+        drop(body);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.stream_client_disconnects_total, 1);
+        assert_eq!(snapshot.stream_completions_total, 0);
+    }
+
+    #[tokio::test]
+    async fn consuming_streaming_body_to_eof_records_completion() {
+        let metrics = Arc::new(ServerMetrics::default());
+        let stream = futures::stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: done\n\n",
+        ))]);
+        let mut response = Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(stream))
+            .expect("valid response");
+        response.extensions_mut().insert(LogMetadata {
+            is_streaming: true,
+            stream_metrics: Some(metrics.clone()),
+            ..Default::default()
+        });
+
+        let wrapped = wrap_streaming_body(
+            response,
+            Instant::now(),
+            "POST",
+            "/v1/messages",
+            String::new(),
+        );
+        let mut body = wrapped.into_body().into_data_stream();
+
+        assert!(body.next().await.expect("first chunk").is_ok());
+        assert!(body.next().await.is_none());
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.stream_completions_total, 1);
+        assert_eq!(snapshot.stream_body_errors_total, 0);
+        assert_eq!(snapshot.stream_client_disconnects_total, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_body_error_records_body_error_without_disconnect() {
+        let metrics = Arc::new(ServerMetrics::default());
+        let stream = futures::stream::iter([Err::<Bytes, _>(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "stream failed",
+        ))]);
+        let mut response = Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(stream))
+            .expect("valid response");
+        response.extensions_mut().insert(LogMetadata {
+            is_streaming: true,
+            stream_metrics: Some(metrics.clone()),
+            ..Default::default()
+        });
+
+        let wrapped = wrap_streaming_body(
+            response,
+            Instant::now(),
+            "POST",
+            "/v1/messages",
+            String::new(),
+        );
+        let mut body = wrapped.into_body().into_data_stream();
+
+        assert!(body.next().await.expect("error item").is_err());
+        drop(body);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.stream_completions_total, 0);
+        assert_eq!(snapshot.stream_body_errors_total, 1);
+        assert_eq!(snapshot.stream_client_disconnects_total, 0);
     }
 }

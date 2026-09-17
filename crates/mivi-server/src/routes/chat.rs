@@ -220,6 +220,7 @@ pub async fn chat_completions(
         let log_meta = crate::logging::LogMetadata {
             prompt_summary: last_user_prompt,
             is_streaming: true,
+            stream_metrics: Some(state.metrics.clone()),
             ..Default::default()
         };
         resp.extensions_mut().insert(log_meta);

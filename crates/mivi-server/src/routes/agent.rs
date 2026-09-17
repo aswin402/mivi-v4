@@ -337,7 +337,10 @@ pub async fn run_agent_task(
     }
     let require_tool_call = req.tool_choice == AgentToolChoice::Required;
     let forced_output_prefix = if require_tool_call {
-        forced_tool_call_prefix(&crate::generation::ToolChoice::Required, profile.tool_codec())
+        forced_tool_call_prefix(
+            &crate::generation::ToolChoice::Required,
+            profile.tool_codec(),
+        )
     } else {
         None
     };
@@ -585,6 +588,7 @@ pub async fn run_agent_task(
         prompt_summary: Some(task_summary),
         is_agent: true,
         is_streaming: true,
+        stream_metrics: Some(state.metrics.clone()),
         ..Default::default()
     };
     resp.extensions_mut().insert(log_meta);

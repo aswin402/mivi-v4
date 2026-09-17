@@ -28,6 +28,9 @@ pub struct ServerMetrics {
     prompt_tokens_total: AtomicU64,
     completion_tokens_total: AtomicU64,
     tool_timeouts_total: AtomicU64,
+    stream_completions_total: AtomicU64,
+    stream_body_errors_total: AtomicU64,
+    stream_client_disconnects_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +46,9 @@ pub struct MetricsSnapshot {
     pub prompt_tokens_total: u64,
     pub completion_tokens_total: u64,
     pub tool_timeouts_total: u64,
+    pub stream_completions_total: u64,
+    pub stream_body_errors_total: u64,
+    pub stream_client_disconnects_total: u64,
 }
 
 impl ServerMetrics {
@@ -90,6 +96,21 @@ impl ServerMetrics {
             .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
+    pub fn record_stream_completion(&self) {
+        self.stream_completions_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_stream_body_error(&self) {
+        self.stream_body_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_stream_client_disconnect(&self) {
+        self.stream_client_disconnects_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             inference_requests_total: self.inference_requests_total.load(Ordering::Relaxed),
@@ -111,6 +132,11 @@ impl ServerMetrics {
             prompt_tokens_total: self.prompt_tokens_total.load(Ordering::Relaxed),
             completion_tokens_total: self.completion_tokens_total.load(Ordering::Relaxed),
             tool_timeouts_total: self.tool_timeouts_total.load(Ordering::Relaxed),
+            stream_completions_total: self.stream_completions_total.load(Ordering::Relaxed),
+            stream_body_errors_total: self.stream_body_errors_total.load(Ordering::Relaxed),
+            stream_client_disconnects_total: self
+                .stream_client_disconnects_total
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -146,6 +172,20 @@ mod tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.time_to_first_token_microseconds_total, 20_000);
         assert_eq!(snapshot.first_token_count, 2);
+    }
+
+    #[test]
+    fn records_stream_lifecycle_samples() {
+        let metrics = ServerMetrics::default();
+
+        metrics.record_stream_completion();
+        metrics.record_stream_body_error();
+        metrics.record_stream_client_disconnect();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.stream_completions_total, 1);
+        assert_eq!(snapshot.stream_body_errors_total, 1);
+        assert_eq!(snapshot.stream_client_disconnects_total, 1);
     }
 }
 

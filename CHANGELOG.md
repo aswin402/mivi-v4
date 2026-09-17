@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.41] - 2026-09-17
+
+### Streaming Disconnect & Error Lifecycle Metrics
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Count every streaming lifecycle outcome**: SSE responses now distinguish normal completion,
+  response-body errors, and early client disconnects in `/metrics`, so cancelled agent requests no
+  longer disappear from observability.
+  - *Inspiration*: agent clients often cancel or retry long-running streams, and those cancellations
+    need to be visible separately from successful generation.
+  - *Sources*: [Axum `Body::from_stream` and `Body::into_data_stream`](https://docs.rs/axum/latest/axum/body/struct.Body.html)
+    and [Axum SSE connection-close discussion](https://github.com/tokio-rs/axum/discussions/1060).
+- **Use response-body ownership as the lifecycle boundary**: Mivi now records disconnects when a
+  streaming body is dropped before EOF, while preserving the existing `headers` vs `complete` log
+  split.
+  - *Inspiration*: Drop-guard based cleanup for async response bodies, a common Rust pattern when
+    cancellation happens by dropping the future or stream.
+  - *Sources*: [Axum disconnect/drop discussion](https://github.com/tokio-rs/axum/discussions/1094)
+    and [Tower HTTP timeout layers](https://docs.rs/tower-http/latest/tower_http/timeout/index.html).
+
+#### Added
+
+- `/metrics` counters for streaming lifecycle outcomes:
+  - `stream_completions_total`
+  - `stream_body_errors_total`
+  - `stream_client_disconnects_total`
+- Regression coverage for normal SSE completion, response-body errors, and early client disconnects.
+
+#### Fixed
+
+- Dropped SSE bodies from cancelled clients are now recorded as `client disconnected` instead of
+  being invisible in server metrics.
+
 ## [v0.2.40] - 2026-09-17
 
 ### Accurate Streaming Request Lifecycle Logs

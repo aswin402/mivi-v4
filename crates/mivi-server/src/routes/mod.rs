@@ -509,6 +509,9 @@ mod tests {
         assert_eq!(payload["generation_count"], 0);
         assert_eq!(payload["first_token_count"], 0);
         assert_eq!(payload["tool_timeouts_total"], 0);
+        assert_eq!(payload["stream_completions_total"], 0);
+        assert_eq!(payload["stream_body_errors_total"], 0);
+        assert_eq!(payload["stream_client_disconnects_total"], 0);
     }
 
     #[tokio::test]
