@@ -11,7 +11,10 @@ pub fn run_cache_list(dir: Option<PathBuf>) -> Result<()> {
     if files.is_empty() {
         println!("  No cached prefix files found.");
     } else {
-        println!("  {:<32} {:<12} {:<12} {:<16}", "FILE", "TOKENS", "SIZE", "MODEL HASH");
+        println!(
+            "  {:<32} {:<12} {:<12} {:<16}",
+            "FILE", "TOKENS", "SIZE", "MODEL HASH"
+        );
         println!("  ─────────────────────────────────────────────────────────────────");
         let mut total_size = 0u64;
         let mut total_tokens = 0usize;

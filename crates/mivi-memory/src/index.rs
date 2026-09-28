@@ -3,11 +3,11 @@
 //! Stores 4-bit quantized embeddings with fast asymmetric SIMD cosine similarity search
 //! and zero codebook training overhead.
 
+use crate::store::{MemoryError, Result};
 use mivi_core::TurboQuant4Bit;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
-use crate::store::{MemoryError, Result};
 
 /// A single 4-bit quantized vector memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +75,11 @@ impl TurboMemoryIndex {
         if embedding.len() != self.dim {
             return Err(MemoryError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Embedding dimension mismatch: expected {}, got {}", self.dim, embedding.len()),
+                format!(
+                    "Embedding dimension mismatch: expected {}, got {}",
+                    self.dim,
+                    embedding.len()
+                ),
             )));
         }
 
@@ -108,7 +112,11 @@ impl TurboMemoryIndex {
         if query_embedding.len() != self.dim {
             return Err(MemoryError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Query embedding dimension mismatch: expected {}, got {}", self.dim, query_embedding.len()),
+                format!(
+                    "Query embedding dimension mismatch: expected {}, got {}",
+                    self.dim,
+                    query_embedding.len()
+                ),
             )));
         }
 
@@ -151,8 +159,8 @@ impl TurboMemoryIndex {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let serialized = serde_json::to_vec(self)
-            .map_err(|e| MemoryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let serialized =
+            serde_json::to_vec(self).map_err(|e| MemoryError::Io(std::io::Error::other(e)))?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -161,7 +169,7 @@ impl TurboMemoryIndex {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let mut index: Self = serde_json::from_slice(&bytes)
-            .map_err(|e| MemoryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| MemoryError::Io(std::io::Error::other(e)))?;
         index.quantizer = Some(TurboQuant4Bit::new(index.dim));
         Ok(index)
     }
@@ -198,8 +206,14 @@ mod tests {
         let results = index.search(&emb1, 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, id1);
-        assert!(results[0].1 > 0.8, "Cosine similarity for emb1 must be high");
-        assert!(results[1].1 < 0.0, "Cosine similarity for emb2 must be negative");
+        assert!(
+            results[0].1 > 0.8,
+            "Cosine similarity for emb1 must be high"
+        );
+        assert!(
+            results[1].1 < 0.0,
+            "Cosine similarity for emb2 must be negative"
+        );
 
         // Test persistence
         let temp_file = std::env::temp_dir().join(format!("turbo_mem_{}.json", Uuid::new_v4()));

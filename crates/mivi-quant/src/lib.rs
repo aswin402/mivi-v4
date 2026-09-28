@@ -26,6 +26,8 @@ pub use types::{
     PARALLEL_CHUNK_SIZE, RAYON_PARALLEL_THRESHOLD,
 };
 
+use rayon::prelude::*;
+
 pub const F32_BYTES: usize = 4;
 pub const DEQUANT_STACK_CHUNK: usize = 256;
 
@@ -201,15 +203,19 @@ pub fn quantized_matmul_rows(
     };
     let mut row_major_output = vec![0.0f32; rows * batch];
 
-    if rows >= types::RAYON_PARALLEL_THRESHOLD {
-        let midpoint = rows / 2;
-        let (left, right) = row_major_output.split_at_mut(midpoint * batch);
-        let (left_result, right_result) = rayon::join(
-            || {
+    let num_threads = rayon::current_num_threads().max(1);
+    if rows >= types::RAYON_PARALLEL_THRESHOLD && num_threads > 1 {
+        let chunk_rows = rows.div_ceil(num_threads);
+        row_major_output
+            .par_chunks_mut(chunk_rows * batch)
+            .enumerate()
+            .try_for_each(|(chunk_idx, slice)| {
+                let row_start = chunk_idx * chunk_rows;
+                let row_end = (row_start + chunk_rows).min(rows);
                 compute_batched_rows(
-                    left,
-                    0,
-                    midpoint,
+                    slice,
+                    row_start,
+                    row_end,
                     batch,
                     cols,
                     row_bytes,
@@ -219,25 +225,7 @@ pub fn quantized_matmul_rows(
                     &transposed_inputs,
                     accumulation_mode,
                 )
-            },
-            || {
-                compute_batched_rows(
-                    right,
-                    midpoint,
-                    rows,
-                    batch,
-                    cols,
-                    row_bytes,
-                    ggml_type,
-                    weights,
-                    inputs,
-                    &transposed_inputs,
-                    accumulation_mode,
-                )
-            },
-        );
-        left_result?;
-        right_result?;
+            })?;
     } else {
         compute_batched_rows(
             &mut row_major_output,
@@ -262,6 +250,7 @@ pub fn quantized_matmul_rows(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_batched_rows(
     row_major_output: &mut [f32],
     row_start: usize,

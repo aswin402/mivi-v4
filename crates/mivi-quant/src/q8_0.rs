@@ -30,7 +30,10 @@ pub fn dequantize_q8_0_slice(bytes: &[u8], out: &mut [f32]) {
 #[inline]
 pub fn quantize_f32_to_q8_0_block(src: &[f32], dst_block: &mut [u8]) {
     assert!(src.len() >= Q8_0_BLOCK_SIZE, "Source float slice too small");
-    assert!(dst_block.len() >= Q8_0_BYTES, "Destination block buffer too small");
+    assert!(
+        dst_block.len() >= Q8_0_BYTES,
+        "Destination block buffer too small"
+    );
 
     let mut amax = 0.0f32;
     for &val in &src[..Q8_0_BLOCK_SIZE] {
@@ -279,8 +282,8 @@ mod tests {
     #[test]
     fn test_q8_0_quantize_and_dot_product() {
         let mut src = [0.0f32; 32];
-        for i in 0..32 {
-            src[i] = (i as f32) - 16.0;
+        for (i, val) in src.iter_mut().enumerate() {
+            *val = (i as f32) - 16.0;
         }
 
         let mut block = [0u8; Q8_0_BYTES];

@@ -137,18 +137,16 @@ mod tests {
         );
 
         let prefix2: Vec<u32> = (1..=25).collect();
-        cache.insert_anchor(
-            SemanticAnchorType::ToolCallStart,
-            25,
-            &prefix2,
-            snapshot2,
-        );
+        cache.insert_anchor(SemanticAnchorType::ToolCallStart, 25, &prefix2, snapshot2);
 
         // Query with a 30-token sequence starting with prefix2
         let query_tokens: Vec<u32> = (1..=30).collect();
         let (matched_pos, matched_anchor) = cache.find_deepest_anchor(&query_tokens).unwrap();
 
         assert_eq!(matched_pos, 25);
-        assert_eq!(matched_anchor.anchor_type, SemanticAnchorType::ToolCallStart);
+        assert_eq!(
+            matched_anchor.anchor_type,
+            SemanticAnchorType::ToolCallStart
+        );
     }
 }

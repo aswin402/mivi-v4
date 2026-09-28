@@ -189,21 +189,20 @@ impl IntrusiveBpeMerger {
 
         let max_nodes = n_chars.min(MAX_PIECE_BYTES);
         let mut byte_offset = 0;
-        let mut node_count = 0;
 
-        for ch in piece.chars() {
-            if node_count >= max_nodes {
-                break;
-            }
+        for (idx, ch) in piece.chars().take(max_nodes).enumerate() {
             let ch_len = ch.len_utf8() as u16;
-            nodes[node_count] = BpeSymbolNode {
+            nodes[idx] = BpeSymbolNode {
                 start_byte: byte_offset as u16,
                 byte_len: ch_len,
-                prev: if node_count > 0 { node_count as i16 - 1 } else { -1 },
-                next: if node_count + 1 < max_nodes { (node_count + 1) as i16 } else { -1 },
+                prev: if idx > 0 { idx as i16 - 1 } else { -1 },
+                next: if idx + 1 < max_nodes {
+                    (idx + 1) as i16
+                } else {
+                    -1
+                },
             };
             byte_offset += ch_len as usize;
-            node_count += 1;
         }
 
         let head = 0i16;

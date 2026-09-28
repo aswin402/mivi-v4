@@ -12,9 +12,30 @@ pub fn run_doctor() -> Result<()> {
 
     #[cfg(target_arch = "x86_64")]
     {
-        println!("AVX2:       {}", if is_x86_feature_detected!("avx2") { "✓ Detected" } else { "✗ Not detected" });
-        println!("FMA:        {}", if is_x86_feature_detected!("fma") { "✓ Detected" } else { "✗ Not detected" });
-        println!("AVX-512F:   {}", if is_x86_feature_detected!("avx512f") { "✓ Detected" } else { "✗ Not detected" });
+        println!(
+            "AVX2:       {}",
+            if is_x86_feature_detected!("avx2") {
+                "✓ Detected"
+            } else {
+                "✗ Not detected"
+            }
+        );
+        println!(
+            "FMA:        {}",
+            if is_x86_feature_detected!("fma") {
+                "✓ Detected"
+            } else {
+                "✗ Not detected"
+            }
+        );
+        println!(
+            "AVX-512F:   {}",
+            if is_x86_feature_detected!("avx512f") {
+                "✓ Detected"
+            } else {
+                "✗ Not detected"
+            }
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -41,7 +62,11 @@ pub fn run_doctor() -> Result<()> {
     let models_dir = Path::new("models");
     let models_status = if models_dir.is_dir() {
         let count = std::fs::read_dir(models_dir)
-            .map(|rd| rd.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf")).count())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf"))
+                    .count()
+            })
             .unwrap_or(0);
         format!("✓ Found ({} GGUF model files)", count)
     } else {

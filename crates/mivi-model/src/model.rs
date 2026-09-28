@@ -971,19 +971,19 @@ impl Model {
         if start_pos == 0 {
             if let Some((matched_len, chunk)) = self.prefix_cache.find_longest_prefix(prompt_tokens)
             {
-                if matched_len > 0 && matched_len <= prompt_tokens.len() {
-                    if self
+                if matched_len > 0
+                    && matched_len <= prompt_tokens.len()
+                    && self
                         .kv_cache
                         .import_state(matched_len, &chunk.state.k_cache, &chunk.state.v_cache)
                         .is_ok()
-                    {
-                        self.state.import_ssm_states(
-                            &chunk.state.ssm_conv_states,
-                            &chunk.state.ssm_hidden_states,
-                        );
-                        start_prefill_idx = matched_len;
-                        chained_hash = chunk.hash;
-                    }
+                {
+                    self.state.import_ssm_states(
+                        &chunk.state.ssm_conv_states,
+                        &chunk.state.ssm_hidden_states,
+                    );
+                    start_prefill_idx = matched_len;
+                    chained_hash = chunk.hash;
                 }
             }
         }
@@ -1450,7 +1450,7 @@ mod prefix_cache_integration_tests {
     #[ignore]
     fn test_incremental_continuation_preserves_prefix_cache() {
         let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
-        let mut model = Model::load_with_options(&std::path::Path::new(&model_path), None, None)
+        let mut model = Model::load_with_options(std::path::Path::new(&model_path), None, None)
             .expect("failed to load model");
 
         let system = "You are a helpful assistant.";
@@ -1481,5 +1481,4 @@ mod prefix_cache_integration_tests {
         );
         assert!(model.prefix_cache.len() >= cached, "cache should persist");
     }
-
 }

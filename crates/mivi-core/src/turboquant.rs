@@ -8,15 +8,14 @@ const DEFAULT_ROTATION_SEED: u64 = 0x517cc1b727220a95;
 /// Standard normal 4-bit Lloyd-Max centroids (in units of standard deviation sigma = 1/sqrt(dim)).
 /// 16 optimal reconstruction levels for the near-Gaussian marginal distribution.
 pub const LLOYD_MAX_4BIT_CENTROIDS: [f32; 16] = [
-    -2.152, -1.603, -1.228, -0.923, -0.657, -0.412, -0.177, -0.058,
-     0.058,  0.177,  0.412,  0.657,  0.923,  1.228,  1.603,  2.152,
+    -2.152, -1.603, -1.228, -0.923, -0.657, -0.412, -0.177, -0.058, 0.058, 0.177, 0.412, 0.657,
+    0.923, 1.228, 1.603, 2.152,
 ];
 
 /// Decision boundaries between consecutive 4-bit centroids (15 boundary thresholds).
 pub const LLOYD_MAX_4BIT_BOUNDARIES: [f32; 15] = [
-    -1.8775, -1.4155, -1.0755, -0.7900, -0.5345, -0.2945, -0.1175,
-     0.0000,
-     0.1175,  0.2945,  0.5345,  0.7900,  1.0755,  1.4155,  1.8775,
+    -1.8775, -1.4155, -1.0755, -0.7900, -0.5345, -0.2945, -0.1175, 0.0000, 0.1175, 0.2945, 0.5345,
+    0.7900, 1.0755, 1.4155, 1.8775,
 ];
 
 /// Simple deterministic SplitMix64 pseudo-random number generator for reproducible bit-for-bit rotations.
@@ -53,7 +52,10 @@ pub fn fwht_in_place(buf: &mut [f32]) {
     if n <= 1 {
         return;
     }
-    assert!(n.is_power_of_two(), "FWHT buffer length must be a power of two");
+    assert!(
+        n.is_power_of_two(),
+        "FWHT buffer length must be a power of two"
+    );
 
     let mut h = 1;
     while h < n {
@@ -87,10 +89,10 @@ pub fn rotate_vector_in_place(buf: &mut [f32]) {
     }
 
     let mut block_size = 64;
-    while block_size > 8 && (dim % block_size != 0) {
+    while block_size > 8 && !dim.is_multiple_of(block_size) {
         block_size /= 2;
     }
-    if dim % block_size != 0 {
+    if !dim.is_multiple_of(block_size) {
         block_size = 8;
     }
 
@@ -129,17 +131,17 @@ pub fn unrotate_vector_in_place(buf: &mut [f32]) {
     }
 
     let mut block_size = 64;
-    while block_size > 8 && (dim % block_size != 0) {
+    while block_size > 8 && !dim.is_multiple_of(block_size) {
         block_size /= 2;
     }
-    if dim % block_size != 0 {
+    if !dim.is_multiple_of(block_size) {
         block_size = 8;
     }
 
     let mut rng = SplitMix64::new(DEFAULT_ROTATION_SEED ^ (dim as u64));
 
     // Record PRNG generated swaps and sign bits for both rounds
-    let num_chunks = (dim + 63) / 64;
+    let num_chunks = dim.div_ceil(64);
     let mut round_swaps = Vec::with_capacity(2);
     let mut round_bits = Vec::with_capacity(2);
 
@@ -237,7 +239,7 @@ impl TurboQuant4Bit {
         let sum_sq: f32 = vec.iter().map(|&x| x * x).sum();
         let norm = sum_sq.sqrt();
         if norm == 0.0 {
-            let packed_len = (self.dim + 1) / 2;
+            let packed_len = self.dim.div_ceil(2);
             return (0.0, vec![0x77u8; packed_len]); // Index 7 & 8 are near 0.0
         }
 
@@ -250,13 +252,14 @@ impl TurboQuant4Bit {
         rotate_vector_in_place(&mut rotated);
 
         // 3. Map rotated coordinates to 4-bit centroid indices using boundary lookup
-        let packed_len = (self.dim + 1) / 2;
+        let packed_len = self.dim.div_ceil(2);
         let mut packed = vec![0u8; packed_len];
 
         for (i, &coord) in rotated.iter().enumerate() {
-            let code = match self.scaled_boundaries.binary_search_by(|b| {
-                b.partial_cmp(&coord).unwrap_or(std::cmp::Ordering::Less)
-            }) {
+            let code = match self
+                .scaled_boundaries
+                .binary_search_by(|b| b.partial_cmp(&coord).unwrap_or(std::cmp::Ordering::Less))
+            {
                 Ok(idx) => (idx + 1).min(15) as u8,
                 Err(idx) => idx.min(15) as u8,
             };
@@ -407,7 +410,7 @@ impl TurboQuant2Bit {
         let sum_sq: f32 = vec.iter().map(|&x| x * x).sum();
         let norm = sum_sq.sqrt();
         if norm == 0.0 {
-            let packed_len = (self.dim + 3) / 4;
+            let packed_len = self.dim.div_ceil(4);
             return (0.0, vec![0x55u8; packed_len]); // Index 1 & 2 are near 0.0
         }
 
@@ -418,7 +421,7 @@ impl TurboQuant2Bit {
         }
         rotate_vector_in_place(&mut rotated);
 
-        let packed_len = (self.dim + 3) / 4;
+        let packed_len = self.dim.div_ceil(4);
         let mut packed = vec![0u8; packed_len];
 
         for (i, &coord) in rotated.iter().enumerate() {

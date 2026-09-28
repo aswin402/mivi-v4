@@ -718,8 +718,10 @@ impl KvCache {
                     let dst_end = dst_start + target_pos * bpt;
 
                     if end <= self.k_q8_cache.len() {
-                        k_out_bytes[dst_start..dst_end].copy_from_slice(&self.k_q8_cache[start..end]);
-                        v_out_bytes[dst_start..dst_end].copy_from_slice(&self.v_q8_cache[start..end]);
+                        k_out_bytes[dst_start..dst_end]
+                            .copy_from_slice(&self.k_q8_cache[start..end]);
+                        v_out_bytes[dst_start..dst_end]
+                            .copy_from_slice(&self.v_q8_cache[start..end]);
                     }
                 }
                 Ok((k_out, v_out))
@@ -780,8 +782,10 @@ impl KvCache {
                     let src_end = src_start + target_pos * bpt;
 
                     if end <= self.k_q8_cache.len() {
-                        self.k_q8_cache[start..end].copy_from_slice(&k_src_bytes[src_start..src_end]);
-                        self.v_q8_cache[start..end].copy_from_slice(&v_src_bytes[src_start..src_end]);
+                        self.k_q8_cache[start..end]
+                            .copy_from_slice(&k_src_bytes[src_start..src_end]);
+                        self.v_q8_cache[start..end]
+                            .copy_from_slice(&v_src_bytes[src_start..src_end]);
                     }
                 }
                 self.current_pos = target_pos;
@@ -789,7 +793,6 @@ impl KvCache {
             }
         }
     }
-
 
     /// Import KV cache data at a specific absolute position without resetting current_pos.
     ///
@@ -829,7 +832,8 @@ impl KvCache {
                 }
 
                 for cache_layer in 0..n_alloc {
-                    let dst_start = cache_layer * self.max_seq_len * self.kv_dim + target_pos * self.kv_dim;
+                    let dst_start =
+                        cache_layer * self.max_seq_len * self.kv_dim + target_pos * self.kv_dim;
                     let dst_end = dst_start + pos * self.kv_dim;
                     let src_start = cache_layer * pos * self.kv_dim;
                     let src_end = src_start + pos * self.kv_dim;
@@ -872,15 +876,16 @@ impl KvCache {
                     let src_end = src_start + pos * bpt;
 
                     if dst_end <= self.k_q8_cache.len() {
-                        self.k_q8_cache[dst_start..dst_end].copy_from_slice(&k_src_bytes[src_start..src_end]);
-                        self.v_q8_cache[dst_start..dst_end].copy_from_slice(&v_src_bytes[src_start..src_end]);
+                        self.k_q8_cache[dst_start..dst_end]
+                            .copy_from_slice(&k_src_bytes[src_start..src_end]);
+                        self.v_q8_cache[dst_start..dst_end]
+                            .copy_from_slice(&v_src_bytes[src_start..src_end]);
                     }
                 }
                 Ok(())
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1009,7 +1014,10 @@ mod tests {
         let mut v_dequant = vec![0.0f32; 512];
         unsafe { kv.get_v_tq4_dequantized_unchecked(2, 0, &mut v_dequant) };
         let diff = (v_dequant[0] - v[0]).abs();
-        assert!(diff < 0.3, "Dequantized V value diff must be small (got: {diff})");
+        assert!(
+            diff < 0.3,
+            "Dequantized V value diff must be small (got: {diff})"
+        );
     }
 
     #[test]
@@ -1041,6 +1049,9 @@ mod tests {
         let mut v_dequant = vec![0.0f32; 512];
         unsafe { kv.get_v_tq2_dequantized_unchecked(2, 0, &mut v_dequant) };
         let diff = (v_dequant[0] - v[0]).abs();
-        assert!(diff < 0.5, "Dequantized V value diff must be reasonable (got: {diff})");
+        assert!(
+            diff < 0.5,
+            "Dequantized V value diff must be reasonable (got: {diff})"
+        );
     }
 }

@@ -115,7 +115,11 @@ pub struct TreePldProposer {
 
 impl Default for TreePldProposer {
     fn default() -> Self {
-        Self::new(DEFAULT_PLD_NGRAM_SIZE, DEFAULT_PLD_DRAFT_SIZE, REASONING_DRAFT_DEPTH)
+        Self::new(
+            DEFAULT_PLD_NGRAM_SIZE,
+            DEFAULT_PLD_DRAFT_SIZE,
+            REASONING_DRAFT_DEPTH,
+        )
     }
 }
 
@@ -129,7 +133,11 @@ impl TreePldProposer {
     }
 
     /// Search for matching n-gram continuations in token history and return a structured tree candidate.
-    pub fn propose_tree(&self, all_tokens: &[u32], mode: SpeculativeMode) -> Option<TreeDraftCandidate> {
+    pub fn propose_tree(
+        &self,
+        all_tokens: &[u32],
+        mode: SpeculativeMode,
+    ) -> Option<TreeDraftCandidate> {
         if all_tokens.len() <= self.ngram_size {
             return None;
         }
@@ -163,16 +171,20 @@ impl TreePldProposer {
                         if primary_len == 0 {
                             // Primary match (most recent)
                             primary_len = draft_slice.len().min(MAX_TREE_DEPTH);
-                            primary_tokens[..primary_len].copy_from_slice(&draft_slice[..primary_len]);
+                            primary_tokens[..primary_len]
+                                .copy_from_slice(&draft_slice[..primary_len]);
 
                             // In DeepChain mode, 1 long chain is sufficient
                             if mode == SpeculativeMode::DeepChain {
                                 break;
                             }
-                        } else if secondary_len == 0 && draft_slice != &primary_tokens[..primary_len] {
+                        } else if secondary_len == 0
+                            && draft_slice != &primary_tokens[..primary_len]
+                        {
                             // Secondary match with a different continuation branch
                             secondary_len = draft_slice.len().min(MAX_TREE_DEPTH - 1);
-                            secondary_tokens[..secondary_len].copy_from_slice(&draft_slice[..secondary_len]);
+                            secondary_tokens[..secondary_len]
+                                .copy_from_slice(&draft_slice[..secondary_len]);
                             break;
                         }
                     }
@@ -242,7 +254,11 @@ impl PromptLookupProposer {
             .map(|c| c.primary().to_vec())
     }
 
-    pub fn propose_tree(&self, all_tokens: &[u32], mode: SpeculativeMode) -> Option<TreeDraftCandidate> {
+    pub fn propose_tree(
+        &self,
+        all_tokens: &[u32],
+        mode: SpeculativeMode,
+    ) -> Option<TreeDraftCandidate> {
         self.inner.propose_tree(all_tokens, mode)
     }
 }
@@ -272,9 +288,7 @@ mod tests {
         // Branch 1: [10, 20, 30, 111, 222]
         // Branch 2: [10, 20, 30, 40, 50, 60]
         let tokens = vec![
-            10, 20, 30, 111, 222, 999,
-            10, 20, 30, 40, 50, 60, 999,
-            10, 20, 30
+            10, 20, 30, 111, 222, 999, 10, 20, 30, 40, 50, 60, 999, 10, 20, 30,
         ];
 
         let candidate = proposer.propose_tree(&tokens, SpeculativeMode::MultiBranchTree);

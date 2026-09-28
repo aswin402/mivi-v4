@@ -196,6 +196,7 @@ impl Drop for AgentGenerationCancellation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_agent_step(
     engine: &crate::engine_actor::EngineHandle,
     prompt: &str,

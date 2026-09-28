@@ -148,13 +148,13 @@ pub fn minify_python_code(source: &str) -> String {
         {
             out.push_str(line);
             out.push('\n');
-            if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
-                if trimmed.ends_with(':') {
-                    let indent_str = " ".repeat(indent + 4);
-                    out.push_str(&format!("{}pass\n", indent_str));
-                    in_def_body = true;
-                    def_indent = indent;
-                }
+            if (trimmed.starts_with("def ") || trimmed.starts_with("async def "))
+                && trimmed.ends_with(':')
+            {
+                let indent_str = " ".repeat(indent + 4);
+                out.push_str(&format!("{}pass\n", indent_str));
+                in_def_body = true;
+                def_indent = indent;
             }
             continue;
         }

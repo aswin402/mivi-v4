@@ -139,8 +139,11 @@ pub fn run_chat(args: ChatArgs) -> Result<()> {
                     if idx < conversation_history.len().saturating_sub(1) {
                         conversation_history.remove(idx);
                         trimmed_any = true;
-                        full_prompt =
-                            mivi_tokenizer::format_chatml(&conversation_history, None, thinking_enabled);
+                        full_prompt = mivi_tokenizer::format_chatml(
+                            &conversation_history,
+                            None,
+                            thinking_enabled,
+                        );
                         prompt_tokens = m.tokenizer.encode(&full_prompt);
                     } else {
                         break;

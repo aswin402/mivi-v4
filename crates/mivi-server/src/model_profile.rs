@@ -351,7 +351,7 @@ fn render_delimited_python_prompt(
     let mut injected_tools = false;
 
     if needs_injected_system {
-        write!(output, "{message_start}system\n").unwrap();
+        writeln!(output, "{message_start}system").unwrap();
         append_native_system_instructions(
             &mut output,
             tools,
@@ -758,9 +758,7 @@ mod tests {
     #[test]
     fn vocabulary_tool_markers_complete_a_template_without_output_delimiters() {
         let metadata = crate::engine_actor::EngineModelMetadata {
-            chat_template: Some(
-                "<|startoftext|><|im_start|>{{ messages }}<|im_end|>".to_string(),
-            ),
+            chat_template: Some("<|startoftext|><|im_start|>{{ messages }}<|im_end|>".to_string()),
             tool_call_start_token: Some("<|tool_call_start|>".to_string()),
             tool_call_end_token: Some("<|tool_call_end|>".to_string()),
             ..Default::default()

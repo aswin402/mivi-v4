@@ -30,10 +30,13 @@ fn test_quantized_kv_cache_q8_0_memory_reduction() {
     let q8_bytes = kv_q8.memory_bytes();
 
     assert_eq!(f32_bytes, 1_610_612_736); // ~1.61 GB
-    assert_eq!(q8_bytes, 427_819_008);    // ~427 MB
+    assert_eq!(q8_bytes, 427_819_008); // ~427 MB
 
     let reduction_ratio = 1.0 - (q8_bytes as f64 / f32_bytes as f64);
-    assert!(reduction_ratio > 0.73, "Q8_0 must provide at least 73% memory reduction");
+    assert!(
+        reduction_ratio > 0.73,
+        "Q8_0 must provide at least 73% memory reduction"
+    );
 
     let kv_tq4 = KvCache::try_new_selective_with_precision(
         n_layers,
@@ -47,7 +50,10 @@ fn test_quantized_kv_cache_q8_0_memory_reduction() {
     let tq4_bytes = kv_tq4.memory_bytes();
     assert_eq!(tq4_bytes, 204_472_320); // ~204.4 MB
     let tq4_reduction = 1.0 - (tq4_bytes as f64 / f32_bytes as f64);
-    assert!(tq4_reduction > 0.87, "TurboQuant4 must provide >87% memory reduction (got: {tq4_reduction})");
+    assert!(
+        tq4_reduction > 0.87,
+        "TurboQuant4 must provide >87% memory reduction (got: {tq4_reduction})"
+    );
 
     let kv_tq2 = KvCache::try_new_selective_with_precision(
         n_layers,
@@ -61,7 +67,10 @@ fn test_quantized_kv_cache_q8_0_memory_reduction() {
     let tq2_bytes = kv_tq2.memory_bytes();
     assert_eq!(tq2_bytes, 103_809_024); // ~103.8 MB
     let tq2_reduction = 1.0 - (tq2_bytes as f64 / f32_bytes as f64);
-    assert!(tq2_reduction > 0.93, "TurboQuant2 must provide >93% memory reduction (got: {tq2_reduction})");
+    assert!(
+        tq2_reduction > 0.93,
+        "TurboQuant2 must provide >93% memory reduction (got: {tq2_reduction})"
+    );
 }
 
 #[test]
@@ -95,7 +104,8 @@ fn test_chunked_prefix_caching_multi_chunk_chain() {
     let mut prefix_cache = PrefixCache::new(4, PREFIX_CHUNK_SIZE);
 
     let chunk_1_tokens: Vec<u32> = (0..PREFIX_CHUNK_SIZE as u32).collect();
-    let chunk_2_tokens: Vec<u32> = (PREFIX_CHUNK_SIZE as u32..2 * PREFIX_CHUNK_SIZE as u32).collect();
+    let chunk_2_tokens: Vec<u32> =
+        (PREFIX_CHUNK_SIZE as u32..2 * PREFIX_CHUNK_SIZE as u32).collect();
 
     let snap_1 = HybridStateSnapshot::new(
         PREFIX_CHUNK_SIZE,

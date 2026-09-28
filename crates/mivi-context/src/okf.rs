@@ -94,10 +94,7 @@ impl OkfConcept {
         }
 
         let (extracted_title, body) = extract_title_and_body(body_str);
-        let title = frontmatter
-            .title
-            .clone()
-            .unwrap_or_else(|| extracted_title);
+        let title = frontmatter.title.clone().unwrap_or(extracted_title);
 
         let wiki_links = extract_wiki_links(body_str);
 
@@ -149,7 +146,11 @@ impl OkfBundleNavigator {
                     concept.title,
                     id,
                     concept.frontmatter.r#type,
-                    concept.frontmatter.trust_tier.as_deref().unwrap_or("verified")
+                    concept
+                        .frontmatter
+                        .trust_tier
+                        .as_deref()
+                        .unwrap_or("verified")
                 ));
             }
         }
@@ -215,7 +216,12 @@ fn parse_simple_yaml(yaml: &str) -> OkfFrontmatter {
 
         // Handle multiline list item: - "value" or - value
         if trimmed.starts_with('-') {
-            let item = trimmed.trim_start_matches('-').trim().trim_matches('"').trim_matches('\'').to_string();
+            let item = trimmed
+                .trim_start_matches('-')
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             if !item.is_empty() {
                 match active_list_key {
                     Some("sources") => frontmatter.sources.push(item),
@@ -301,7 +307,10 @@ See also [[crates/mivi-core]] and [[crates/mivi-kv]].
         assert!(concept.is_active());
         assert_eq!(concept.frontmatter.sources.len(), 2);
         assert_eq!(concept.frontmatter.tags.len(), 3);
-        assert_eq!(concept.wiki_links, vec!["crates/mivi-core", "crates/mivi-kv"]);
+        assert_eq!(
+            concept.wiki_links,
+            vec!["crates/mivi-core", "crates/mivi-kv"]
+        );
         assert!(concept.body.contains("TurboQuant performs 4-bit"));
     }
 
@@ -349,7 +358,13 @@ Matches n-grams in the context buffer.
 
         let concept = OkfConcept::parse(doc, "default_id").unwrap();
         assert_eq!(concept.frontmatter.id, "algorithms/pld");
-        assert_eq!(concept.frontmatter.sources, vec!["Google Research", "Apoorv Saxena"]);
-        assert_eq!(concept.frontmatter.tags, vec!["speculative_decoding", "pld", "latency"]);
+        assert_eq!(
+            concept.frontmatter.sources,
+            vec!["Google Research", "Apoorv Saxena"]
+        );
+        assert_eq!(
+            concept.frontmatter.tags,
+            vec!["speculative_decoding", "pld", "latency"]
+        );
     }
 }

@@ -163,12 +163,29 @@ mod tests {
             emb2[i] = -(i as f32 + 1.0) * 0.1;
         }
 
-        store.add_block_with_embedding("doc1", "docs/db.rs", "Database connection pool", false, Some(&emb1), Some(&quantizer));
-        store.add_block_with_embedding("doc2", "docs/ui.rs", "Frontend UI rendering", false, Some(&emb2), Some(&quantizer));
+        store.add_block_with_embedding(
+            "doc1",
+            "docs/db.rs",
+            "Database connection pool",
+            false,
+            Some(&emb1),
+            Some(&quantizer),
+        );
+        store.add_block_with_embedding(
+            "doc2",
+            "docs/ui.rs",
+            "Frontend UI rendering",
+            false,
+            Some(&emb2),
+            Some(&quantizer),
+        );
 
         let results = store.search_semantic(&emb1, &quantizer, 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.id, "doc1");
-        assert!(results[0].1 > 0.8, "Cosine similarity must be high for matching embedding");
+        assert!(
+            results[0].1 > 0.8,
+            "Cosine similarity must be high for matching embedding"
+        );
     }
 }

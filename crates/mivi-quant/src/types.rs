@@ -184,6 +184,7 @@ pub fn validate_matvec_args(
 ///
 /// The output layout is `[batch, rows]`, the input layout is `[batch, cols]`,
 /// and the quantized weights layout is `[rows, cols]`.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_matmul_args(
     out: &[f32],
     weights: &[u8],

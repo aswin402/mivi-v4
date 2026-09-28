@@ -10,10 +10,10 @@ use std::collections::{HashMap, VecDeque};
 /// Default token chunk size for hierarchical prefix caching (64 tokens).
 pub const PREFIX_CHUNK_SIZE: usize = 64;
 
-/// Default maximum number of cached chunks in memory.
-pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 32;
-/// Default maximum RAM budget for PrefixCache (32 MB).
-pub const DEFAULT_MAX_PREFIX_CACHE_BYTES: usize = 32 * 1024 * 1024;
+/// Default maximum number of cached chunks in memory (1024 chunks = 65,536 tokens / 64k).
+pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 1024;
+/// Default maximum RAM budget for PrefixCache (512 MB).
+pub const DEFAULT_MAX_PREFIX_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Snapshot of the complete hybrid inference state at a given sequence position.
 #[derive(Debug, Clone, PartialEq)]

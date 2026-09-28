@@ -22,10 +22,13 @@ pub enum BlockType {
 ///
 /// `Chunked` is intentionally model-agnostic. Its tile size is a runtime
 /// choice, while the loaded model metadata determines the actual layer layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PrefillStrategy {
+    #[default]
     Token,
-    Chunked { tile_tokens: usize },
+    Chunked {
+        tile_tokens: usize,
+    },
 }
 
 impl PrefillStrategy {
@@ -57,12 +60,6 @@ impl PrefillStrategy {
 
     pub fn is_chunked(self) -> bool {
         matches!(self, Self::Chunked { .. })
-    }
-}
-
-impl Default for PrefillStrategy {
-    fn default() -> Self {
-        Self::Token
     }
 }
 

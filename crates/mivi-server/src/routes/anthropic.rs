@@ -118,6 +118,7 @@ struct AnthropicChunkStreamState {
     generation_started: Instant,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn anthropic_chunk_stream(
     receiver: tokio::sync::mpsc::Receiver<Result<String, String>>,
     cancellation: GenerationCancellation,

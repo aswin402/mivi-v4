@@ -85,7 +85,7 @@ impl ExpertHeatTracker {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let entry = self.experts.entry(key).or_insert_with(ExpertHeatStat::default);
+        let entry = self.experts.entry(key).or_default();
         entry.total_activations += 1;
         entry.ema_heat += 1.0;
         entry.last_accessed_timestamp = now;
@@ -129,8 +129,7 @@ impl ExpertHeatTracker {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let serialized = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let serialized = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -138,8 +137,7 @@ impl ExpertHeatTracker {
     /// Load expert heat tracking profile from a JSON file.
     pub fn load_from_file(path: &Path) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
-        let tracker: Self = serde_json::from_slice(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let tracker: Self = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
         Ok(tracker)
     }
 }
@@ -212,8 +210,20 @@ mod tests {
 
         let hottest = tracker.get_hottest_experts(2);
         assert_eq!(hottest.len(), 2);
-        assert_eq!(hottest[0].0, ExpertKey { layer: 1, expert_id: 2 });
-        assert_eq!(hottest[1].0, ExpertKey { layer: 0, expert_id: 3 });
+        assert_eq!(
+            hottest[0].0,
+            ExpertKey {
+                layer: 1,
+                expert_id: 2
+            }
+        );
+        assert_eq!(
+            hottest[1].0,
+            ExpertKey {
+                layer: 0,
+                expert_id: 3
+            }
+        );
 
         assert!(tracker.is_expert_hot(1, 2, 2));
         assert!(tracker.is_expert_hot(0, 3, 2));

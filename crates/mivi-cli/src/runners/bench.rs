@@ -1,7 +1,7 @@
 //! CPU kernel and model latency benchmark runner.
 
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const BENCH_DIM: usize = 1024;
@@ -222,7 +222,7 @@ fn print_generation_measurement(
 }
 
 fn run_model_benchmark(
-    model_path: &PathBuf,
+    model_path: &Path,
     kv_precision: Option<String>,
     prefill_strategy: String,
     prefill_tile_tokens: usize,

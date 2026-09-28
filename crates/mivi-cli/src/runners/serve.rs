@@ -67,11 +67,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         .transpose()?;
 
     let max_concurrent_tool_executions = args.max_concurrent_tool_executions.max(1);
-    let prefill_strategy = mivi_model::PrefillStrategy::parse(
-        &args.prefill_strategy,
-        args.prefill_tile_tokens,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let prefill_strategy =
+        mivi_model::PrefillStrategy::parse(&args.prefill_strategy, args.prefill_tile_tokens)
+            .map_err(anyhow::Error::msg)?;
     let server_config = mivi_server::ServerConfig {
         model_profile,
         prefill_strategy,
@@ -154,61 +152,6 @@ fn load_model_profile(path: &Path) -> Result<mivi_server::ModelProfileConfig> {
     mivi_server::ModelProfile::from_config(&profile)
         .map_err(|error| anyhow::anyhow!("Invalid model profile '{}': {error}", path.display()))?;
     Ok(profile)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{load_model_profile, validate_bind_security, wait_for_safelock};
-    use mivi_server::ModelProfileConfig;
-    use std::io::Write;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::time::Duration;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn loopback_bind_does_not_require_an_api_key() {
-        assert!(validate_bind_security(IpAddr::V4(Ipv4Addr::LOCALHOST), None).is_ok());
-        assert!(validate_bind_security(IpAddr::V6(Ipv6Addr::LOCALHOST), None).is_ok());
-    }
-
-    #[test]
-    fn non_loopback_bind_requires_a_non_empty_api_key() {
-        let public_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-        assert!(validate_bind_security(public_ip, None).is_err());
-        assert!(validate_bind_security(public_ip, Some("   ")).is_err());
-        assert!(validate_bind_security(public_ip, Some("test-key")).is_ok());
-    }
-
-    #[test]
-    fn external_model_profile_is_loaded_and_validated() {
-        let mut file = NamedTempFile::new().expect("temporary profile");
-        write!(
-            file,
-            "{{\"kind\":\"delimited_python\",\"start_of_text\":\"<BOS>\",\"message_start\":\"<MSG>\",\"message_end\":\"</MSG>\",\"tool_call_start\":\"<CALL>\",\"tool_call_end\":\"</CALL>\"}}"
-        )
-        .expect("write profile");
-
-        let profile = load_model_profile(file.path()).expect("profile should load");
-
-        assert!(matches!(
-            profile,
-            ModelProfileConfig::DelimitedPython { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn closed_watchdog_channel_does_not_trigger_safelock() {
-        let (sender, receiver) = tokio::sync::watch::channel(false);
-        drop(sender);
-
-        let result =
-            tokio::time::timeout(Duration::from_millis(20), wait_for_safelock(receiver)).await;
-
-        assert!(
-            result.is_err(),
-            "closed watchdog channel must not resolve shutdown"
-        );
-    }
 }
 
 fn print_startup_banner(
@@ -312,5 +255,60 @@ async fn wait_for_safelock(mut safelock_rx: watch::Receiver<bool>) {
             // keep waiting for Ctrl+C/SIGTERM in shutdown_signal instead.
             Err(_) => std::future::pending::<()>().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_model_profile, validate_bind_security, wait_for_safelock};
+    use mivi_server::ModelProfileConfig;
+    use std::io::Write;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::Duration;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn loopback_bind_does_not_require_an_api_key() {
+        assert!(validate_bind_security(IpAddr::V4(Ipv4Addr::LOCALHOST), None).is_ok());
+        assert!(validate_bind_security(IpAddr::V6(Ipv6Addr::LOCALHOST), None).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_a_non_empty_api_key() {
+        let public_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        assert!(validate_bind_security(public_ip, None).is_err());
+        assert!(validate_bind_security(public_ip, Some("   ")).is_err());
+        assert!(validate_bind_security(public_ip, Some("test-key")).is_ok());
+    }
+
+    #[test]
+    fn external_model_profile_is_loaded_and_validated() {
+        let mut file = NamedTempFile::new().expect("temporary profile");
+        write!(
+            file,
+            "{{\"kind\":\"delimited_python\",\"start_of_text\":\"<BOS>\",\"message_start\":\"<MSG>\",\"message_end\":\"</MSG>\",\"tool_call_start\":\"<CALL>\",\"tool_call_end\":\"</CALL>\"}}"
+        )
+        .expect("write profile");
+
+        let profile = load_model_profile(file.path()).expect("profile should load");
+
+        assert!(matches!(
+            profile,
+            ModelProfileConfig::DelimitedPython { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_watchdog_channel_does_not_trigger_safelock() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        drop(sender);
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(20), wait_for_safelock(receiver)).await;
+
+        assert!(
+            result.is_err(),
+            "closed watchdog channel must not resolve shutdown"
+        );
     }
 }

@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [v0.2.45] - 2026-09-28
+
+### Multi-Core Parallel Quantized Matmul & 64K In-Memory Prefix Cache Retention
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **All-Core Rayon Work-Stealing in Batch Matrix Multiplication (`mivi-quant::lib`)**:
+  - *Problem Fixed*: `quantized_matmul_rows` previously performed a single 2-way `rayon::join` on matrix rows, leaving CPUs with 4, 8, 12, or 16 threads largely idle during prompt prefill.
+  - *Solution*: Replaced 2-way split with dynamic `par_chunks_mut(chunk_rows * batch)` chunking rows evenly across all `rayon::current_num_threads()` workers. Every core processes non-overlapping row partitions with thread-local buffers, maximizing hardware ALU utilization during cold prefill.
+  - *Inspiration*: [llama.cpp `ggml_mul_mat` OpenMP thread work-sharing](https://github.com/ggerganov/llama.cpp) across physical CPU cores.
+
+- **64K-Capacity In-Memory Prefix Caching for Instant Agent Turns (`mivi-kv::prefix`, `mivi-model::model`)**:
+  - *Problem Fixed*: When an AI coding agent (e.g. `minicode`, Cline) sent a 14,000+ token static prompt (system instructions + tool schemas), Mivi's prefix cache previously capped retention at 32 chunks (2,048 tokens / 32 MB). Every turn was forced to recompute all 14,000 tokens sequentially on CPU, whereas Ollama and llama.cpp reuse resident KV cache slots for near-instant (0 ms) responses on turn 2+.
+  - *Solution*: Expanded `DEFAULT_MAX_CACHED_CHUNKS` to 1,024 chunks (65,536 tokens = 64k context window) and `DEFAULT_MAX_PREFIX_CACHE_BYTES` to 512 MB (fitting safely within Mivi's 3.0 GB system RAM budget). Once an agent's static workspace prompt completes turn 1, subsequent turns achieve full prefix cache hits with zero loading time.
+  - *Inspiration*: [Ollama context persistence & llama.cpp slot cache reuse](https://github.com/ollama/ollama).
+
+- **SSM 1D Short-Convolution Kernel Hoisting & Vectorization (`mivi-model::ssm`)**:
+  - *Problem Fixed*: In hybrid models like `LFM2.5` with 10 SSM layers, the 1D convolution rolling buffer checked kernel configuration inside the inner dimension loop (`for d in 0..dim`), executing hundreds of millions of branch evaluations.
+  - *Solution*: Hoisted the `kernel_size == 3 && has_full_conv` branch outside the dimension loop, enabling LLVM auto-vectorization across all 2,048 dimensions.
+
+- **Developer Concurrency Guardrails & Rust 1.94 Linter Alignment (`justfile`, workspace)**:
+  - Configured `justfile` recipes with explicit job limits (`jobs 1` for test, clippy, fmt; `jobs 2` for build, serve, chat) to protect low-spec machines from memory spikes.
+  - Cleaned up clippy lints across all 12 workspace crates for Rust 1.94 toolchains.
+
+---
 
 ## [v0.2.44] - 2026-09-17
 

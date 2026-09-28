@@ -216,10 +216,10 @@ pub fn ssm_forward_tile(
         let (c_slice, x_slice) = rest.split_at(dim);
         let output_start = row_idx * dim;
 
-        for d in 0..dim {
-            let bx = b_slice[d] * x_slice[d];
-            let conv_offset = layer_offset + d * kernel_size;
-            let conv_out = if kernel_size == 3 && has_full_conv {
+        if kernel_size == 3 && has_full_conv {
+            for d in 0..dim {
+                let bx = b_slice[d] * x_slice[d];
+                let conv_offset = layer_offset + d * 3;
                 let s0 = state.conv_states[conv_offset + 1];
                 let s1 = state.conv_states[conv_offset + 2];
                 state.conv_states[conv_offset] = s0;
@@ -227,10 +227,15 @@ pub fn ssm_forward_tile(
                 state.conv_states[conv_offset + 2] = bx;
 
                 let weights_start = d * 3;
-                w.ssm_conv[weights_start] * s0
+                let conv_out = w.ssm_conv[weights_start] * s0
                     + w.ssm_conv[weights_start + 1] * s1
-                    + w.ssm_conv[weights_start + 2] * bx
-            } else {
+                    + w.ssm_conv[weights_start + 2] * bx;
+                tile.norm[output_start + d] = c_slice[d] * conv_out;
+            }
+        } else {
+            for d in 0..dim {
+                let bx = b_slice[d] * x_slice[d];
+                let conv_offset = layer_offset + d * kernel_size;
                 for k in 0..(kernel_size - 1) {
                     state.conv_states[conv_offset + k] = state.conv_states[conv_offset + k + 1];
                 }
@@ -247,9 +252,8 @@ pub fn ssm_forward_tile(
                     };
                     value += weight * state.conv_states[conv_offset + k];
                 }
-                value
-            };
-            tile.norm[output_start + d] = c_slice[d] * conv_out;
+                tile.norm[output_start + d] = c_slice[d] * value;
+            }
         }
     }
 

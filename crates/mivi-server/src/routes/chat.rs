@@ -583,15 +583,14 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 tool_codec,
                                 streamed_tool_call.as_ref(),
                             );
-                            if !values.is_empty() {
-                                if tx
+                            if !values.is_empty()
+                                && tx
                                     .send(Ok(create_tool_calls_chunk_event(&cid, &mname, &values)))
                                     .await
                                     .is_err()
-                                {
-                                    cancellation.cancel();
-                                    return "error";
-                                }
+                            {
+                                cancellation.cancel();
+                                return "error";
                             }
                         }
                         crate::logging::print_completion_response_box(

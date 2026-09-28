@@ -12,9 +12,10 @@ pub enum RopeError {
 pub type Result<T> = std::result::Result<T, RopeError>;
 
 /// Rotary position embedding scaling strategy for long-context extension.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum RopeScaling {
     /// Standard unscaled RoPE.
+    #[default]
     None,
     /// Linear frequency scaling (pos / scale).
     Linear { scale: f32 },
@@ -27,12 +28,6 @@ pub enum RopeScaling {
         beta_fast: f32,
         beta_slow: f32,
     },
-}
-
-impl Default for RopeScaling {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +86,11 @@ impl RopeCache {
                             let wavelength = 2.0 * std::f32::consts::PI / base_freq;
 
                             let ramp = if high_rot >= low_rot {
-                                if wavelength < high_rot { 0.0 } else { 1.0 }
+                                if wavelength < high_rot {
+                                    0.0
+                                } else {
+                                    1.0
+                                }
                             } else if wavelength < high_rot {
                                 0.0
                             } else if wavelength > low_rot {

@@ -1608,8 +1608,10 @@ async fn test_inference_requests_are_rejected_when_the_engine_slot_is_busy() {
         }
     });
 
-    let mut config = ServerConfig::default();
-    config.max_concurrent_requests = 1;
+    let config = ServerConfig {
+        max_concurrent_requests: 1,
+        ..Default::default()
+    };
     let state = Arc::new(AppState::with_config(
         "mivi-v4-test",
         ToolBroker::new(),
@@ -1987,7 +1989,7 @@ fn test_prefix_caching_hybrid_state_acceleration() {
     let resp_1 = model.generate(&prompt_a, 16).expect("Generation 1 failed");
     assert!(!resp_1.is_empty());
     assert!(
-        model.prefix_cache.len() >= 1,
+        !model.prefix_cache.is_empty(),
         "PrefixCache must have cached at least 1 chunk"
     );
 
