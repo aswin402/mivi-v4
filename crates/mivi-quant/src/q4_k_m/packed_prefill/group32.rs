@@ -1,21 +1,21 @@
 use super::{PackedError, PackedWeights, Q4_K_BLOCK_SIZE};
 
 pub(super) const GROUP_WIDTH: usize = 32;
-pub(super) const GROUPS: usize = 8;
+pub(super) const GROUPS: usize = Q4_K_BLOCK_SIZE / GROUP_WIDTH;
 
 const _: () = {
     assert!(Q4_K_BLOCK_SIZE % GROUP_WIDTH == 0);
     assert!(GROUPS == 8);
 };
 
-struct Group32Activation {
+pub(super) struct Group32Activation {
     scales: [f32; GROUPS],
     values: [i8; Q4_K_BLOCK_SIZE],
     sums: [i16; GROUPS],
 }
 
 impl Group32Activation {
-    fn pack(input: &[f32]) -> Result<Self, PackedError> {
+    pub(super) fn pack(input: &[f32]) -> Result<Self, PackedError> {
         if input.len() != Q4_K_BLOCK_SIZE {
             return Err(crate::QuantError::BufferTooSmall {
                 expected: Q4_K_BLOCK_SIZE,
@@ -57,12 +57,14 @@ impl Group32Activation {
         Ok(packed)
     }
 
-    fn reconstructed(&self) -> [f32; Q4_K_BLOCK_SIZE] {
+    pub(super) fn reconstructed(&self) -> [f32; Q4_K_BLOCK_SIZE] {
         std::array::from_fn(|i| f32::from(self.values[i]) * self.scales[i / GROUP_WIDTH])
     }
 
-    fn dot(&self, weight: &PackedWeights<'_>) -> f32 {
+    pub(super) fn dot(&self, weight: &PackedWeights<'_>) -> f32 {
         let mut result = 0.0f32;
+        // Ascending format-group order keeps the scalar combination deterministic.
+        // Each integer dot is bounded by 32 * 15 * 127; each sum by 32 * 127.
         for g in 0..GROUPS {
             let bytes = &weight.quants[(g / 2) * GROUP_WIDTH..(g / 2 + 1) * GROUP_WIDTH];
             let values = &self.values[g * GROUP_WIDTH..(g + 1) * GROUP_WIDTH];
@@ -211,6 +213,8 @@ mod tests {
                     scale_component + min_component
                 })
                 .sum::<f64>();
+            // Conservative 64-operation F32 budget includes decoded-weight and
+            // activation reconstruction rounding, affine terms and group summation.
             let gamma = 64.0 * f64::from(f32::EPSILON) / (1.0 - 64.0 * f64::from(f32::EPSILON));
             let arithmetic_bound = gamma * component_energy + 64.0 * f64::from(f32::from_bits(1));
             assert!(
