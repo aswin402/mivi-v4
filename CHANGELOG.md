@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.57] - 2026-09-30
+
+### Cumulative FFN Quantization Sensitivity (Test-Only)
+
+#### Ideas, Inspirations & Sources
+
+- **Measure accumulated error, not just isolated projection agreement**:
+  extend the captured-input walker with down-only and full-FFN recomputation
+  across executed layers. Reuse Mivi's public tile/SwiGLU APIs; eligible packed
+  projections are selected by format and dimensions, never a model name.
+  - *Sources*: Mivi's `mivi-model/src/{prefill,ssm,transformer}.rs` and
+    [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Separate arithmetic controls from quality evidence**: a non-packed complete
+  FFN-recompute walk is compared directly with production logits before measuring
+  packed effects. The outlier/mixed-precision motivation in
+  [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339) inspires caution
+  about activation packing, but this experiment neither implements that paper's
+  decomposition nor establishes its quality results for these models.
+
+#### Added
+
+- An opt-in three-fixture cumulative diagnostic for raw coding, tool-request,
+  and tool-result-continuation text. Fixtures must fit the configured single-tile
+  token budget (default/maximum 64); they are not silently truncated.
+- Down-only packing across layers and full gate/up → recomputed SwiGLU → down
+  packing across layers. Every token/output row and complete matrix is used;
+  unsupported formats explicitly use existing F32-activation inference.
+- Production baseline and non-packed FFN-recompute controls, complete executed
+  projection coverage assertions, and finite-input/output/derived-metric checks.
+  Prefix, recurrent, and KV state are reset between fixtures. No prompt/activation
+  dumps, production hooks, new dependencies, model-family branches, or new unsafe.
+- Model-free regression coverage for F32 fallback, Q4 dispatch, invalid inputs,
+  mixed-format FFN dataflow/SwiGLU recomputation, compounded control drift, and
+  non-finite relative error derived from finite zero-reference inputs.
+
+#### Measured Result and Decision
+
+- Two local GGUFs, two Rayon/inference threads, three fixtures and two cumulative
+  modes per model: **12 measured cases**. Baseline and non-packed recompute
+  logits matched production exactly on all six model/fixture combinations.
+- Relative L2 error in the final prompt token's vocabulary logits:
+
+  | Model | Raw fixture | Cumulative down-only | Cumulative full FFN |
+  |---|---|---:|---:|
+  | LFM2.5-1.2B-Instruct | Coding (21 tokens) | 3.9666% | 5.4209% |
+  | LFM2.5-1.2B-Instruct | Tool request (26 tokens) | 6.1920% | 24.4887% |
+  | LFM2.5-1.2B-Instruct | Tool result (28 tokens) | 2.6097% | 3.9666% |
+  | LFM2.5-2.6B | Coding (20 tokens) | 3.5692% | 5.0567% |
+  | LFM2.5-2.6B | Tool request (23 tokens) | 3.7911% | 4.6426% |
+  | LFM2.5-2.6B | Tool result (26 tokens) | 3.3638% | 7.0814% |
+
+- Per fixture, 1.2B down-only covers eight packed/eight fallback projections;
+  full FFN covers 40 packed/eight fallback. For 2.6B, counts are 16/14 and 76/14.
+- Greedy next-token agreement was 11/12, not a generation-quality score. In the
+  2.6B coding/down-only case the next-token ID changed **1275 → 11089**.
+  The 1.2B tool-request/full-FFN case had max absolute logit error **2.008592**
+  despite unchanged greedy choice, illustrating why one-token agreement is weak.
+- **Do not enable the prototype in production.** Arithmetic/control checks pass,
+  but cumulative error and a changed greedy token leave quality unresolved.
+  Residual-delta injection differs in floating-point rounding from direct
+  projection replacement. These are short, prefill-only raw-text sensitivity
+  tests, not chat-template/tool execution, generated-answer quality, server
+  timings, or agent-readiness validation. Production inference remains unchanged.
+
 ## [v0.2.56] - 2026-09-30
 
 ### Captured Prefill Activation Evaluation (Test-Only)

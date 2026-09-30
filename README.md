@@ -175,6 +175,30 @@ Residual-delta injection has different floating-point rounding from replacing th
 projection before the residual addition. This is single-projection sensitivity,
 **not cumulative packed inference, a quality acceptance threshold, or a speedup**.
 
+Evaluate cumulative FFN sensitivity with the separate three-fixture diagnostic:
+
+```bash
+MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
+  cargo test -p mivi-quant --release --lib --jobs 1 cumulative_prefill_evaluation \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+This runs coding, tool-request, and tool-result-continuation **raw-text fixtures**.
+It clears prefix/KV/recurrent state between prompts, checks production baseline
+and non-packed FFN-recompute controls, then measures two modes: packed down-only
+across layers, and packed gate/up → recomputed SwiGLU → packed down across layers.
+Unsupported formats explicitly use existing F32-activation inference and count
+as fallbacks. Every executed FFN and every token/output row is covered; there is
+no projection row cap. The token limit uses `MIVI_TEST_CAPTURE_TOKENS` (default
+64, maximum 64 here); incomplete fixtures fail instead of being truncated.
+
+Only fixture labels, coverage, logit metrics, and next-token IDs are printed.
+This test does not use `MIVI_TEST_CAPTURE_PROMPT` or `MIVI_TEST_MAX_ROWS`.
+Passing verifies finite computations and controls, **not acceptable packed-model
+quality**. Residual-delta rounding remains different from direct replacement;
+these are prefill-only sensitivity tests, not generated coding/tool answers,
+chat-template negotiation, server timings, or agent-readiness validation.
+
 ### 💾 Memory Footprint
 
 Runtime RSS depends on the loaded GGUF, context size, KV precision, adapters, and OS page

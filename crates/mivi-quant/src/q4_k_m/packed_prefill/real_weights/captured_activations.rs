@@ -9,6 +9,24 @@ use super::{
 use crate::{dequantize_slice, quantized_matmul_rows, GgmlType};
 use mivi_model::{LayerWeights, Model, PrefillStrategy, QuantizedTensor, TileActivations};
 
+mod cumulative;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkMode {
+    Replay,
+    Exact,
+    SingleDown(usize),
+    DownOnly,
+    FullFfn,
+    FullFfnControl,
+}
+
+#[derive(Default)]
+struct Coverage {
+    packed: usize,
+    fallback: usize,
+}
+
 #[test]
 #[ignore = "requires MIVI_TEST_MODEL; captures real prefill activations"]
 fn captured_prefill_projection_evaluation() -> EvalResult<()> {
@@ -32,22 +50,7 @@ fn evaluate() -> EvalResult<usize> {
         }
         Err(error) => return Err(error.into()),
     };
-    let mut tokens = model.tokenizer.encode(&prompt);
-    if matches!(
-        model.gguf.metadata.get("tokenizer.ggml.add_bos_token"),
-        Some(mivi_model::GgufValue::Bool(true))
-    ) {
-        let bos = model
-            .gguf
-            .metadata
-            .get("tokenizer.ggml.bos_token_id")
-            .and_then(|value| value.as_usize())
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or("GGUF requests BOS but has no valid BOS token ID")?;
-        if tokens.first() != Some(&bos) {
-            tokens.insert(0, bos);
-        }
-    }
+    let mut tokens = prompt_tokens(&model, &prompt)?;
     let original_len = tokens.len();
     tokens.truncate(max_tokens);
     if tokens.is_empty() {
@@ -60,7 +63,7 @@ fn evaluate() -> EvalResult<usize> {
     })?;
     model.generate_tokens_incremental(&tokens, 0, 0, |_, _| true)?;
     let production_logits = model.state.logits.to_vec();
-    let (tested, residual) = walk(&mut model, &tokens, row_cap, None)?;
+    let (tested, residual) = walk(&mut model, &tokens, row_cap, WalkMode::Replay)?;
     let baseline = logits(&model, &residual)?;
     let control = ProjectionError::compare(&production_logits, &baseline)?;
     println!(
@@ -87,22 +90,42 @@ fn evaluate() -> EvalResult<usize> {
             supported_shape(down.quant_type as u32, &[down.cols, down.rows]).then_some(index)
         });
     if let Some(index) = selected {
-        let (_, changed) = walk(&mut model, &tokens, row_cap, Some(index))?;
+        let (_, changed) = walk(&mut model, &tokens, row_cap, WalkMode::SingleDown(index))?;
         let changed_logits = logits(&model, &changed)?;
         let error = ProjectionError::compare(&baseline, &changed_logits)?;
         println!("layer={index} down-only residual-delta logit sensitivity: relative L2={:.6}, max abs={:.6}, greedy token {} -> {}; NOT full packed inference or a quality acceptance gate", error.relative_l2, error.max_abs, top_token(&baseline)?, top_token(&changed_logits)?);
     } else {
         println!("no supported executed down projection; no logit perturbation evaluated");
     }
-    Ok(tested)
+    Ok(tested.packed)
+}
+
+fn prompt_tokens(model: &Model, prompt: &str) -> EvalResult<Vec<u32>> {
+    let mut tokens = model.tokenizer.encode(prompt);
+    if matches!(
+        model.gguf.metadata.get("tokenizer.ggml.add_bos_token"),
+        Some(mivi_model::GgufValue::Bool(true))
+    ) {
+        let bos = model
+            .gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|value| value.as_usize())
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("GGUF requests BOS but has no valid BOS token ID")?;
+        if tokens.first() != Some(&bos) {
+            tokens.insert(0, bos);
+        }
+    }
+    Ok(tokens)
 }
 
 fn walk(
     model: &mut Model,
     tokens: &[u32],
     row_cap: usize,
-    intervention: Option<usize>,
-) -> EvalResult<(usize, Vec<f32>)> {
+    mode: WalkMode,
+) -> EvalResult<(Coverage, Vec<f32>)> {
     model.reset_context();
     let batch = tokens.len();
     let cfg = &model.config;
@@ -140,8 +163,7 @@ fn walk(
             tile.current_row_mut(row)?,
         )?;
     }
-    let mut tested = 0;
-    let mut skipped = 0;
+    let mut coverage = Coverage::default();
     for (index, layer) in model.weights.layers.iter().enumerate() {
         let ffn = match layer {
             LayerWeights::Attention(w) => {
@@ -188,11 +210,11 @@ fn walk(
             (&ffn.ffn_up_name, &ffn.w_up, false),
             (&ffn.ffn_down_name, &ffn.w_down, true),
         ] {
-            if intervention.is_some() {
+            if mode != WalkMode::Replay {
                 continue;
             }
             if !supported_shape(weight.quant_type as u32, &[weight.cols, weight.rows]) {
-                skipped += 1;
+                coverage.fallback += 1;
                 continue;
             }
             let input = if down_input {
@@ -201,11 +223,11 @@ fn walk(
                 tile.norm_mut()
             };
             replay(name, weight, &model.gguf.mmap, input, batch, row_cap)?;
-            tested += 1;
+            coverage.packed += 1;
         }
         // Isolate one down projection; subsequent layers remain F32-activation inference.
         // Perturb ALL token rows so subsequent attention/SSM sees coherent changed state.
-        if intervention == Some(index) {
+        if mode == WalkMode::SingleDown(index) {
             let mut packed = vec![
                 0.0;
                 batch
@@ -227,11 +249,24 @@ fn walk(
             let changed = residual_delta(tile.current(), tile.next(), &packed)?;
             tile.current_mut().copy_from_slice(&changed);
         }
+        if matches!(
+            mode,
+            WalkMode::DownOnly | WalkMode::FullFfn | WalkMode::FullFfnControl
+        ) {
+            let full = mode != WalkMode::DownOnly;
+            let packed = mode != WalkMode::FullFfnControl;
+            let recomputed =
+                cumulative::recompute(&mut tile, ffn, &model.gguf.mmap, batch, full, packed)?;
+            coverage.packed += recomputed.packed;
+            coverage.fallback += recomputed.fallback;
+            let changed = residual_delta(tile.current(), tile.next(), &recomputed.output)?;
+            tile.current_mut().copy_from_slice(&changed);
+        }
     }
-    if intervention.is_none() {
-        println!("captured Q4 projections={tested}, unsupported FFN projections={skipped}; no timing/agent readiness claim");
+    if mode == WalkMode::Replay {
+        println!("captured Q4 projections={}, unsupported FFN projections={}; no timing/agent readiness claim", coverage.packed, coverage.fallback);
     }
-    Ok((tested, tile.final_current_row(batch)?.to_vec()))
+    Ok((coverage, tile.final_current_row(batch)?.to_vec()))
 }
 
 fn replay(
