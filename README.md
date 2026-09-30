@@ -185,12 +185,17 @@ MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
 
 This runs coding, tool-request, and tool-result-continuation **raw-text fixtures**.
 It clears prefix/KV/recurrent state between prompts, checks production baseline
-and non-packed FFN-recompute controls, then measures two modes: packed down-only
-across layers, and packed gate/up → recomputed SwiGLU → packed down across layers.
+and non-packed FFN-recompute controls, then measures four modes across layers:
+packed down-only, gate-only, up-only, and complete packed FFN. Gate-only/up-only
+recompute both input projections and SwiGLU, but pack only the selected projection;
+the other input projection and down use the existing F32-activation path.
 Unsupported formats explicitly use existing F32-activation inference and count
-as fallbacks. Every executed FFN and every token/output row is covered; there is
-no projection row cap. The token limit uses `MIVI_TEST_CAPTURE_TOKENS` (default
-64, maximum 64 here); incomplete fixtures fail instead of being truncated.
+as fallbacks. The fallback count also includes deliberately unselected projections,
+even when their weight format is eligible for packing; it is not a count of
+unsupported weights alone. Every executed FFN and every token/output row is
+covered; there is no projection row cap. The token limit uses
+`MIVI_TEST_CAPTURE_TOKENS` (default/maximum 64 here); incomplete fixtures fail
+instead of being truncated.
 
 Only fixture labels, coverage, logit metrics, and next-token IDs are printed.
 This test does not use `MIVI_TEST_CAPTURE_PROMPT` or `MIVI_TEST_MAX_ROWS`.
@@ -214,6 +219,7 @@ The observer lives entirely in the test-only walker, not production inference.
 It stores only the final token's residual per baseline layer and aggregate
 statistics; prompt text and activation/residual arrays are not dumped.
 
+The trace runs the same four packing modes as the corpus diagnostic.
 All-layer non-packed controls and final production logits must agree. Each mode
 reports propagated residual error **after the ordinary layer computation**,
 post-injection error, and the new residual delta's magnitude. These are residual

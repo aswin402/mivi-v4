@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.59] - 2026-10-01
+
+### Isolated Gate/Up Packing Sensitivity (Test-Only)
+
+#### Ideas, Inspirations & Sources
+
+- **Change one projection's activation packing at a time**: extend the existing
+  cumulative FFN experiment with gate-only and up-only modes. Both input
+  projections and SwiGLU are recomputed, but only the selected eligible Q4
+  projection packs its activations; the other projection and down retain the
+  existing F32-activation matmul. Weight tensors/quantization are unchanged.
+  - *Sources*: Mivi's preceding cumulative/layer-wise diagnostics, public
+    `swiglu_rows` and tile APIs, and the
+    [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Treat precision sensitivity as an empirical question**: mixed precision is
+  a research motivation, not a guarantee that a particular projection should
+  always be excluded from packing.
+  - *Inspiration/source*: [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339).
+    This experiment does not implement that paper's feature-wise outlier
+    decomposition or establish its quality results for these small models.
+
+#### Added
+
+- Private typed gate/up packing selection, shared by the three-fixture corpus
+  and layer-wise trace. Existing down-only, full packed FFN, and non-packed
+  controls remain available. Unsupported selected projections fall back through
+  the existing format/shape checks, never by model name or layer index.
+- A model-free two-row Q4 regression verifies complete outputs against separately
+  selected gate/up references, distinct fixture outputs, and one packed/two
+  non-packed projections. An invalid gate/up isolation without full FFN
+  recomputation is rejected. Both behaviors were observed failing before their
+  implementation.
+- Corpus coverage expands to four modes on each of three short raw fixtures;
+  the layer trace uses the same four modes. Controls and full-row residual
+  injection remain unchanged. No new dependencies, unsafe code, production
+  instrumentation, or production packing rollout.
+
+#### Measured Results and Scope
+
+- Local 1.2B Q4_K_M GGUF, two inference/Rayon threads, complete matrices and
+  all token rows. All three production-baseline and non-packed FFN-recompute
+  controls matched exactly. Gate-only/up-only each packed 16 projections and
+  used 32 non-packed projections; down-only packed 8/used 8 non-packed;
+  full FFN packed 40/used 8 non-packed.
+- The 2.6B GGUF's three controls also matched exactly. Gate-only/up-only each
+  packed 30 projections/used 60 non-packed; down-only packed 16/used 14
+  non-packed; full FFN packed 76/used 14 non-packed. Non-packed counts include
+  deliberate precision choices, not just unsupported formats.
+- Final vocabulary-logit relative L2, percentages (not quality scores):
+
+  | Model | Raw fixture | Down only | Gate only | Up only | Full FFN |
+  |-------|-------------|-----------|-----------|---------|----------|
+  | 1.2B | coding | 3.9666% | 3.9644% | 4.2797% | 5.4209% |
+  | 1.2B | tool-request | 6.1920% | 5.9338% | 5.6856% | 24.4887% |
+  | 1.2B | tool-result | 2.6097% | 2.6439% | 7.6851% | 3.9666% |
+  | 2.6B | coding | 3.5692% | 6.8320% | 4.2627% | 5.0567% |
+  | 2.6B | tool-request | 3.7911% | 2.0298% | 2.7732% | 4.6426% |
+  | 2.6B | tool-result | 3.3638% | 5.1426% | 7.2400% | 7.0814% |
+
+- New gate/up maximum absolute logit errors (coding, request, result): 1.2B gate
+  **0.494559 / 0.741239 / 0.125933**, up
+  **0.508871 / 1.127241 / 0.515253**. Up-only changes the 1.2B tool-result greedy
+  next-token ID **509 → 508**; other 1.2B modes retain the baseline choice.
+- 2.6B gate maximum absolute errors are **0.855800 / 0.348042 / 0.510609**;
+  up errors are **0.645342 / 0.445877 / 0.559045**. Gate/up retain its greedy
+  choices on all three fixtures. The existing down-only coding change
+  **1275 → 11089** reproduces v0.2.57. Twenty-four model/fixture/mode cases
+  completed across both models; these do not count repeated trace runs as
+  additional independent fixtures.
+- The default tool-request layer trace passed on both models, with exact
+  production/per-layer non-packed control agreement and matching corpus logits.
+  In 1.2B, gate-only/up-only both have their largest relative-residual increase
+  in layer 15 (SSM-labelled), **2.1208 / 5.2765 percentage points**. In 2.6B,
+  gate-only peaks in layer 2 (attention-labelled), **0.4749 percentage points**;
+  up-only peaks in layer 13 (attention-labelled), **0.6315 percentage points**.
+  These are increases in relative residual error with changing denominators,
+  not intermediate vocabulary logits or causal layer-defect diagnoses.
+- Isolated errors cannot simply be added to predict the full-FFN error:
+  SwiGLU and downstream layer propagation are nonlinear, and each mode follows
+  its own perturbed activation trajectory. A single projection can be worse
+  than full packing on a particular fixture. These are short raw prefill
+  diagnostics with residual-delta rounding, not generated tool calls or agent
+  correctness, timing improvements, or a packing quality acceptance threshold.
+  No hardcoded model/projection exclusion or production rollout is justified.
+
+#### Verification
+
+- Independent read-only implementation review found no issues. Scoped quant
+  library tests: **34 passed**, five opt-in tests ignored. The corpus and
+  layer-trace opt-in tests passed separately on both local GGUFs.
+- Scoped Clippy passed with the existing style-lint allowances; package
+  formatting and diff-whitespace checks passed. Cargo jobs/test threads stayed
+  at one; inference/Rayon threads stayed at two. No full-workspace checks,
+  builds, or tests were run, and normal dependencies are unchanged.
+
 ## [v0.2.58] - 2026-09-30
 
 ### Layer-Wise Packed FFN Error Localization (Test-Only)

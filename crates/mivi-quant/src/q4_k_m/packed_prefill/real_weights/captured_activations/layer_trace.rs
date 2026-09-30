@@ -217,6 +217,8 @@ fn trace() -> EvalResult<usize> {
     }
     for (mode, name) in [
         (WalkMode::DownOnly, "cumulative-down"),
+        (WalkMode::GateOnly, "cumulative-gate"),
+        (WalkMode::UpOnly, "cumulative-up"),
         (WalkMode::FullFfn, "cumulative-full-ffn"),
     ] {
         let mut seen = 0;

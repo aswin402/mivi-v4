@@ -80,7 +80,7 @@ pub(super) fn recompute(
     mmap: &[u8],
     batch: usize,
     full: bool,
-    packed: bool,
+    packing: FfnPacking,
 ) -> EvalResult<Recomputed> {
     let projections = FfnProjections {
         gate: Projection::from_tensor(&ffn.w_gate, mmap)?,
@@ -88,13 +88,85 @@ pub(super) fn recompute(
         down: Projection::from_tensor(&ffn.w_down, mmap)?,
     };
     let normalized = tile.norm_mut().to_vec();
-    projections.recompute(&normalized, tile.gate(), batch, full, packed)
+    projections.recompute(&normalized, tile.gate(), batch, full, packing)
 }
 
 struct FfnProjections<'a> {
     gate: Projection<'a>,
     up: Projection<'a>,
     down: Projection<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum FfnPacking {
+    None,
+    All,
+    GateOnly,
+    UpOnly,
+}
+
+#[test]
+fn isolated_gate_up_packing_matches_selected_projection_reference() {
+    let width = super::Q4_K_BLOCK_SIZE;
+    let gate_weights = crate::q4_k_m::packed_prefill::fixture_weights(width, width, 5);
+    let up_weights = crate::q4_k_m::packed_prefill::fixture_weights(width, width, 9);
+    let down_weights = crate::q4_k_m::packed_prefill::fixture_weights(width, width, 13);
+    let projections = FfnProjections {
+        gate: Projection {
+            kind: GgmlType::Q4_K,
+            weights: &gate_weights,
+            rows: width,
+            cols: width,
+        },
+        up: Projection {
+            kind: GgmlType::Q4_K,
+            weights: &up_weights,
+            rows: width,
+            cols: width,
+        },
+        down: Projection {
+            kind: GgmlType::Q4_K,
+            weights: &down_weights,
+            rows: width,
+            cols: width,
+        },
+    };
+    let batch = 2;
+    let input: Vec<_> = (0..batch * width)
+        .map(|i| ((i % 31) as f32 - 15.0) / 16.0)
+        .collect();
+    let mut outputs = Vec::new();
+    for (packing, packed_gate, packed_up) in [
+        (FfnPacking::GateOnly, true, false),
+        (FfnPacking::UpOnly, false, true),
+    ] {
+        let mut gate = vec![0.0; input.len()];
+        let mut up = gate.clone();
+        let mut reference = gate.clone();
+        project(&mut gate, &projections.gate, &input, batch, packed_gate).unwrap();
+        project(&mut up, &projections.up, &input, batch, packed_up).unwrap();
+        mivi_model::swiglu_rows(&mut gate, &up, batch, width).unwrap();
+        assert!(!project(&mut reference, &projections.down, &gate, batch, false).unwrap());
+        let recomputed = projections
+            .recompute(&input, &[], batch, true, packing)
+            .unwrap();
+        assert_eq!((recomputed.packed, recomputed.fallback), (1, 2));
+        assert_eq!(recomputed.output, reference);
+        assert!(reference.iter().any(|x| *x != 0.0));
+        outputs.push(reference);
+    }
+    assert_ne!(
+        outputs[0], outputs[1],
+        "fixture must distinguish gate from up packing"
+    );
+    for packing in [FfnPacking::GateOnly, FfnPacking::UpOnly] {
+        assert!(
+            projections
+                .recompute(&input, &input, batch, false, packing)
+                .is_err(),
+            "gate/up isolation requires full FFN recomputation"
+        );
+    }
 }
 
 impl FfnProjections<'_> {
@@ -104,8 +176,11 @@ impl FfnProjections<'_> {
         original_gate: &[f32],
         batch: usize,
         full: bool,
-        packed: bool,
+        packing: FfnPacking,
     ) -> EvalResult<Recomputed> {
+        if !full && matches!(packing, FfnPacking::GateOnly | FfnPacking::UpOnly) {
+            return Err("gate/up isolation requires full FFN recomputation".into());
+        }
         if self.gate.cols != self.up.cols
             || self.gate.rows != self.up.rows
             || self.down.cols != self.gate.rows
@@ -124,11 +199,16 @@ impl FfnProjections<'_> {
                 coverage.fallback += 1;
             }
         };
+        let pack_gate = matches!(packing, FfnPacking::All | FfnPacking::GateOnly);
+        let pack_up = matches!(packing, FfnPacking::All | FfnPacking::UpOnly);
+        let pack_down = matches!(packing, FfnPacking::All);
         let gate = if full {
             let mut gate = vec![0.0; hidden_len];
             let mut up = vec![0.0; hidden_len];
-            count(project(&mut gate, &self.gate, normalized, batch, packed)?);
-            count(project(&mut up, &self.up, normalized, batch, packed)?);
+            count(project(
+                &mut gate, &self.gate, normalized, batch, pack_gate,
+            )?);
+            count(project(&mut up, &self.up, normalized, batch, pack_up)?);
             mivi_model::swiglu_rows(&mut gate, &up, batch, self.gate.rows)?;
             gate
         } else {
@@ -143,7 +223,7 @@ impl FfnProjections<'_> {
                 .checked_mul(self.down.rows)
                 .ok_or("FFN output size overflow")?
         ];
-        count(project(&mut output, &self.down, &gate, batch, packed)?);
+        count(project(&mut output, &self.down, &gate, batch, pack_down)?);
         Ok(Recomputed {
             output,
             packed: coverage.packed,
@@ -199,8 +279,8 @@ fn cumulative_projection_uses_q4_and_rejects_invalid_inputs() {
 #[ignore = "requires MIVI_TEST_MODEL; cumulative multi-prompt sensitivity"]
 fn cumulative_prefill_evaluation() -> EvalResult<()> {
     assert!(
-        evaluate_corpus()? >= 6,
-        "both modes must evaluate at least three prompts"
+        evaluate_corpus()? >= 12,
+        "all four modes must evaluate at least three prompts"
     );
     Ok(())
 }
@@ -280,7 +360,17 @@ fn cumulative_mixed_ffn_recomputes_swiglu_before_fallback_down() {
         project(&mut up, &projections.up, &input, batch, packed).unwrap();
         mivi_model::swiglu_rows(&mut expected, &up, batch, width).unwrap();
         let recomputed = projections
-            .recompute(&input, &vec![0.0; input.len()], batch, true, packed)
+            .recompute(
+                &input,
+                &vec![0.0; input.len()],
+                batch,
+                true,
+                if packed {
+                    FfnPacking::All
+                } else {
+                    FfnPacking::None
+                },
+            )
             .unwrap();
         assert_eq!(
             recomputed.output, expected,
@@ -294,15 +384,15 @@ fn cumulative_mixed_ffn_recomputes_swiglu_before_fallback_down() {
     }
     let original_gate = vec![0.25; input.len()];
     let down_only = projections
-        .recompute(&input, &original_gate, batch, false, true)
+        .recompute(&input, &original_gate, batch, false, FfnPacking::All)
         .unwrap();
     assert_eq!(down_only.output, original_gate);
     assert_eq!((down_only.packed, down_only.fallback), (0, 1));
     assert!(projections
-        .recompute(&input, &[], batch, false, true)
+        .recompute(&input, &[], batch, false, FfnPacking::All)
         .is_err());
     assert!(projections
-        .recompute(&input[..1], &original_gate, batch, true, true)
+        .recompute(&input[..1], &original_gate, batch, true, FfnPacking::All)
         .is_err());
 }
 
@@ -351,6 +441,8 @@ fn evaluate_corpus() -> EvalResult<usize> {
         println!("fixture={label}, tokens={}, baseline/production max abs={:.8}, recompute/production max abs={:.8}, recompute/walker max abs={:.8}", tokens.len(), control.max_abs, recompute_control.max_abs, walker_recompute.max_abs);
         for (mode, name) in [
             (WalkMode::DownOnly, "cumulative-down"),
+            (WalkMode::GateOnly, "cumulative-gate"),
+            (WalkMode::UpOnly, "cumulative-up"),
             (WalkMode::FullFfn, "cumulative-full-ffn"),
         ] {
             let (coverage, residual) = super::walk(&mut model, &tokens, 1, mode)?;

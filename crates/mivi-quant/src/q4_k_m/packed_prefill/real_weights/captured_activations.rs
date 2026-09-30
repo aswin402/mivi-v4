@@ -18,6 +18,8 @@ enum WalkMode {
     Exact,
     SingleDown(usize),
     DownOnly,
+    GateOnly,
+    UpOnly,
     FullFfn,
     FullFfnControl,
 }
@@ -270,12 +272,21 @@ where
         }
         if matches!(
             mode,
-            WalkMode::DownOnly | WalkMode::FullFfn | WalkMode::FullFfnControl
+            WalkMode::DownOnly
+                | WalkMode::GateOnly
+                | WalkMode::UpOnly
+                | WalkMode::FullFfn
+                | WalkMode::FullFfnControl
         ) {
             let full = mode != WalkMode::DownOnly;
-            let packed = mode != WalkMode::FullFfnControl;
+            let packing = match mode {
+                WalkMode::FullFfnControl => cumulative::FfnPacking::None,
+                WalkMode::GateOnly => cumulative::FfnPacking::GateOnly,
+                WalkMode::UpOnly => cumulative::FfnPacking::UpOnly,
+                _ => cumulative::FfnPacking::All,
+            };
             let recomputed =
-                cumulative::recompute(&mut tile, ffn, &model.gguf.mmap, batch, full, packed)?;
+                cumulative::recompute(&mut tile, ffn, &model.gguf.mmap, batch, full, packing)?;
             coverage.packed += recomputed.packed;
             coverage.fallback += recomputed.fallback;
             let changed = residual_delta(tile.current(), tile.next(), &recomputed.output)?;
