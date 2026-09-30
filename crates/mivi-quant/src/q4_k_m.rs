@@ -5,6 +5,9 @@ use half::f16;
 pub const Q4_K_BLOCK_SIZE: usize = 256;
 pub const Q4_K_BYTES: usize = 144;
 
+#[cfg(test)]
+mod packed_prefill;
+
 #[inline(always)]
 fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
     if j < 4 {

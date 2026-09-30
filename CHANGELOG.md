@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.52] - 2026-09-30
+
+### Test-Only Packed Activation Reference and Benchmark
+
+#### Ideas, Inspirations & Sources
+
+- **Evaluate packed Q4_K weights with Q8 activations before changing inference**:
+  the preceding profiler measured FFNs at about 58% of cold prefill. This safe
+  Rust experiment quantizes input blocks once, performs bounded integer dot
+  products, and applies Q4_K scale/minimum corrections without decoding entire
+  weight rows to F32.
+  - *Inspiration*: GGML Q8_K activation blocks and CPU Q4_K x Q8_K dot products.
+  - *Sources*: [llama.cpp activation quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c),
+    [CPU type traits](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-cpu/ggml-cpu.c),
+    and Mivi's existing Q4_K scale/minimum decoder.
+- **Express bounded products as i16 for compiler optimization**: 4-bit nibbles
+  times signed 8-bit activations fit in i16; reductions remain i32. This roughly
+  halved the initial prototype's measured time, but did not beat the existing
+  SIMD F32 path. No new unsafe code was introduced.
+  - *Source*: local alternating kernel benchmarks and integer-range analysis.
+
+#### Added
+
+- A `cfg(test)`-only Q4_K packed-activation reference and opt-in benchmark.
+  No production dispatch, model-specific rule, dependency, or server behavior changed.
+- Signed-scale, ties-to-even activation packing with zero-block handling and
+  rejection of non-finite inputs and unrepresentable underflowed scales.
+- Error-bound, scale/minimum correction, parallel/odd-row, zero-size, output
+  sentinel, and buffer-validation tests. Activation packing happens before
+  output mutation, so rejected input leaves output untouched.
+- The prototype's quantizer is not a bit-identical GGML codec or a new supported
+  GGUF weight format. Q6_K support and real-model quality evaluation remain future work.
+
+#### Measured Result and Decision
+
+- Synthetic Q4_K matrices, 257 output rows, two Rayon threads; timings include
+  activation packing or F32 transposition and alternate both methods:
+  - 2,048 columns, batch 32: F32 0.363–0.591ms; packed 1.096–1.150ms.
+  - 2,048 columns, batch 64: F32 0.739–0.912ms; packed 2.370–2.545ms.
+  - 8,192 columns, batch 32: F32 2.166–2.230ms; packed 4.377–4.643ms.
+  - 8,192 columns, batch 64: F32 3.824–4.213ms; packed 9.615–9.686ms.
+- Relative L2 projection error: 0.6804–0.7280%; maximum absolute error
+  3.618–8.509 for these synthetic weight scales. These are not real-model quality
+  results, and the benchmark's 5% relative-L2 gate is only an experimental guard.
+- **Do not enable this implementation for inference**: scalar/compiler-vectorized
+  packing alone is slower. Retain it as a reproducible numerical/performance
+  reference for a future architecture-specific packed integer kernel.
+
+#### Reproduce
+
+- Validation: 18 quantization tests passed in both debug and release mode;
+  all six focused prototype tests (including the ignored benchmark) passed.
+  Targeted test/library Clippy and formatting passed. Cargo used one job.
+
+```sh
+RAYON_NUM_THREADS=2 cargo test -p mivi-quant --release --lib --jobs 1 packed_prefill_benchmark -- --ignored --test-threads=1 --nocapture
+```
+
 ## [v0.2.51] - 2026-09-30
 
 ### Opt-In Attention Prefill Profiling
