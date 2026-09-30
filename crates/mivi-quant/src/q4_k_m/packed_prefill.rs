@@ -7,6 +7,138 @@
 use super::{dequantize_q4_k_m, get_scale_min_k4, Q4_K_BLOCK_SIZE, Q4_K_BYTES};
 use rayon::prelude::*;
 
+#[derive(Clone, Copy, Debug)]
+enum PackedKernel {
+    Scalar,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    Avx2(pulp::x86::V3),
+}
+
+impl PackedKernel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Self::Avx2(_) => "runtime AVX2",
+        }
+    }
+
+    fn detected() -> Self {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if let Some(simd) = pulp::x86::V3::try_new() {
+            return Self::Avx2(simd);
+        }
+        Self::Scalar
+    }
+}
+
+#[test]
+fn packed_simd_matmul_matches_scalar_shapes() {
+    for (rows, batch, cols) in [
+        (0, 3, 256),
+        (3, 0, 256),
+        (3, 32, 0),
+        (1, 1, 256),
+        (3, 9, 512),
+        (257, 32, 256),
+        (257, 64, 512),
+    ] {
+        let weights = fixture_weights(rows, cols, 47);
+        let inputs: Vec<_> = (0..batch * cols)
+            .map(|i| (i * 37 % 101) as f32 / 31.0 - 1.6)
+            .collect();
+        let mut scalar = vec![123.0; rows * batch + 1];
+        let mut simd = scalar.clone();
+        packed_matmul(&mut scalar, &weights, &inputs, batch, rows, cols).unwrap();
+        packed_matmul_with_kernel(
+            &mut simd,
+            &weights,
+            &inputs,
+            batch,
+            rows,
+            cols,
+            PackedKernel::detected(),
+        )
+        .unwrap();
+        assert_eq!(scalar, simd, "rows={rows}, batch={batch}, cols={cols}");
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline(always)]
+fn simd_nibble_dots(simd: pulp::x86::V3, bytes: &[u8], values: &[i8]) -> (i32, i32) {
+    let bytes: [u8; 32] = bytes.try_into().expect("one nibble group");
+    let raw: pulp::i8x32 = pulp::cast(bytes);
+    let mask = simd.splat_i8x32(15);
+    let low = simd.and_i8x32(raw, mask);
+    let high = simd.and_i8x32(
+        pulp::cast(simd.shr_const_u16x16::<4>(pulp::cast(raw))),
+        mask,
+    );
+    let low_values: [i8; 32] = values[..32].try_into().expect("low activations");
+    let high_values: [i8; 32] = values[32..].try_into().expect("high activations");
+    let dot = |quants, activations| {
+        // The first operand is interpreted as unsigned by maddubs. Masking
+        // ensures 0..15; adjacent sums are at most 2*15*127=3810, so the
+        // saturating i16 operation cannot saturate. Widen before reduction.
+        let pairs = simd.multiply_saturating_add_adjacent_i8x32(quants, pulp::cast(activations));
+        let lanes: [i32; 8] =
+            pulp::cast(simd.multiply_wrapping_add_adjacent_i16x16(pairs, simd.splat_i16x16(1)));
+        lanes.into_iter().sum()
+    };
+    (dot(low, low_values), dot(high, high_values))
+}
+
+#[test]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn simd_nibble_dots_match_scalar_extremes() {
+    let Some(simd) = pulp::x86::V3::try_new() else {
+        eprintln!("AVX2 unavailable; SIMD-specific test skipped");
+        return;
+    };
+    for amplitude in [-127i8, 127] {
+        let expected = 32 * 15 * i32::from(amplitude);
+        assert_eq!(
+            simd.vectorize(|| simd_nibble_dots(simd, &[255; 32], &[amplitude; 64])),
+            (expected, expected),
+            "reduction must widen before exceeding i16 range"
+        );
+    }
+    for seed in 0..256 {
+        let bytes: [u8; 32] = std::array::from_fn(|i| ((i * 37 + seed) % 256) as u8);
+        for amplitude in [-127i8, -1, 0, 1, 127] {
+            let values = [amplitude; 64];
+            let expected_low: i32 = bytes
+                .iter()
+                .map(|&q| i32::from(q & 15) * i32::from(amplitude))
+                .sum();
+            let expected_high: i32 = bytes
+                .iter()
+                .map(|&q| i32::from(q >> 4) * i32::from(amplitude))
+                .sum();
+            assert_eq!(
+                simd.vectorize(|| simd_nibble_dots(simd, &bytes, &values)),
+                (expected_low, expected_high)
+            );
+        }
+        let values: [i8; 64] = std::array::from_fn(|i| ((i * 53 + seed) % 255) as i8);
+        let expected_low: i32 = bytes
+            .iter()
+            .zip(&values[..32])
+            .map(|(&q, &x)| i32::from(q & 15) * i32::from(x))
+            .sum();
+        let expected_high: i32 = bytes
+            .iter()
+            .zip(&values[32..])
+            .map(|(&q, &x)| i32::from(q >> 4) * i32::from(x))
+            .sum();
+        assert_eq!(
+            simd.vectorize(|| simd_nibble_dots(simd, &bytes, &values)),
+            (expected_low, expected_high)
+        );
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum PackedError {
     #[error(transparent)]
@@ -94,6 +226,11 @@ impl<'a> PackedWeights<'a> {
     }
 
     fn dot(&self, input: &PackedActivation) -> f32 {
+        self.dot_with_kernel(input, PackedKernel::Scalar)
+    }
+
+    #[inline(always)]
+    fn dot_with_kernel(&self, input: &PackedActivation, kernel: PackedKernel) -> f32 {
         let mut weighted_dot = 0i32;
         let mut weighted_min = 0i32;
         for group in 0..4 {
@@ -102,16 +239,23 @@ impl<'a> PackedWeights<'a> {
             let (low_values, high_values) = values.split_at(32);
             // A nibble times a signed activation fits in i16. Express that
             // bound so the compiler can choose narrower integer operations.
-            let low: i32 = bytes
-                .iter()
-                .zip(low_values)
-                .map(|(&q, &x)| i32::from(i16::from(q & 15) * i16::from(x)))
-                .sum();
-            let high: i32 = bytes
-                .iter()
-                .zip(high_values)
-                .map(|(&q, &x)| i32::from(i16::from(q >> 4) * i16::from(x)))
-                .sum();
+            let (low, high) = match kernel {
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                PackedKernel::Avx2(simd) => simd_nibble_dots(simd, bytes, values),
+                PackedKernel::Scalar => {
+                    let low: i32 = bytes
+                        .iter()
+                        .zip(low_values)
+                        .map(|(&q, &x)| i32::from(i16::from(q & 15) * i16::from(x)))
+                        .sum();
+                    let high: i32 = bytes
+                        .iter()
+                        .zip(high_values)
+                        .map(|(&q, &x)| i32::from(i16::from(q >> 4) * i16::from(x)))
+                        .sum();
+                    (low, high)
+                }
+            };
             weighted_dot += self.scales[group * 2] * low + self.scales[group * 2 + 1] * high;
             for sub in [group * 2, group * 2 + 1] {
                 let sum = i32::from(input.sums[sub * 2]) + i32::from(input.sums[sub * 2 + 1]);
@@ -129,6 +273,27 @@ fn packed_matmul(
     batch: usize,
     rows: usize,
     cols: usize,
+) -> Result<(), PackedError> {
+    packed_matmul_with_kernel(
+        out,
+        weights,
+        inputs,
+        batch,
+        rows,
+        cols,
+        PackedKernel::Scalar,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn packed_matmul_with_kernel(
+    out: &mut [f32],
+    weights: &[u8],
+    inputs: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    kernel: PackedKernel,
 ) -> Result<(), PackedError> {
     let blocks = cols / Q4_K_BLOCK_SIZE;
     let row_bytes = blocks
@@ -152,25 +317,41 @@ fn packed_matmul(
         .map(PackedActivation::pack)
         .collect::<Result<_, _>>()?;
     let mut row_major = vec![0.0; rows * batch];
-    let compute = |row: usize, output: &mut [f32]| {
-        for block_index in 0..blocks {
-            let start = row * row_bytes + block_index * Q4_K_BYTES;
-            let weight = PackedWeights::new(&weights[start..start + Q4_K_BYTES]);
-            for (b, value) in output.iter_mut().enumerate() {
-                *value += weight.dot(&activations[b * blocks + block_index]);
-            }
-        }
+    // Enter the target-feature context once per row, not once per dot product.
+    // Unsupported CPUs retain the scalar reference, with no global ISA flags.
+    let dispatch = |row, output: &mut [f32]| match kernel {
+        PackedKernel::Scalar => packed_row(
+            row,
+            output,
+            weights,
+            &activations,
+            blocks,
+            row_bytes,
+            kernel,
+        ),
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        PackedKernel::Avx2(simd) => simd.vectorize(|| {
+            packed_row(
+                row,
+                output,
+                weights,
+                &activations,
+                blocks,
+                row_bytes,
+                kernel,
+            )
+        }),
     };
     if rows >= crate::RAYON_PARALLEL_THRESHOLD && rayon::current_num_threads() > 1 {
         row_major
             .par_chunks_mut(batch)
             .enumerate()
-            .for_each(|(row, output)| compute(row, output));
+            .for_each(|(row, output)| dispatch(row, output));
     } else {
         row_major
             .chunks_mut(batch)
             .enumerate()
-            .for_each(|(row, output)| compute(row, output));
+            .for_each(|(row, output)| dispatch(row, output));
     }
     for row in 0..rows {
         for b in 0..batch {
@@ -178,6 +359,27 @@ fn packed_matmul(
         }
     }
     Ok(())
+}
+
+// Keep the row loop inside Pulp's target-feature context; an outlined closure
+// otherwise calls SIMD wrappers across that boundary for every inner dot.
+#[inline(always)]
+fn packed_row(
+    row: usize,
+    output: &mut [f32],
+    weights: &[u8],
+    activations: &[PackedActivation],
+    blocks: usize,
+    row_bytes: usize,
+    kernel: PackedKernel,
+) {
+    for block_index in 0..blocks {
+        let start = row * row_bytes + block_index * Q4_K_BYTES;
+        let weight = PackedWeights::new(&weights[start..start + Q4_K_BYTES]);
+        for (b, value) in output.iter_mut().enumerate() {
+            *value += weight.dot_with_kernel(&activations[b * blocks + block_index], kernel);
+        }
+    }
 }
 
 #[test]
@@ -388,17 +590,40 @@ fn packed_prefill_benchmark() {
                 relative_l2.is_finite() && relative_l2 < 0.05,
                 "synthetic projection error exceeded the experiment's 5% relative L2 gate"
             );
-            for packed in [false, true, false, true] {
+            let simd_kernel = PackedKernel::detected();
+            packed_matmul_with_kernel(
+                &mut reference,
+                &weights,
+                &inputs,
+                batch,
+                rows,
+                cols,
+                simd_kernel,
+            )
+            .unwrap();
+            assert_eq!(
+                output, reference,
+                "SIMD must preserve packed reference results"
+            );
+            for (label, kernel) in [
+                ("F32", None),
+                ("packed scalar", Some(PackedKernel::Scalar)),
+                ("packed SIMD", Some(simd_kernel)),
+                ("F32", None),
+                ("packed scalar", Some(PackedKernel::Scalar)),
+                ("packed SIMD", Some(simd_kernel)),
+            ] {
                 let start = Instant::now();
                 for _ in 0..ITERS {
-                    if packed {
-                        packed_matmul(
+                    if let Some(kernel) = kernel {
+                        packed_matmul_with_kernel(
                             black_box(&mut output),
                             black_box(&weights),
                             black_box(&inputs),
                             batch,
                             rows,
                             cols,
+                            kernel,
                         )
                         .unwrap();
                     } else {
@@ -415,7 +640,7 @@ fn packed_prefill_benchmark() {
                     }
                     black_box(&output);
                 }
-                println!("  packed={packed}: {:.3} ms/matmul (includes activation packing or F32 transposition)", start.elapsed().as_secs_f64() * 1000.0 / ITERS as f64);
+                println!("  {label} ({}): {:.3} ms/matmul (includes activation packing or F32 transposition)", kernel.map_or("existing production path", PackedKernel::label), start.elapsed().as_secs_f64() * 1000.0 / ITERS as f64);
             }
         }
     }

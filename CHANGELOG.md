@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.53] - 2026-09-30
+
+### Test-Only Safe SIMD Packed Dot Experiment
+
+#### Ideas, Inspirations & Sources
+
+- **Evaluate runtime SIMD without adding handwritten unsafe code**: build on
+  v0.2.52's packed Q4_K activation reference using Pulp's safe CPU-feature tokens
+  and AVX2 integer multiply-add wrappers. Pulp is a dev-dependency only, with
+  `std` and `x86-v3` features; unsupported CPUs use the scalar reference.
+  - *Inspiration and sources*: [Pulp safe SIMD abstraction](https://docs.rs/pulp/0.22.3/pulp/),
+    [Pulp V3 source](https://docs.rs/pulp/0.22.3/src/pulp/x86/v3.rs.html),
+    and [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Keep the hot loop within the SIMD target-feature context**: explicitly
+  inline the row loop into Pulp's runtime dispatch. Local benchmark time fell
+  from about 6.3ms to 0.9ms for 257 rows, 2,048 columns, batch 32, but still did
+  not beat the existing F32 kernel. This is experimental evidence, not a claim
+  that all dispatch implementations have the same overhead.
+  - *Sources*: local before/after benchmarks and Pulp's vectorization API.
+
+#### Added
+
+- Test-only SIMD low/high-nibble integer dot products. Adjacent products are
+  bounded below i16 saturation; reductions widen to i32 before summation.
+- Exact scalar/SIMD comparisons across every byte seed, signed activation
+  extremes, all-15 nibbles whose sum exceeds i16, odd/parallel output rows,
+  multiple weight blocks, batch tails, zero dimensions, and output sentinels.
+- Alternating F32, scalar-packed, and SIMD-packed benchmark passes, including
+  activation packing, allocation, and output transposition. No production
+  dispatch, new model-specific rules, or server behavior changed.
+
+#### Measured Result and Decision
+
+- Synthetic Q4_K matrices, 257 output rows, two Rayon threads; final pre-release
+  benchmark ranges in milliseconds per full matrix multiplication:
+
+  | Columns | Batch | Existing F32 | Packed scalar | Packed SIMD |
+  | --- | --- | --- | --- | --- |
+  | 2,048 | 32 | 0.449–0.503 | 1.030–1.104 | 0.857–0.878 |
+  | 2,048 | 64 | 0.816–0.857 | 1.910–2.341 | 1.661–1.778 |
+  | 8,192 | 32 | 1.796–2.098 | 4.488–4.663 | 3.558–3.772 |
+  | 8,192 | 64 | 3.923–4.577 | 9.377–9.411 | 7.838–7.903 |
+
+- SIMD output exactly matches the scalar packed experiment on tested fixtures.
+  Relative L2 error versus F32 remains 0.6804–0.7280%; real-model quality has not
+  been evaluated, and these synthetic results do not establish agent readiness.
+- **Keep inference on the existing F32 path**: packed SIMD remains slower.
+  The next performance gate is batch/cache tiling that reuses weight vectors,
+  followed by real-model numerical validation only if it beats F32.
+
+#### Validation
+
+- Focused `mivi-quant` release suite, including the opt-in benchmark: 21 passed.
+- Cargo operations use one job; tests use one test thread and two Rayon threads.
+- Production dependency-tree inspection confirms Pulp is absent from normal
+  `mivi-quant` dependencies. No full-workspace build, check, or test was run.
+
 ## [v0.2.52] - 2026-09-30
 
 ### Test-Only Packed Activation Reference and Benchmark
