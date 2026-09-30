@@ -1,6 +1,6 @@
 # Group-32 Activation Packing Experiment
 
-Status: conversational design approved; written-spec review pending.
+Status: written specification approved by the user; implementation pending.
 
 ## Goal and evidence
 
