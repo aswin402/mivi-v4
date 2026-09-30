@@ -680,8 +680,24 @@ impl KvCache {
 
     /// Export the KV cache memory up to `pos` tokens for state snapshotting.
     pub fn export_state(&self, pos: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        self.export_state_range(0, pos.min(self.max_seq_len))
+    }
+
+    /// Export only the token interval `[start_pos, start_pos + tokens)`.
+    /// Layout and packed precision are identical to a standalone state export.
+    pub fn export_state_range(
+        &self,
+        start_pos: usize,
+        tokens: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        if start_pos > self.max_seq_len || tokens > self.max_seq_len - start_pos {
+            return Err(KvError::ContextOverflow {
+                pos: start_pos.saturating_add(tokens),
+                max: self.max_seq_len,
+            });
+        }
         let n_alloc = self.n_allocated_layers();
-        let target_pos = pos.min(self.max_seq_len);
+        let target_pos = tokens;
 
         match self.precision {
             KvPrecision::F32 => {
@@ -689,7 +705,7 @@ impl KvCache {
                 let mut v_out = Vec::with_capacity(n_alloc * target_pos * self.kv_dim);
 
                 for cache_layer in 0..n_alloc {
-                    let start = cache_layer * self.max_seq_len * self.kv_dim;
+                    let start = (cache_layer * self.max_seq_len + start_pos) * self.kv_dim;
                     let end = start + target_pos * self.kv_dim;
                     if end <= self.k_cache.len() {
                         k_out.extend_from_slice(&self.k_cache[start..end]);
@@ -712,7 +728,7 @@ impl KvCache {
                 };
 
                 for cache_layer in 0..n_alloc {
-                    let start = cache_layer * self.max_seq_len * bpt;
+                    let start = (cache_layer * self.max_seq_len + start_pos) * bpt;
                     let end = start + target_pos * bpt;
                     let dst_start = cache_layer * target_pos * bpt;
                     let dst_end = dst_start + target_pos * bpt;
@@ -794,10 +810,20 @@ impl KvCache {
         }
     }
 
-    /// Import KV cache data at a specific absolute position without resetting current_pos.
-    ///
-    /// Copies `pos` tokens of cached KV data into the active KV cache at `target_pos`.
-    /// Does NOT update current_pos. Used for continuation KV reuse across agent steps.
+    /// Import a token interval and set the active position to the interval's end.
+    pub fn import_state_range(
+        &mut self,
+        start_pos: usize,
+        tokens: usize,
+        k_data: &[f32],
+        v_data: &[f32],
+    ) -> Result<()> {
+        self.import_state_at(start_pos, tokens, k_data, v_data)?;
+        self.current_pos = start_pos + tokens;
+        Ok(())
+    }
+
+    /// Import a token interval without updating the active sequence position.
     pub fn import_state_at(
         &mut self,
         target_pos: usize,
@@ -891,6 +917,46 @@ impl KvCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_ranges_roundtrip_all_precisions_and_selective_layers() {
+        for precision in [
+            KvPrecision::F32,
+            KvPrecision::Q8_0,
+            KvPrecision::TurboQuant4,
+            KvPrecision::TurboQuant2,
+        ] {
+            let mut source =
+                KvCache::try_new_selective_with_precision(3, 12, 64, &[0, 2], precision).unwrap();
+            let mut restored =
+                KvCache::try_new_selective_with_precision(3, 12, 64, &[0, 2], precision).unwrap();
+            for pos in 0..12 {
+                for layer in [0, 2] {
+                    let k: Vec<f32> = (0..64).map(|i| ((i + pos) % 17) as f32 * 0.125).collect();
+                    let v: Vec<f32> = (0..64).map(|i| ((i + layer) % 13) as f32 * -0.25).collect();
+                    source.store(layer, pos, &k, &v).unwrap();
+                }
+            }
+            for start in [0, 3, 6, 9] {
+                let (k, v) = source.export_state_range(start, 3).unwrap();
+                restored.import_state_range(start, 3, &k, &v).unwrap();
+            }
+            assert_eq!(restored.current_pos(), 12);
+            let (expected_k, expected_v) = source.export_state(12).unwrap();
+            let (actual_k, actual_v) = restored.export_state(12).unwrap();
+            // Packed quantized bytes may encode NaNs as f32 carriers.
+            assert!(actual_k
+                .iter()
+                .zip(&expected_k)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
+            assert!(actual_v
+                .iter()
+                .zip(&expected_v)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
+            assert!(source.export_state_range(10, 3).is_err());
+            assert!(restored.import_state_range(10, 3, &[], &[]).is_err());
+        }
+    }
 
     #[test]
     fn test_kv_cache_overflow() {

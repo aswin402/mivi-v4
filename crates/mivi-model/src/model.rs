@@ -7,8 +7,10 @@ use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve
 use crate::lora::ActiveAdapters;
 use crate::prefill::TileActivations;
 use crate::sampler::Sampler;
-use crate::ssm::{ssm_forward, ssm_forward_tile};
-use crate::transformer::{attention_forward, attention_forward_tile};
+use crate::ssm::{ssm_forward, ssm_forward_tile, ssm_forward_tile_profiled, SsmStageProfile};
+use crate::transformer::{
+    attention_forward, attention_forward_tile_profiled, AttentionStageProfile,
+};
 use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
 use mivi_kv::{compute_chunk_hash, KvCache};
@@ -55,7 +57,9 @@ pub struct ForwardProfileSnapshot {
     pub tokens: usize,
     pub embedding: Duration,
     pub attention: Duration,
+    pub attention_stages: AttentionStageProfile,
     pub ssm: Duration,
+    pub ssm_stages: SsmStageProfile,
     pub logits: Duration,
 }
 
@@ -266,7 +270,14 @@ impl Model {
         ssm: Duration,
         logits: Duration,
     ) {
-        self.record_forward_profile_batch(1, embedding, attention, ssm, logits);
+        self.record_forward_profile_batch(
+            1,
+            embedding,
+            attention,
+            ssm,
+            SsmStageProfile::default(),
+            logits,
+        );
     }
 
     #[inline]
@@ -276,6 +287,7 @@ impl Model {
         embedding: Duration,
         attention: Duration,
         ssm: Duration,
+        ssm_stages: SsmStageProfile,
         logits: Duration,
     ) {
         if let Some(profile) = self.forward_profile.as_mut() {
@@ -283,6 +295,7 @@ impl Model {
             profile.embedding += embedding;
             profile.attention += attention;
             profile.ssm += ssm;
+            profile.ssm_stages.add_assign(ssm_stages);
             profile.logits += logits;
         }
     }
@@ -533,38 +546,29 @@ impl Model {
                 let _ = std::io::stdout().flush();
             }
 
-            // Record a snapshot exactly at each prefix-cache chunk boundary.
-            if start_pos == 0
-                && (cur_pos + 1) % mivi_kv::PREFIX_CHUNK_SIZE == 0
-                && (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
-            {
-                let chunk_idx = (cur_pos + 1) / mivi_kv::PREFIX_CHUNK_SIZE - 1;
-                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
-                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
-
-                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(cur_pos + 1) {
-                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
-                    let snapshot = mivi_kv::HybridStateSnapshot::new(
-                        cur_pos + 1,
-                        cached_standalone_hash,
-                        k_exp,
-                        v_exp,
-                        conv_exp,
-                        ssm_exp,
-                    );
-
-                    *chained_hash = self.prefix_cache.insert_chunk(
-                        *chained_hash,
-                        &cached_tokens,
-                        chunk_idx,
-                        snapshot,
-                    );
-                }
+            if start_pos == 0 && (cur_pos + 1) % self.prefix_cache.chunk_size() == 0 {
+                *chained_hash =
+                    self.cache_prefill_boundary(prompt_tokens, cur_pos + 1, *chained_hash);
             }
         }
         Ok(true)
+    }
+
+    fn cache_prefill_boundary(&mut self, tokens: &[u32], end: usize, prev_hash: u64) -> u64 {
+        let size = self.prefix_cache.chunk_size();
+        let start = end - size;
+        let (chunk_tokens, standalone_hash) = cache_chunk_tokens(&tokens[start..end]);
+        let hash = compute_chunk_hash(prev_hash, &chunk_tokens);
+        if let Ok((k, v)) = self.kv_cache.export_state_range(start, size) {
+            let (conv, hidden) = self.state.export_ssm_states();
+            let state = mivi_kv::HybridStateSnapshot::new(end, standalone_hash, k, v, conv, hidden);
+            // A missing ancestor or budget eviction simply leaves this prefix
+            // uncached. Continue hashing the real preceding token sequence.
+            let _ =
+                self.prefix_cache
+                    .insert_delta_chunk(prev_hash, &chunk_tokens, start / size, state);
+        }
+        hash
     }
 
     fn embed_prefill_tile(
@@ -660,6 +664,7 @@ impl Model {
         )
         .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
         let mut cursor = start_prefill_idx;
+        let mut last_progress_report = start_prefill_idx;
 
         while cursor < n_prompt {
             if should_cancel() {
@@ -669,8 +674,8 @@ impl Model {
             let mut end = cursor.saturating_add(tile_capacity).min(n_prompt);
             if start_pos == 0 {
                 let absolute_start = start_pos + cursor;
-                let next_boundary = ((absolute_start / mivi_kv::PREFIX_CHUNK_SIZE) + 1)
-                    * mivi_kv::PREFIX_CHUNK_SIZE;
+                let chunk_size = self.prefix_cache.chunk_size();
+                let next_boundary = ((absolute_start / chunk_size) + 1) * chunk_size;
                 let boundary_index = next_boundary.saturating_sub(start_pos).min(n_prompt);
                 end = end.min(boundary_index.max(cursor + 1));
             }
@@ -684,6 +689,8 @@ impl Model {
             let absolute_start = start_pos + cursor;
             let mut attention_elapsed = Duration::ZERO;
             let mut ssm_elapsed = Duration::ZERO;
+            let mut ssm_stage_profile = SsmStageProfile::default();
+            let mut attention_stage_profile = AttentionStageProfile::default();
 
             for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
                 match layer {
@@ -698,13 +705,14 @@ impl Model {
                             adapters: &self.active_adapters,
                             rope: &self.rope_cache,
                         };
-                        attention_forward_tile(
+                        attention_forward_tile_profiled(
                             &mut tile,
                             &mut self.state,
                             &mut self.kv_cache,
                             &params,
                             absolute_start,
                             rows,
+                            profile_enabled.then_some(&mut attention_stage_profile),
                         )?;
                         if let Some(start) = stage_start {
                             attention_elapsed += start.elapsed();
@@ -719,7 +727,17 @@ impl Model {
                             config: &self.config,
                             adapters: &self.active_adapters,
                         };
-                        ssm_forward_tile(&mut tile, &mut self.state, &params, rows)?;
+                        if profile_enabled {
+                            ssm_forward_tile_profiled(
+                                &mut tile,
+                                &mut self.state,
+                                &params,
+                                rows,
+                                Some(&mut ssm_stage_profile),
+                            )?;
+                        } else {
+                            ssm_forward_tile(&mut tile, &mut self.state, &params, rows)?;
+                        }
                         if let Some(start) = stage_start {
                             ssm_elapsed += start.elapsed();
                         }
@@ -743,10 +761,17 @@ impl Model {
                 embedding_elapsed,
                 attention_elapsed,
                 ssm_elapsed,
+                ssm_stage_profile,
                 logits_elapsed,
             );
+            if let Some(profile) = self.forward_profile.as_mut() {
+                profile.attention_stages.add_assign(attention_stage_profile);
+            }
 
-            if n_prompt >= 500 && end % 500 == 0 {
+            if n_prompt >= 500
+                && (end.saturating_sub(last_progress_report) >= 500 || end == n_prompt)
+            {
+                last_progress_report = end;
                 use std::io::Write;
                 let pct = (end * 100) / n_prompt;
                 println!(
@@ -757,32 +782,9 @@ impl Model {
             }
 
             let boundary_pos = start_pos + end;
-            if start_pos == 0
-                && boundary_pos % mivi_kv::PREFIX_CHUNK_SIZE == 0
-                && boundary_pos / mivi_kv::PREFIX_CHUNK_SIZE <= mivi_kv::DEFAULT_MAX_CACHED_CHUNKS
-            {
-                let chunk_idx = boundary_pos / mivi_kv::PREFIX_CHUNK_SIZE - 1;
-                let chunk_start = chunk_idx * mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_end = chunk_start + mivi_kv::PREFIX_CHUNK_SIZE;
-                let chunk_tokens = &prompt_tokens[chunk_start..chunk_end];
-                let (cached_tokens, cached_standalone_hash) = cache_chunk_tokens(chunk_tokens);
-                if let Ok((k_exp, v_exp)) = self.kv_cache.export_state(boundary_pos) {
-                    let (conv_exp, ssm_exp) = self.state.export_ssm_states();
-                    let snapshot = mivi_kv::HybridStateSnapshot::new(
-                        boundary_pos,
-                        cached_standalone_hash,
-                        k_exp,
-                        v_exp,
-                        conv_exp,
-                        ssm_exp,
-                    );
-                    chained_hash = self.prefix_cache.insert_chunk(
-                        chained_hash,
-                        &cached_tokens,
-                        chunk_idx,
-                        snapshot,
-                    );
-                }
+            if start_pos == 0 && boundary_pos % self.prefix_cache.chunk_size() == 0 {
+                chained_hash =
+                    self.cache_prefill_boundary(prompt_tokens, boundary_pos, chained_hash);
             }
             cursor = end;
         }
@@ -969,34 +971,23 @@ impl Model {
         let mut chained_hash = 0u64;
 
         if start_pos == 0 {
-            if let Some((matched_len, chunk)) = self.prefix_cache.find_longest_prefix(prompt_tokens)
+            // Always leave the final token unprocessed so logits are rebuilt
+            // from the state BEFORE that token, especially for recurrent models.
+            let reusable_tokens = &prompt_tokens[..n_prompt.saturating_sub(1)];
+            if let Ok(Some(restored)) = self
+                .prefix_cache
+                .restore_longest_prefix(reusable_tokens, &mut self.kv_cache)
             {
-                if matched_len > 0
-                    && matched_len <= prompt_tokens.len()
-                    && self
-                        .kv_cache
-                        .import_state(matched_len, &chunk.state.k_cache, &chunk.state.v_cache)
-                        .is_ok()
-                {
-                    self.state.import_ssm_states(
-                        &chunk.state.ssm_conv_states,
-                        &chunk.state.ssm_hidden_states,
-                    );
-                    start_prefill_idx = matched_len;
-                    chained_hash = chunk.hash;
-                }
+                self.state
+                    .import_ssm_states(&restored.ssm_conv_states, &restored.ssm_hidden_states);
+                start_prefill_idx = restored.matched_tokens;
+                chained_hash = restored.hash;
             }
         }
 
         // Suffix snapshots are not reused here. A hybrid KV/SSM state depends on the
         // complete preceding context, so matching token bytes alone cannot establish
         // that a snapshot is causally valid for this continuation.
-
-        // If the entire prompt matched the prefix cache, we only need to compute the last token's forward step
-        // to populate the logits for the initial generation step.
-        if start_pos == 0 && start_prefill_idx >= n_prompt && n_prompt > 0 {
-            start_prefill_idx = n_prompt - 1;
-        }
 
         // 2. Prefill new prompt tokens (skipping already-cached prefix tokens)
         if !self.run_prefill(
@@ -1291,6 +1282,96 @@ fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> 
 
 #[cfg(test)]
 mod prefix_cache_integration_tests {
+    #[test]
+    #[ignore = "requires MIVI_TEST_MODEL; compares profiling on/off"]
+    fn attention_tile_profile_is_opt_in_and_resets() {
+        let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
+        let mut model = super::Model::load(std::path::Path::new(&model_path)).unwrap();
+        model
+            .set_prefill_strategy(super::PrefillStrategy::Chunked { tile_tokens: 64 })
+            .unwrap();
+        let tokens: Vec<u32> = (0..64)
+            .map(|i| ((i % (model.config.vocab_size - 1)) + 1) as u32)
+            .collect();
+        assert!(model.forward_profile().is_none());
+        model
+            .generate_tokens_incremental(&tokens, 0, 0, |_, _| true)
+            .unwrap();
+        let logits = model.state.logits.clone();
+        let conv = model.state.conv_states.clone();
+        let kv = model.kv_cache.export_state(tokens.len()).unwrap();
+
+        model.prefix_cache.clear();
+        model.reset_context();
+        model.enable_forward_profile();
+        model
+            .generate_tokens_incremental(&tokens, 0, 0, |_, _| true)
+            .unwrap();
+        assert_eq!(model.state.logits, logits);
+        assert_eq!(model.state.conv_states, conv);
+        assert_eq!(model.kv_cache.export_state(tokens.len()).unwrap(), kv);
+        let profile = model.forward_profile().unwrap();
+        assert_eq!(profile.tokens, tokens.len());
+        assert!(profile.attention_stages.total() <= profile.attention);
+        if model
+            .config
+            .block_types
+            .contains(&super::BlockType::Attention)
+        {
+            assert!(!profile.attention_stages.total().is_zero());
+        }
+        model.reset_forward_profile();
+        assert_eq!(
+            model.forward_profile(),
+            Some(super::ForwardProfileSnapshot::default())
+        );
+        model.disable_forward_profile();
+        assert!(model.forward_profile().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires MIVI_TEST_MODEL; compares cold and restored model states"]
+    fn test_delta_prefix_reuse_matches_cold_inference() {
+        let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
+        let mut model = super::Model::load(std::path::Path::new(&model_path)).unwrap();
+        model
+            .set_prefill_strategy(super::PrefillStrategy::Chunked { tile_tokens: 64 })
+            .unwrap();
+        model.sampler.config.temperature = 0.0;
+        let lengths = std::env::var("MIVI_TEST_PROMPT_LEN")
+            .map(|value| vec![value.parse::<usize>().unwrap()])
+            .unwrap_or_else(|_| vec![64, 128, 129, 192]);
+        for len in lengths {
+            let tokens: Vec<u32> = (0..len)
+                .map(|i| ((i % (model.config.vocab_size - 1)) + 1) as u32)
+                .collect();
+            model.prefix_cache.clear();
+            model.reset_context();
+            model
+                .generate_tokens_incremental(&tokens, 0, 0, |_, _| true)
+                .unwrap();
+            let expected_logits = model.state.logits.clone();
+            let expected_conv = model.state.conv_states.clone();
+            let expected_kv = model.kv_cache.export_state(len).unwrap();
+            model.reset_context();
+            model
+                .generate_tokens_incremental(&tokens, 0, 0, |_, _| true)
+                .unwrap();
+            assert_eq!(model.current_pos(), len);
+            assert!(
+                model.kv_cache.export_state(len).unwrap() == expected_kv,
+                "KV mismatch at {len}"
+            );
+            assert!(
+                model.state.conv_states == expected_conv,
+                "SSM mismatch at {len}"
+            );
+            assert!(
+                model.state.logits == expected_logits,
+                "logits mismatch at {len}"
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -1354,7 +1435,12 @@ mod prefix_cache_integration_tests {
             tokens: 3,
             embedding: std::time::Duration::from_millis(1),
             attention: std::time::Duration::from_millis(2),
+            attention_stages: AttentionStageProfile {
+                causal_attention: std::time::Duration::from_millis(2),
+                ..AttentionStageProfile::default()
+            },
             ssm: std::time::Duration::from_millis(3),
+            ssm_stages: SsmStageProfile::default(),
             logits: std::time::Duration::from_millis(4),
         };
 

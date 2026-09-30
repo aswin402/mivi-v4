@@ -1,9 +1,10 @@
-//! Chunk-based prefix caching for zero-latency prompt reuse and TTFT optimization.
+//! Chunk-based prefix caching for prompt reuse and TTFT optimization.
 //!
 //! Inspired by LMCache, this module breaks token streams into fixed-size chunks (e.g. 64 tokens)
-//! and stores snapshots of the hybrid recurrent inference state (Attention KV slices + SSM Conv states).
+//! and stores shared Attention KV intervals plus per-boundary recurrent SSM states.
 //! When a new request shares a prefix (such as a system prompt, tool definitions, or multi-turn history),
-//! the engine restores the snapshot in O(1) time and skips prefill computation for all matched tokens.
+//! the engine copies the matched KV intervals back and skips their prefill computation.
+//! Restore work is linear in matched KV bytes, not constant time.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -94,8 +95,22 @@ pub struct PrefixChunk {
     pub hash: u64,
     /// Tokens contained in this chunk.
     pub tokens: Vec<u32>,
-    /// Serialized hybrid state at the end of this chunk.
+    /// Recurrent state at the boundary and owned KV interval. For delta entries,
+    /// KV data covers `[kv_start, state.pos)`, not the whole prefix. Use
+    /// `restore_longest_prefix` to restore an entry and its shared ancestors.
     pub state: HybridStateSnapshot,
+    /// Beginning of the KV interval owned by this node (zero for full snapshots).
+    kv_start: usize,
+    /// Shared ancestor holding the preceding interval, for delta nodes.
+    parent_hash: Option<u64>,
+}
+
+/// Compact checkpoint returned after restoring shared KV prefix blocks.
+pub struct RestoredPrefix {
+    pub matched_tokens: usize,
+    pub hash: u64,
+    pub ssm_conv_states: Vec<f32>,
+    pub ssm_hidden_states: Vec<f32>,
 }
 
 impl PrefixChunk {
@@ -228,6 +243,117 @@ impl PrefixCache {
         chunk_index: usize,
         state: HybridStateSnapshot,
     ) -> u64 {
+        self.insert_node(prev_hash, tokens, chunk_index, state, 0, None)
+    }
+
+    /// Store one KV interval and its recurrent checkpoint. Ancestors are shared
+    /// by chained hash rather than copied into every descendant snapshot.
+    pub fn insert_delta_chunk(
+        &mut self,
+        prev_hash: u64,
+        tokens: &[u32],
+        chunk_index: usize,
+        state: HybridStateSnapshot,
+    ) -> crate::Result<u64> {
+        let start =
+            chunk_index
+                .checked_mul(self.chunk_size)
+                .ok_or(crate::KvError::ContextOverflow {
+                    pos: usize::MAX,
+                    max: state.pos,
+                })?;
+        let end = start
+            .checked_add(self.chunk_size)
+            .ok_or(crate::KvError::ContextOverflow {
+                pos: usize::MAX,
+                max: state.pos,
+            })?;
+        if tokens.len() != self.chunk_size || state.pos != end {
+            return Err(crate::KvError::DimMismatch {
+                expected: end,
+                got: state.pos,
+            });
+        }
+        let parent = if start == 0 {
+            if prev_hash != 0 {
+                return Err(crate::KvError::DimMismatch {
+                    expected: 0,
+                    got: start,
+                });
+            }
+            None
+        } else {
+            let ancestor = self
+                .chunks
+                .get(&prev_hash)
+                .ok_or(crate::KvError::DimMismatch {
+                    expected: start,
+                    got: 0,
+                })?;
+            if ancestor.state.pos != start || ancestor.chunk_index != chunk_index - 1 {
+                return Err(crate::KvError::DimMismatch {
+                    expected: start,
+                    got: ancestor.state.pos,
+                });
+            }
+            Some(prev_hash)
+        };
+        Ok(self.insert_node(prev_hash, tokens, chunk_index, state, start, parent))
+    }
+
+    /// Restore KV blocks in causal order and return only the final SSM checkpoint.
+    pub fn restore_longest_prefix(
+        &mut self,
+        tokens: &[u32],
+        kv: &mut crate::KvCache,
+    ) -> crate::Result<Option<RestoredPrefix>> {
+        let Some((matched_tokens, chunk)) = self.find_longest_prefix(tokens) else {
+            return Ok(None);
+        };
+        let hash = chunk.hash;
+        if chunk.state.pos != matched_tokens {
+            return Err(crate::KvError::DimMismatch {
+                expected: matched_tokens,
+                got: chunk.state.pos,
+            });
+        }
+        let mut path = Vec::new();
+        let mut current = Some(hash);
+        while let Some(key) = current {
+            let node = self.chunks.get(&key).ok_or(crate::KvError::DimMismatch {
+                expected: matched_tokens,
+                got: 0,
+            })?;
+            path.push(key);
+            current = node.parent_hash;
+        }
+        for key in path.iter().rev() {
+            let node = &self.chunks[key];
+            kv.import_state_range(
+                node.kv_start,
+                node.state.pos - node.kv_start,
+                &node.state.k_cache,
+                &node.state.v_cache,
+            )?;
+        }
+        let node = &self.chunks[&hash];
+        Ok(Some(RestoredPrefix {
+            matched_tokens,
+            hash,
+            ssm_conv_states: node.state.ssm_conv_states.clone(),
+            ssm_hidden_states: node.state.ssm_hidden_states.clone(),
+        }))
+    }
+
+    fn insert_node(
+        &mut self,
+        prev_hash: u64,
+        tokens: &[u32],
+        chunk_index: usize,
+        state: HybridStateSnapshot,
+        kv_start: usize,
+        parent_hash: Option<u64>,
+    ) -> u64 {
         let hash = compute_chunk_hash(prev_hash, tokens);
 
         if self.chunks.contains_key(&hash) {
@@ -240,6 +366,8 @@ impl PrefixCache {
             hash,
             tokens: tokens.to_vec(),
             state,
+            kv_start,
+            parent_hash,
         };
         let chunk_mem = chunk.memory_bytes();
 
@@ -386,6 +514,143 @@ impl PrefixCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delta_prefix_retains_nine_thousand_token_context_with_linear_storage() {
+        let mut source = crate::KvCache::new(2, 9000, 16);
+        for pos in 0..9000 {
+            for layer in 0..2 {
+                source
+                    .store(layer, pos, &[pos as f32; 16], &[layer as f32; 16])
+                    .unwrap();
+            }
+        }
+        let budget = 4 * 1024 * 1024;
+        let mut cache = PrefixCache::with_budget(256, 64, budget);
+        let tokens: Vec<u32> = (0..9000).collect();
+        let mut hash = 0;
+        for index in 0..9000 / 64 {
+            let (k, v) = source.export_state_range(index * 64, 64).unwrap();
+            let state =
+                HybridStateSnapshot::new((index + 1) * 64, 0, k, v, vec![index as f32; 12], vec![]);
+            hash = cache
+                .insert_delta_chunk(hash, &tokens[index * 64..(index + 1) * 64], index, state)
+                .unwrap();
+        }
+        assert_eq!(cache.len(), 140);
+        assert!(cache.memory_usage_bytes() < budget);
+        let mut restored = crate::KvCache::new(2, 9000, 16);
+        let matched = cache
+            .restore_longest_prefix(&tokens, &mut restored)
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.matched_tokens, 8960);
+        assert_eq!(
+            restored.export_state(8960).unwrap(),
+            source.export_state(8960).unwrap()
+        );
+    }
+
+    #[test]
+    fn delta_branches_share_root_under_byte_budget() {
+        let mut cache = PrefixCache::new(10, 64);
+        let state = |pos, value| {
+            HybridStateSnapshot::new(
+                pos,
+                0,
+                vec![value; 64],
+                vec![value + 1.0; 64],
+                vec![value],
+                vec![],
+            )
+        };
+        let root = cache
+            .insert_delta_chunk(0, &[1; 64], 0, state(64, 1.0))
+            .unwrap();
+        let first = cache
+            .insert_delta_chunk(root, &[2; 64], 1, state(128, 2.0))
+            .unwrap();
+        let second = cache
+            .insert_delta_chunk(root, &[3; 64], 1, state(128, 3.0))
+            .unwrap();
+        assert_eq!(cache.len(), 3);
+        let budget = cache.chunks[&root].memory_bytes() + cache.chunks[&second].memory_bytes();
+        assert_eq!(cache.prune_to_bytes(budget), 1);
+        assert!(cache.memory_usage_bytes() <= budget);
+        assert!(!cache.chunks.contains_key(&first));
+        let mut kv = crate::KvCache::new(1, 128, 1);
+        let tokens: Vec<u32> = [vec![1; 64], vec![3; 64]].concat();
+        let matched = cache
+            .restore_longest_prefix(&tokens, &mut kv)
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.matched_tokens, 128);
+        assert_eq!(matched.ssm_conv_states, vec![3.0]);
+        assert_eq!(
+            kv.export_state(128).unwrap().0,
+            [vec![1.0; 64], vec![3.0; 64]].concat()
+        );
+    }
+
+    #[test]
+    fn delta_prefix_blocks_share_ancestors_and_restore_after_eviction() {
+        let mut source = crate::KvCache::new(2, 256, 4);
+        for pos in 0..256 {
+            for layer in 0..2 {
+                source
+                    .store(layer, pos, &[pos as f32; 4], &[layer as f32 + 1.0; 4])
+                    .unwrap();
+            }
+        }
+        let tokens: Vec<u32> = (0..256).collect();
+        let mut cache = PrefixCache::new(3, 64);
+        let mut hash = 0;
+        for index in 0..4 {
+            let (k, v) = source.export_state_range(index * 64, 64).unwrap();
+            let state =
+                HybridStateSnapshot::new((index + 1) * 64, 0, k, v, vec![index as f32], vec![]);
+            hash = cache
+                .insert_delta_chunk(hash, &tokens[index * 64..(index + 1) * 64], index, state)
+                .unwrap();
+        }
+        assert_eq!(cache.len(), 3);
+        // Each of the three retained nodes owns exactly one KV block.
+        assert_eq!(
+            cache
+                .chunks
+                .values()
+                .map(|node| node.state.k_cache.len())
+                .sum::<usize>(),
+            3 * 2 * 64 * 4
+        );
+        let mut restored = crate::KvCache::new(2, 256, 4);
+        let matched = cache
+            .restore_longest_prefix(&tokens, &mut restored)
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.matched_tokens, 192);
+        assert_eq!(matched.ssm_conv_states, vec![2.0]);
+        assert_eq!(restored.current_pos(), 192);
+        assert_eq!(
+            restored.export_state(192).unwrap(),
+            source.export_state(192).unwrap()
+        );
+
+        let mut changed = tokens.clone();
+        changed[0] = 999;
+        assert!(cache
+            .restore_longest_prefix(&changed, &mut restored)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn delta_prefix_rejects_missing_ancestor() {
+        let mut cache = PrefixCache::new(3, 64);
+        let state = HybridStateSnapshot::new(128, 0, vec![1.0; 64], vec![2.0; 64], vec![], vec![]);
+        assert!(cache.insert_delta_chunk(123, &[1; 64], 1, state).is_err());
+        assert!(cache.is_empty());
+    }
 
     #[test]
     fn test_chunk_hash_determinism_and_chaining() {

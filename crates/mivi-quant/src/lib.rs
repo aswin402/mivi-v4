@@ -264,16 +264,57 @@ fn compute_batched_rows(
     transposed_inputs: &[f32],
     accumulation_mode: BatchAccumulationMode,
 ) -> Result<()> {
+    if accumulation_mode == BatchAccumulationMode::AcrossBatchFma && batch >= 32 {
+        let mut decoded = vec![0.0f32; 2 * cols];
+        for (pair_idx, output) in row_major_output.chunks_mut(2 * batch).enumerate() {
+            let row_idx = row_start + pair_idx * 2;
+            let weight_start = row_idx * row_bytes;
+            let (first, second) = decoded.split_at_mut(cols);
+            dequantize_slice(
+                ggml_type,
+                &weights[weight_start..weight_start + row_bytes],
+                first,
+            )?;
+            output.fill(0.0);
+            if row_idx + 1 < row_end {
+                let weight_start = weight_start + row_bytes;
+                dequantize_slice(
+                    ggml_type,
+                    &weights[weight_start..weight_start + row_bytes],
+                    second,
+                )?;
+                let (out0, out1) = output.split_at_mut(batch);
+                mivi_core::simd::matmul_accumulate_transposed_pair_simd(
+                    out0,
+                    out1,
+                    first,
+                    second,
+                    transposed_inputs,
+                    batch,
+                    cols,
+                );
+            } else {
+                mivi_core::simd::matmul_accumulate_transposed_simd(
+                    output,
+                    first,
+                    transposed_inputs,
+                    batch,
+                    cols,
+                );
+            }
+        }
+        return Ok(());
+    }
     let mut decoded_row = vec![0.0f32; cols];
     let mut row_output = vec![0.0f32; batch];
     for row_idx in row_start..row_end {
         let weight_start = row_idx * row_bytes;
+        row_output.fill(0.0);
         dequantize_slice(
             ggml_type,
             &weights[weight_start..weight_start + row_bytes],
             &mut decoded_row,
         )?;
-        row_output.fill(0.0);
         match accumulation_mode {
             BatchAccumulationMode::PerInputDot => {
                 for (batch_idx, output) in row_output.iter_mut().enumerate() {
@@ -285,13 +326,13 @@ fn compute_batched_rows(
                 }
             }
             BatchAccumulationMode::AcrossBatchFma => {
-                for col in 0..cols {
-                    mivi_core::simd::vec_fmadd_simd(
-                        &mut row_output,
-                        decoded_row[col],
-                        &transposed_inputs[col * batch..(col + 1) * batch],
-                    );
-                }
+                mivi_core::simd::matmul_accumulate_transposed_simd(
+                    &mut row_output,
+                    &decoded_row,
+                    transposed_inputs,
+                    batch,
+                    cols,
+                );
             }
         }
         let output_start = (row_idx - row_start) * batch;
@@ -368,6 +409,159 @@ mod tests {
         assert_batched_matches_matvec(GgmlType::Q8_0, 32);
         assert_batched_matches_matvec(GgmlType::Q4_K, 256);
         assert_batched_matches_matvec(GgmlType::Q6_K, 256);
+    }
+
+    #[test]
+    fn large_nonzero_quantized_batches_match_matvec() {
+        let cols = 512;
+        let rows = RAYON_PARALLEL_THRESHOLD + 1;
+        for ggml_type in [GgmlType::Q4_K, GgmlType::Q8_0] {
+            let block_bytes = ggml_type.type_size().unwrap();
+            let mut weights = vec![0u8; rows * row_bytes(ggml_type, cols)];
+            for (i, block) in weights.chunks_exact_mut(block_bytes).enumerate() {
+                for (j, byte) in block.iter_mut().enumerate() {
+                    *byte = ((i + j * 7) % 127) as u8;
+                }
+                block[..2].copy_from_slice(&half::f16::from_f32(0.125).to_le_bytes());
+                if ggml_type == GgmlType::Q4_K {
+                    block[2..4].copy_from_slice(&half::f16::from_f32(0.0625).to_le_bytes());
+                }
+            }
+            for batch in [9, 32, 33, 64, 65] {
+                let inputs: Vec<f32> = (0..batch * cols)
+                    .map(|i| (i % 23) as f32 * 0.0625 - 0.75)
+                    .collect();
+                let mut actual = vec![0.0; batch * rows];
+                quantized_matmul_rows(&mut actual, ggml_type, &weights, &inputs, batch, rows, cols)
+                    .unwrap();
+                let mut expected = vec![0.0; rows];
+                for b in 0..batch {
+                    quantized_matvec(
+                        &mut expected,
+                        ggml_type,
+                        &weights,
+                        &inputs[b * cols..(b + 1) * cols],
+                        rows,
+                        cols,
+                    )
+                    .unwrap();
+                    for row in 0..rows {
+                        assert!(
+                            (actual[b * rows + row] - expected[row]).abs() < 1e-3,
+                            "type={ggml_type:?}, batch={batch}, row={row}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paired_batches_preserve_decoded_reference_for_all_formats() {
+        let cols = 256;
+        for ggml_type in [
+            GgmlType::F32,
+            GgmlType::F16,
+            GgmlType::BF16,
+            GgmlType::Q4_K,
+            GgmlType::Q6_K,
+            GgmlType::Q8_0,
+        ] {
+            // Three rows cover the serial odd-row tail; 257 also creates an
+            // odd Rayon partition when the test pool has two workers.
+            for rows in [3, RAYON_PARALLEL_THRESHOLD + 1] {
+                let mut weights = vec![0u8; rows * row_bytes(ggml_type, cols)];
+                match ggml_type {
+                    GgmlType::F32 => {
+                        for (i, value) in weights.chunks_exact_mut(4).enumerate() {
+                            value.copy_from_slice(&((i % 13) as f32 * 0.125 - 0.75).to_le_bytes());
+                        }
+                    }
+                    GgmlType::F16 | GgmlType::BF16 => {
+                        for (i, value) in weights.chunks_exact_mut(2).enumerate() {
+                            let f = (i % 13) as f32 * 0.125 - 0.75;
+                            let bytes = if ggml_type == GgmlType::F16 {
+                                half::f16::from_f32(f).to_le_bytes()
+                            } else {
+                                half::bf16::from_f32(f).to_le_bytes()
+                            };
+                            value.copy_from_slice(&bytes);
+                        }
+                    }
+                    _ => {
+                        for (i, block) in weights
+                            .chunks_exact_mut(ggml_type.type_size().unwrap())
+                            .enumerate()
+                        {
+                            for (j, byte) in block.iter_mut().enumerate() {
+                                *byte = ((i + 7 * j) % 127) as u8;
+                            }
+                            let scale_start = if ggml_type == GgmlType::Q6_K {
+                                block.len() - 2
+                            } else {
+                                0
+                            };
+                            block[scale_start..scale_start + 2]
+                                .copy_from_slice(&half::f16::from_f32(0.125).to_le_bytes());
+                            if ggml_type == GgmlType::Q4_K {
+                                block[2..4]
+                                    .copy_from_slice(&half::f16::from_f32(0.0625).to_le_bytes());
+                            }
+                        }
+                    }
+                }
+                for batch in [32, 33, 64, 65] {
+                    let inputs: Vec<f32> = (0..batch * cols)
+                        .map(|i| (i % 23) as f32 * 0.0625 - 0.75)
+                        .collect();
+                    let mut transposed = vec![0.0; batch * cols];
+                    for b in 0..batch {
+                        for col in 0..cols {
+                            transposed[col * batch + b] = inputs[b * cols + col];
+                        }
+                    }
+                    let mut actual = vec![0.0; batch * rows + 1];
+                    actual[batch * rows] = 123.0;
+                    quantized_matmul_rows(
+                        &mut actual,
+                        ggml_type,
+                        &weights,
+                        &inputs,
+                        batch,
+                        rows,
+                        cols,
+                    )
+                    .unwrap();
+                    let mut decoded = vec![0.0; cols];
+                    let mut reference = vec![0.0; batch];
+                    for row in 0..rows {
+                        let start = row * row_bytes(ggml_type, cols);
+                        dequantize_slice(
+                            ggml_type,
+                            &weights[start..start + row_bytes(ggml_type, cols)],
+                            &mut decoded,
+                        )
+                        .unwrap();
+                        reference.fill(0.0);
+                        mivi_core::simd::matmul_accumulate_transposed_simd(
+                            &mut reference,
+                            &decoded,
+                            &transposed,
+                            batch,
+                            cols,
+                        );
+                        for b in 0..batch {
+                            assert_eq!(
+                                actual[b * rows + row],
+                                reference[b],
+                                "type={ggml_type:?}, rows={rows}, batch={batch}, row={row}"
+                            );
+                        }
+                    }
+                    assert_eq!(actual[batch * rows], 123.0);
+                }
+            }
+        }
     }
 
     #[test]

@@ -142,3 +142,205 @@ pub unsafe fn vec_fmadd_avx2(out: &mut [f32], scale: f32, src: &[f32]) {
         *out_ptr.add(rem_start + r) += scale * *src_ptr.add(rem_start + r);
     }
 }
+
+/// Accumulate two decoded rows, reusing each input vector for both rows.
+///
+/// # Safety
+/// Caller must ensure AVX2/FMA support, outputs of at least `batch`, weights
+/// of at least `cols`, and inputs of at least `cols * batch` elements.
+#[target_feature(enable = "avx2", enable = "fma")]
+#[inline]
+pub unsafe fn matmul_accumulate_transposed_pair_avx2(
+    out0: &mut [f32],
+    out1: &mut [f32],
+    weights0: &[f32],
+    weights1: &[f32],
+    transposed_inputs: &[f32],
+    batch: usize,
+    cols: usize,
+) {
+    let p0 = out0.as_mut_ptr();
+    let p1 = out1.as_mut_ptr();
+    let w0 = weights0.as_ptr();
+    let w1 = weights1.as_ptr();
+    let inputs = transposed_inputs.as_ptr();
+    // Bound each strided pass so the two batch halves reuse input cache lines
+    // before moving to the next columns, rather than scanning a multi-MiB tile.
+    const COLUMN_TILE: usize = 128;
+    for column_start in (0..cols).step_by(COLUMN_TILE) {
+        let column_end = (column_start + COLUMN_TILE).min(cols);
+        let mut offset = 0;
+        // Two rows x four vectors leave registers for both scales and the shared
+        // input. Each output lane still visits columns in the established order.
+        while offset + 32 <= batch {
+            let mut a0 = _mm256_loadu_ps(p0.add(offset));
+            let mut a1 = _mm256_loadu_ps(p0.add(offset + 8));
+            let mut a2 = _mm256_loadu_ps(p0.add(offset + 16));
+            let mut a3 = _mm256_loadu_ps(p0.add(offset + 24));
+            let mut b0 = _mm256_loadu_ps(p1.add(offset));
+            let mut b1 = _mm256_loadu_ps(p1.add(offset + 8));
+            let mut b2 = _mm256_loadu_ps(p1.add(offset + 16));
+            let mut b3 = _mm256_loadu_ps(p1.add(offset + 24));
+            for col in column_start..column_end {
+                let s0 = _mm256_set1_ps(*w0.add(col));
+                let s1 = _mm256_set1_ps(*w1.add(col));
+                let input = inputs.add(col * batch + offset);
+                let x0 = _mm256_loadu_ps(input);
+                a0 = _mm256_fmadd_ps(s0, x0, a0);
+                b0 = _mm256_fmadd_ps(s1, x0, b0);
+                let x1 = _mm256_loadu_ps(input.add(8));
+                a1 = _mm256_fmadd_ps(s0, x1, a1);
+                b1 = _mm256_fmadd_ps(s1, x1, b1);
+                let x2 = _mm256_loadu_ps(input.add(16));
+                a2 = _mm256_fmadd_ps(s0, x2, a2);
+                b2 = _mm256_fmadd_ps(s1, x2, b2);
+                let x3 = _mm256_loadu_ps(input.add(24));
+                a3 = _mm256_fmadd_ps(s0, x3, a3);
+                b3 = _mm256_fmadd_ps(s1, x3, b3);
+            }
+            _mm256_storeu_ps(p0.add(offset), a0);
+            _mm256_storeu_ps(p0.add(offset + 8), a1);
+            _mm256_storeu_ps(p0.add(offset + 16), a2);
+            _mm256_storeu_ps(p0.add(offset + 24), a3);
+            _mm256_storeu_ps(p1.add(offset), b0);
+            _mm256_storeu_ps(p1.add(offset + 8), b1);
+            _mm256_storeu_ps(p1.add(offset + 16), b2);
+            _mm256_storeu_ps(p1.add(offset + 24), b3);
+            offset += 32;
+        }
+        while offset + 8 <= batch {
+            let mut a = _mm256_loadu_ps(p0.add(offset));
+            let mut b = _mm256_loadu_ps(p1.add(offset));
+            for col in column_start..column_end {
+                let x = _mm256_loadu_ps(inputs.add(col * batch + offset));
+                a = _mm256_fmadd_ps(_mm256_set1_ps(*w0.add(col)), x, a);
+                b = _mm256_fmadd_ps(_mm256_set1_ps(*w1.add(col)), x, b);
+            }
+            _mm256_storeu_ps(p0.add(offset), a);
+            _mm256_storeu_ps(p1.add(offset), b);
+            offset += 8;
+        }
+        for index in offset..batch {
+            let mut a = *p0.add(index);
+            let mut b = *p1.add(index);
+            for col in column_start..column_end {
+                let x = *inputs.add(col * batch + index);
+                a += *w0.add(col) * x;
+                b += *w1.add(col) * x;
+            }
+            *p0.add(index) = a;
+            *p1.add(index) = b;
+        }
+    }
+}
+
+/// Accumulate one decoded weight row against transposed batch inputs.
+///
+/// # Safety
+/// Caller must ensure AVX2/FMA support and valid slice lengths.
+#[target_feature(enable = "avx2", enable = "fma")]
+#[inline]
+pub unsafe fn matmul_accumulate_transposed_avx2(
+    out: &mut [f32],
+    weights: &[f32],
+    transposed_inputs: &[f32],
+    batch: usize,
+    cols: usize,
+) {
+    let out_ptr = out.as_mut_ptr();
+    let weights_ptr = weights.as_ptr();
+    let inputs_ptr = transposed_inputs.as_ptr();
+    // Short remainders benefit from processing the whole batch per column;
+    // register blocks would otherwise make several strided input passes.
+    if batch < 32 {
+        let vector_end = (batch / 8) * 8;
+        for col in 0..cols {
+            let scale = _mm256_set1_ps(*weights_ptr.add(col));
+            let input = inputs_ptr.add(col * batch);
+            for offset in (0..vector_end).step_by(8) {
+                let accumulator = _mm256_loadu_ps(out_ptr.add(offset));
+                let value = _mm256_loadu_ps(input.add(offset));
+                _mm256_storeu_ps(
+                    out_ptr.add(offset),
+                    _mm256_fmadd_ps(scale, value, accumulator),
+                );
+            }
+            for b in vector_end..batch {
+                *out_ptr.add(b) += *weights_ptr.add(col) * *input.add(b);
+            }
+        }
+        return;
+    }
+    let mut offset = 0;
+    // A full 64-token cache chunk fits in eight AVX2 accumulators. Reading
+    // contiguous inputs once per column avoids a second strided pass.
+    while offset + 64 <= batch {
+        let mut a0 = _mm256_loadu_ps(out_ptr.add(offset));
+        let mut a1 = _mm256_loadu_ps(out_ptr.add(offset + 8));
+        let mut a2 = _mm256_loadu_ps(out_ptr.add(offset + 16));
+        let mut a3 = _mm256_loadu_ps(out_ptr.add(offset + 24));
+        let mut a4 = _mm256_loadu_ps(out_ptr.add(offset + 32));
+        let mut a5 = _mm256_loadu_ps(out_ptr.add(offset + 40));
+        let mut a6 = _mm256_loadu_ps(out_ptr.add(offset + 48));
+        let mut a7 = _mm256_loadu_ps(out_ptr.add(offset + 56));
+        for col in 0..cols {
+            let scale = _mm256_set1_ps(*weights_ptr.add(col));
+            let input = inputs_ptr.add(col * batch + offset);
+            a0 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input), a0);
+            a1 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(8)), a1);
+            a2 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(16)), a2);
+            a3 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(24)), a3);
+            a4 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(32)), a4);
+            a5 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(40)), a5);
+            a6 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(48)), a6);
+            a7 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(56)), a7);
+        }
+        _mm256_storeu_ps(out_ptr.add(offset), a0);
+        _mm256_storeu_ps(out_ptr.add(offset + 8), a1);
+        _mm256_storeu_ps(out_ptr.add(offset + 16), a2);
+        _mm256_storeu_ps(out_ptr.add(offset + 24), a3);
+        _mm256_storeu_ps(out_ptr.add(offset + 32), a4);
+        _mm256_storeu_ps(out_ptr.add(offset + 40), a5);
+        _mm256_storeu_ps(out_ptr.add(offset + 48), a6);
+        _mm256_storeu_ps(out_ptr.add(offset + 56), a7);
+        offset += 64;
+    }
+    // Four independent accumulators hide FMA latency and avoid loading and
+    // storing the output for every column. Keep each lane's column order intact.
+    while offset + 32 <= batch {
+        let mut a0 = _mm256_loadu_ps(out_ptr.add(offset));
+        let mut a1 = _mm256_loadu_ps(out_ptr.add(offset + 8));
+        let mut a2 = _mm256_loadu_ps(out_ptr.add(offset + 16));
+        let mut a3 = _mm256_loadu_ps(out_ptr.add(offset + 24));
+        for col in 0..cols {
+            let scale = _mm256_set1_ps(*weights_ptr.add(col));
+            let input = inputs_ptr.add(col * batch + offset);
+            a0 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input), a0);
+            a1 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(8)), a1);
+            a2 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(16)), a2);
+            a3 = _mm256_fmadd_ps(scale, _mm256_loadu_ps(input.add(24)), a3);
+        }
+        _mm256_storeu_ps(out_ptr.add(offset), a0);
+        _mm256_storeu_ps(out_ptr.add(offset + 8), a1);
+        _mm256_storeu_ps(out_ptr.add(offset + 16), a2);
+        _mm256_storeu_ps(out_ptr.add(offset + 24), a3);
+        offset += 32;
+    }
+    while offset + 8 <= batch {
+        let mut accumulator = _mm256_loadu_ps(out_ptr.add(offset));
+        for col in 0..cols {
+            let scale = _mm256_set1_ps(*weights_ptr.add(col));
+            let input = _mm256_loadu_ps(inputs_ptr.add(col * batch + offset));
+            accumulator = _mm256_fmadd_ps(scale, input, accumulator);
+        }
+        _mm256_storeu_ps(out_ptr.add(offset), accumulator);
+        offset += 8;
+    }
+    for batch_idx in offset..batch {
+        let mut accumulator = *out_ptr.add(batch_idx);
+        for col in 0..cols {
+            accumulator += *weights_ptr.add(col) * *inputs_ptr.add(col * batch + batch_idx);
+        }
+        *out_ptr.add(batch_idx) = accumulator;
+    }
+}

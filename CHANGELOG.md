@@ -7,6 +7,260 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.51] - 2026-09-30
+
+### Opt-In Attention Prefill Profiling
+
+#### Ideas, Inspirations & Sources
+
+- **Measure inside the attention block before choosing another optimization**:
+  extend the existing SSM stage profiler with attention normalization, Q/K/V
+  projections, causal processing, output projection, and FFN buckets.
+  - *Inspiration*: Mivi's existing opt-in SSM profiling and measured long-prompt
+    latency; distinguish projection costs from the causal KV scan.
+  - *Sources*: `crates/mivi-model/src/ssm.rs`, local real-model benchmarks,
+    and [Rust Instant documentation](https://doc.rust-lang.org/std/time/struct.Instant.html).
+- **Investigate packed quantized projections next, rather than assume the KV
+  scan is the only bottleneck**: Mivi's batch kernel currently decodes weight
+  rows to F32. llama.cpp's CPU type traits pair Q4_K and Q6_K with Q8_K activation
+  dot products, providing a concrete alternative to evaluate.
+  - *Source*: [llama.cpp CPU type traits](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-cpu/ggml-cpu.c).
+  - This release does not implement activation quantization or claim equivalent
+    speed, accuracy, or backend performance.
+
+#### Added
+
+- Aggregate attention tile stage timings in opt-in forward-profile snapshots.
+- Benchmark output includes attention stage seconds and percentage shares.
+- The causal bucket includes per-head normalization, RoPE, KV insertion, and
+  attention; the output bucket includes its residual connection.
+- Attention profiling creates no timestamps when disabled; the existing public
+  unprofiled tile API and numerical computation remain unchanged.
+- Tests cover profile totals, accumulation, reset/disable behavior, exclusion of
+  nested stages from top-level totals, and identical profiling-on/off output and KV state.
+
+#### Validation and Remaining Work
+
+- Real LFM2.5 1.2B Q4_K_M, two inference threads, 2,068 effective cold tokens:
+  isolated prefill 66.28s; first-text latency 65.11s. Warm isolated prefill 2.75s,
+  recomputing 23 tokens and reusing 2,048 tokens.
+- Attention stages: norm 0.09s, Q/K/V 1.93s, causal processing 16.24s,
+  output projection 1.22s, FFN 14.32s. SSM took 32.43s, with FFN share 74.8%.
+  Combined FFNs account for approximately 38.6s, or 58% of cold prefill.
+- The preceding unmodified v0.2.50 run took 63.06s cold and 2.69s warm.
+  These local wall-clock runs vary; this diagnostic update claims no speedup.
+- Targeted model/CLI suite: 63 tests passed; four tiny-model fixture tests and
+  the release-mode real LFM2.5 profiling-on/off state comparison passed.
+  Targeted library Clippy, formatting, and release CLI build passed. Cargo
+  compilation used one job; fixture and inference runs used two Rayon threads.
+- A real 9,000-token Minicode completion is still unverified. Next: compare
+  packed quantized matrix kernels against the existing F32 path, with explicit
+  numerical-error checks and model-independent type/capability dispatch.
+
+## [v0.2.50] - 2026-09-30
+
+### Paired-Row, Cache-Tiled CPU Prefill Projections
+
+#### Ideas, Inspirations & Sources
+
+- **Reuse each input vector across two output rows**: the generic batch path
+  decodes two weight rows per worker and shares input loads between independent
+  AVX2/FMA accumulators. Small batches and odd output-row tails retain the
+  established single-row path; no model-family rules were introduced.
+  - *Inspiration*: register blocking and data reuse in matrix multiplication.
+  - *Sources*: [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html),
+    local SSM profiling and alternating single-row/paired-row microbenchmarks.
+- **Tile input columns to improve cache locality**: the initial paired kernel
+  was inconsistent at batch 64. Processing 128 columns at a time improved local
+  measurements while preserving each output lane's column accumulation order.
+  The tile size is a CPU-kernel tuning constant, not a model-specific setting.
+  - *Inspiration*: layered memory-aware matrix multiplication kernels.
+  - *Source*: Goto and van de Geijn,
+    [Anatomy of High-Performance Matrix Multiplication](https://www.cs.utexas.edu/~flame/pubs/GotoTOMS_final.pdf).
+
+#### Changed
+
+- Large-batch projections accumulate paired decoded rows directly into output
+  storage, including within Rayon partitions, eliminating the temporary row copy.
+- AVX2/FMA input reuse is runtime-dispatched; portable and small-batch paths remain.
+- Each worker needs one additional decoded weight row, not a fully decoded matrix.
+
+#### Added
+
+- Paired-kernel boundary, nonzero-accumulator, output-sentinel, and rounding-order
+  tests, plus release-build buffer-bound checks before unsafe SIMD entry.
+- Exact comparison against independent decoded-row accumulation for F32, F16,
+  BF16, Q4_K, Q6_K, and Q8_0, with serial and odd parallel output-row partitions.
+- An opt-in alternating baseline/paired-kernel performance test.
+
+#### Validation
+
+- Local kernel benchmark, 8,192 columns, milliseconds per two output rows:
+  batch 32: 0.023–0.024 -> 0.015; batch 64: 0.047–0.049 -> 0.037–0.039;
+  batch 128: 0.143–0.158 -> 0.091–0.098.
+- Real LFM2.5 1.2B Q4_K_M, two inference threads, identical effective prompt
+  length of 538 tokens: cold isolated prefill 16.89s -> 14.98s (~11% shorter);
+  cold first-text latency 16.84s -> 14.74s. Warm isolated prefill 2.38s -> 2.28s.
+- These are local wall-clock observations, not controlled cross-backend or model
+  quality comparisons. Cold latency for a real 9,000-token agent prompt remains
+  unverified and is not claimed to be resolved.
+- Targeted core/quant/model suite: 78 tests passed; all three tiny-model fixture
+  regressions and the real LFM2.5 cold/cache state comparison at 129 tokens passed.
+  Release-mode core/quant suite: 38 tests passed, including buffer rejection.
+  Targeted library Clippy passed with the existing lint allowances.
+
+## [v0.2.49] - 2026-09-30
+
+### Shared Prefix KV Blocks and Correct Recurrent Cache Restore
+
+#### Ideas, Inspirations & Sources
+
+- **Store each causal KV block once**: prefix nodes own only their new token
+  interval and reference shared ancestors by chained hash. Each boundary keeps
+  its SSM checkpoint, avoiding cumulative copies of all previous KV tokens.
+  - *Inspiration*: hash-addressed KV blocks and shared prefix ancestry.
+  - *Source*: [vLLM automatic prefix caching design](https://docs.vllm.ai/en/latest/design/prefix_caching/).
+- **Keep recurrent checkpoints causally correct**: the final prompt token is
+  evaluated from a checkpoint preceding that token. A failing tiny hybrid-model
+  comparison demonstrated that restoring a checkpoint after the final token and
+  processing it again corrupted the old cached result.
+  - *Sources*: local cold-versus-cached KV, SSM, and logits comparisons;
+    `crates/mivi-model/src/model.rs` and `crates/mivi-kv/src/prefix.rs`.
+
+#### Changed
+
+- Token and chunked prefill now cache KV intervals rather than cumulative KV snapshots.
+- Shared ancestors remain available when deeper nodes are evicted under the existing
+  count and byte limits; retained state grows linearly with cached context length.
+- Model restore reassembles KV intervals in causal order and restores the final
+  SSM checkpoint. Complete snapshots and their disk format remain supported.
+- The model uses the cache's configured chunk size for recording boundaries.
+- Focused model benchmarks report estimated prefix-cache memory usage.
+
+#### Fixed
+
+- Exact-boundary cache hits no longer process the final token twice in recurrent state.
+
+#### Added
+
+- Range export/import round trips for all four KV precisions and selective layers.
+- Shared-branch and eviction coverage, missing-ancestor rejection, and a low-memory
+  9,000-token synthetic cache test retaining 8,960 tokens within a 4 MiB budget.
+- Opt-in cold-versus-cached hybrid-model comparison at exact and partial boundaries.
+
+#### Validation
+
+- Real LFM2.5 1.2B Q4_K_M benchmark, two inference threads, target prompt 2,048:
+  - Warm isolated prefill: 22.87s -> 2.69s (~8.5x faster in these local runs).
+  - Warm first-text latency: 23.39s -> 2.64s.
+  - Recomputed prompt tokens: 471 -> 23; 2,048 tokens reused.
+  - 32 cached blocks consumed approximately 60.27 MiB.
+- Cold isolated prefill was 105.08s in this run (previous run: 82.70s).
+  This cache change targets reuse; it does not resolve cold agent-prompt latency.
+  Wall-clock comparisons include host-load variation.
+
+## [v0.2.48] - 2026-09-30
+
+### Register-Blocked CPU Batch Accumulation
+
+#### Ideas, Inspirations & Sources
+
+- **Keep output accumulators in registers across input columns**: local SSM profiling
+  identified batched FFN projections as a major prefill cost. The shared AVX2/FMA
+  kernel now uses independent accumulators for 64- and 32-value batch blocks,
+  reducing repeated output loads/stores while preserving each lane's column order.
+  - *Inspiration*: register blocking and independent FMA accumulators, applied to
+    Mivi's existing transposed-input kernel without model-specific rules.
+  - *Sources*: [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html),
+    the local `mivi bench` SSM profile, and `crates/mivi-core/src/simd/avx2.rs`.
+- Preserve the established column-first kernel for batches below 32, including
+  short remainders after a prefix-cache hit; retain portable scalar dispatch.
+
+#### Changed
+
+- Register-blocked accumulation in the shared large-batch AVX2/FMA path used by
+  supported quantized projections in attention and SSM layers.
+
+#### Added
+
+- Vector block/tail tests covering zero columns, nonzero initial accumulators,
+  and output sentinels.
+- Nonzero Q4_K and Q8_0 batch comparisons against matrix-vector results, including
+  parallel row partitions and irregular batch sizes.
+- Opt-in release-mode kernel benchmark, ignored during ordinary test runs.
+
+#### Validation
+
+- Focused 8,192-column kernel measurement (512 repetitions): batch 64 improved
+  from 0.037 to 0.027 ms/row; batch 128 from 0.135 to 0.074 ms/row.
+- These are local kernel measurements, not a guarantee of equivalent improvement
+  in full-model latency or completion of a coding-agent task.
+- Real LFM2.5 1.2B Q4_K_M run, two inference threads, chunked prefill, requested
+  tile 128, target prompt 2,048 tokens (2,068 effective cold / 2,071 warm):
+  - Cold isolated prefill: 119.68s -> 82.70s (~31% less elapsed time).
+  - Cold first-text latency: 107.53s -> 81.19s.
+  - Warm isolated prefill: 31.84s -> 22.87s.
+  - Warm first-text latency: 32.67s -> 23.39s.
+- Before/after timings are single local runs and include host-load variation.
+  The warm run still recomputed 471 tokens because cumulative full-state cache
+  snapshots exhausted the byte budget; agent-sized first turns remain unresolved.
+
+## [v0.2.47] - 2026-09-30
+
+### Fused Batched SIMD Accumulation
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Fuse the large-batch accumulation loop**: batched quantized matmul now performs one
+  SIMD-dispatched transposed-input accumulation per decoded weight row instead of dispatching
+  once for every input column.
+  - *Inspiration*: llama.cpp's batched/ubatch kernels minimize repeated inner-loop dispatch and
+    keep the batch dimension contiguous for vectorized accumulation.
+  - *Sources*: [llama.cpp batch processing](https://github.com/ggml-org/llama.cpp/wiki/How-to-use-llama.cpp-with-other-models)
+    and [ggml quantized matrix multiplication](https://github.com/ggerganov/ggml/blob/master/src/ggml-cpu/ggml-cpu.c).
+- **Preserve portability and correctness**: the fused helper retains AVX2/FMA and scalar paths,
+  with the same `[batch, rows]` output layout and no model-family assumptions.
+
+#### Changed
+
+- Replaced repeated per-column SIMD dispatch in the large-batch quantized matmul kernel with a
+  fused transposed-batch SIMD helper.
+
+#### Performance
+
+- LFM2.5 1.2B Q4_K_M, two runtime threads, 128-token agent-style prompt:
+  - Cold prefill: 13.11s → 9.31s (~29% faster).
+  - Warm prefill: 4.64s → 2.57s (~45% faster).
+
+#### Added
+
+- SIMD regression coverage for transposed-batch accumulation equivalence.
+
+## [v0.2.46] - 2026-09-30
+
+### SSM Prefill Stage Diagnostics
+
+#### 💡 Ideas, Inspirations & Sources
+
+- **Measure the real agent-latency bottleneck**: opt-in profiling now breaks chunked SSM
+  prefill into normalization, input projection, causal convolution, output projection, and FFN.
+  - *Inspiration*: llama.cpp and other local inference runtimes expose stage-level prompt
+    processing measurements so optimization targets are based on observed workload cost.
+  - *Sources*: [llama.cpp performance counters](https://github.com/ggml-org/llama.cpp/wiki/Performance-of-llama.cpp)
+    and [vLLM profiling guidance](https://docs.vllm.ai/en/latest/design/metrics.html).
+- **Keep diagnostics model-agnostic and low overhead**: timing is enabled only through the
+  existing benchmark profiling path; ordinary inference does not collect per-stage timestamps.
+
+#### Added
+
+- SSM sub-stage timing in the focused model benchmark.
+- Regression coverage for SSM stage-duration accounting.
+
+#### Findings
+
+- On the LFM2.5 1.2B CPU benchmark, SSM FFN work accounts for roughly 75% of SSM time,
+  making the generic batched quantized FFN path the next optimization target.
+
 ## [v0.2.45] - 2026-09-28
 
 ### Multi-Core Parallel Quantized Matmul & 64K In-Memory Prefix Cache Retention

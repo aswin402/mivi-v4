@@ -38,5 +38,7 @@ pub use pld::{
 pub use prefill::{add_rows_in_place, rms_norm_rows, swiglu_rows, TileActivations, TileError};
 pub use sampler::{Sampler, SamplerConfig};
 pub use ssm::{ssm_forward, ssm_forward_tile, SsmParams};
-pub use transformer::{attention_forward, attention_forward_tile, AttentionParams};
+pub use transformer::{
+    attention_forward, attention_forward_tile, AttentionParams, AttentionStageProfile,
+};
 pub use weights::{LayerWeights, ModelWeights, QuantizedTensor};

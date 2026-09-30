@@ -10,6 +10,33 @@ use mivi_core::arena::RunState;
 use mivi_core::math::vec_add;
 use mivi_core::simd::rms_norm_simd;
 use mivi_quant::quantized_matmul_rows;
+use std::time::{Duration, Instant};
+
+/// Optional diagnostic timing for the major SSM tile stages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SsmStageProfile {
+    pub norm: Duration,
+    pub input_projection: Duration,
+    pub convolution: Duration,
+    pub output_projection: Duration,
+    pub ffn: Duration,
+}
+
+impl SsmStageProfile {
+    #[inline]
+    pub fn total(self) -> Duration {
+        self.norm + self.input_projection + self.convolution + self.output_projection + self.ffn
+    }
+
+    #[inline]
+    pub fn add_assign(&mut self, other: Self) {
+        self.norm += other.norm;
+        self.input_projection += other.input_projection;
+        self.convolution += other.convolution;
+        self.output_projection += other.output_projection;
+        self.ffn += other.ffn;
+    }
+}
 
 /// Parameter descriptor for SSM forward pass.
 pub struct SsmParams<'a> {
@@ -150,6 +177,17 @@ pub fn ssm_forward_tile(
     params: &SsmParams,
     rows: usize,
 ) -> Result<()> {
+    ssm_forward_tile_profiled(tile, state, params, rows, None)
+}
+
+/// Forward an SSM tile and optionally record timings for each major stage.
+pub fn ssm_forward_tile_profiled(
+    tile: &mut TileActivations,
+    state: &mut RunState,
+    params: &SsmParams,
+    rows: usize,
+    mut profile: Option<&mut SsmStageProfile>,
+) -> Result<()> {
     if rows == 0 || rows > tile.tile_tokens() {
         return Err(ModelError::DimMismatch(format!(
             "invalid SSM tile row count: {rows}"
@@ -185,6 +223,7 @@ pub fn ssm_forward_tile(
             "SSM FFN size overflow".to_string(),
         ))?;
 
+    let stage_start = Instant::now();
     rms_norm_rows(
         &mut tile.norm[..dim_rows],
         &tile.current[..dim_rows],
@@ -194,7 +233,11 @@ pub fn ssm_forward_tile(
         cfg.rms_norm_eps,
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.norm += stage_start.elapsed();
+    }
 
+    let stage_start = Instant::now();
     quantized_matmul_rows(
         &mut tile.projection[..in_output_len],
         w.in_proj.quant_type,
@@ -204,11 +247,15 @@ pub fn ssm_forward_tile(
         in_rows,
         dim,
     )?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.input_projection += stage_start.elapsed();
+    }
 
     let layer_offset = params.layer * dim * kernel_size;
     let has_full_conv = !w.ssm_conv.is_empty() && w.ssm_conv.len() >= dim * kernel_size;
     let has_shared_conv = !w.ssm_conv.is_empty() && w.ssm_conv.len() >= kernel_size;
 
+    let stage_start = Instant::now();
     for row_idx in 0..rows {
         let projection_start = row_idx * in_rows;
         let projection = &tile.projection[projection_start..projection_start + in_rows];
@@ -256,7 +303,11 @@ pub fn ssm_forward_tile(
             }
         }
     }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.convolution += stage_start.elapsed();
+    }
 
+    let stage_start = Instant::now();
     quantized_matmul_rows(
         &mut tile.next[..dim_rows],
         w.out_proj.quant_type,
@@ -266,6 +317,9 @@ pub fn ssm_forward_tile(
         dim,
         dim,
     )?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.output_projection += stage_start.elapsed();
+    }
     add_rows_in_place(
         &mut tile.current[..dim_rows],
         &tile.next[..dim_rows],
@@ -274,6 +328,7 @@ pub fn ssm_forward_tile(
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
 
+    let stage_start = Instant::now();
     rms_norm_rows(
         &mut tile.norm[..dim_rows],
         &tile.current[..dim_rows],
@@ -324,6 +379,9 @@ pub fn ssm_forward_tile(
         dim,
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
+    if let Some(profile) = profile {
+        profile.ffn += stage_start.elapsed();
+    }
 
     Ok(())
 }
@@ -336,6 +394,19 @@ mod tests {
     use crate::weights::{FfnLayerWeights, QuantizedTensor};
     use mivi_core::arena::{ArenaConfig, RunState};
     use mivi_quant::GgmlType;
+
+    #[test]
+    fn ssm_stage_profile_sums_component_durations() {
+        let profile = SsmStageProfile {
+            norm: std::time::Duration::from_millis(1),
+            input_projection: std::time::Duration::from_millis(2),
+            convolution: std::time::Duration::from_millis(3),
+            output_projection: std::time::Duration::from_millis(4),
+            ffn: std::time::Duration::from_millis(5),
+        };
+
+        assert_eq!(profile.total(), std::time::Duration::from_millis(15));
+    }
 
     fn f32_tensor(mmap: &mut Vec<u8>, rows: usize, cols: usize, values: &[f32]) -> QuantizedTensor {
         assert_eq!(values.len(), rows * cols);

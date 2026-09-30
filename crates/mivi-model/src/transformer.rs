@@ -11,6 +11,33 @@ use mivi_core::math::{dot_product, vec_add};
 use mivi_core::simd::rms_norm_simd;
 use mivi_kv::KvCache;
 use mivi_quant::quantized_matmul_rows;
+use std::time::{Duration, Instant};
+
+/// Optional chunked-prefill timings for the stages within an attention block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttentionStageProfile {
+    pub norm: Duration,
+    pub qkv_projection: Duration,
+    /// Includes per-head norm, RoPE, KV insertion, and the causal attention scan.
+    pub causal_attention: Duration,
+    /// Includes output projection and its residual connection.
+    pub output_projection: Duration,
+    pub ffn: Duration,
+}
+
+impl AttentionStageProfile {
+    pub fn total(self) -> Duration {
+        self.norm + self.qkv_projection + self.causal_attention + self.output_projection + self.ffn
+    }
+
+    pub fn add_assign(&mut self, other: Self) {
+        self.norm += other.norm;
+        self.qkv_projection += other.qkv_projection;
+        self.causal_attention += other.causal_attention;
+        self.output_projection += other.output_projection;
+        self.ffn += other.ffn;
+    }
+}
 
 /// Parameter descriptor for GQA Attention forward pass.
 pub struct AttentionParams<'a> {
@@ -334,6 +361,20 @@ pub fn attention_forward_tile(
     start_pos: usize,
     rows: usize,
 ) -> Result<()> {
+    attention_forward_tile_profiled(tile, state, kv, params, start_pos, rows, None)
+}
+
+/// Same tile computation with optional stage timing; no timestamps are created
+/// when profiling is disabled.
+pub(crate) fn attention_forward_tile_profiled(
+    tile: &mut TileActivations,
+    state: &mut RunState,
+    kv: &mut KvCache,
+    params: &AttentionParams,
+    start_pos: usize,
+    rows: usize,
+    mut profile: Option<&mut AttentionStageProfile>,
+) -> Result<()> {
     if rows == 0 || rows > tile.tile_tokens() {
         return Err(ModelError::DimMismatch(format!(
             "invalid attention tile row count: {rows}"
@@ -362,6 +403,7 @@ pub fn attention_forward_tile(
             "attention FFN tile size overflow".to_string(),
         ))?;
 
+    let stage_start = profile.is_some().then(Instant::now);
     rms_norm_rows(
         &mut tile.norm[..dim_rows],
         &tile.current[..dim_rows],
@@ -371,6 +413,10 @@ pub fn attention_forward_tile(
         cfg.rms_norm_eps,
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.norm += start.elapsed();
+    }
+    let stage_start = profile.is_some().then(Instant::now);
     quantized_matmul_rows(
         &mut tile.q[..dim_rows],
         w.wq.quant_type,
@@ -398,7 +444,10 @@ pub fn attention_forward_tile(
         kv_dim,
         dim,
     )?;
-
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.qkv_projection += start.elapsed();
+    }
+    let stage_start = profile.is_some().then(Instant::now);
     for row in 0..rows {
         let pos = start_pos + row;
         let q_start = row * dim;
@@ -428,7 +477,10 @@ pub fn attention_forward_tile(
         compute_gqa_attention(state, kv, params.layer, pos, cfg)?;
         tile.norm[q_start..q_start + dim].copy_from_slice(&state.attn_out);
     }
-
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.causal_attention += start.elapsed();
+    }
+    let stage_start = profile.is_some().then(Instant::now);
     quantized_matmul_rows(
         &mut tile.next[..dim_rows],
         w.wo.quant_type,
@@ -445,7 +497,10 @@ pub fn attention_forward_tile(
         dim,
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
-
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.output_projection += start.elapsed();
+    }
+    let stage_start = profile.is_some().then(Instant::now);
     rms_norm_rows(
         &mut tile.norm[..dim_rows],
         &tile.current[..dim_rows],
@@ -497,6 +552,9 @@ pub fn attention_forward_tile(
     )
     .map_err(|error| ModelError::ExecutionFailed(error.to_string()))?;
 
+    if let (Some(profile), Some(start)) = (profile, stage_start) {
+        profile.ffn += start.elapsed();
+    }
     Ok(())
 }
 
@@ -530,6 +588,24 @@ mod tests {
             matrix[idx * dim + idx] = 1.0;
         }
         matrix
+    }
+
+    #[test]
+    fn attention_stage_profile_sums_and_accumulates() {
+        use std::time::Duration;
+        let stages = AttentionStageProfile {
+            norm: Duration::from_millis(1),
+            qkv_projection: Duration::from_millis(2),
+            causal_attention: Duration::from_millis(3),
+            output_projection: Duration::from_millis(4),
+            ffn: Duration::from_millis(5),
+        };
+        assert_eq!(stages.total(), Duration::from_millis(15));
+        let mut aggregate = AttentionStageProfile::default();
+        aggregate.add_assign(stages);
+        aggregate.add_assign(stages);
+        assert_eq!(aggregate.total(), Duration::from_millis(30));
+        assert_eq!(aggregate.causal_attention, Duration::from_millis(6));
     }
 
     #[test]
@@ -650,5 +726,29 @@ mod tests {
         let (tile_k, tile_v) = tile_kv.export_state(inputs.len()).unwrap();
         assert_eq!(token_k, tile_k);
         assert_eq!(token_v, tile_v);
+
+        let expected_tile = tile.current.clone();
+        for (row, input) in inputs.iter().enumerate() {
+            tile.current_row_mut(row).unwrap().copy_from_slice(input);
+        }
+        let mut profiled_state = RunState::new(&arena);
+        let mut profiled_kv = KvCache::try_new_selective(1, cfg.max_seq_len, dim, &[0]).unwrap();
+        let mut profile = AttentionStageProfile::default();
+        attention_forward_tile_profiled(
+            &mut tile,
+            &mut profiled_state,
+            &mut profiled_kv,
+            &params,
+            0,
+            inputs.len(),
+            Some(&mut profile),
+        )
+        .unwrap();
+        assert_eq!(tile.current, expected_tile);
+        assert_eq!(
+            profiled_kv.export_state(inputs.len()).unwrap(),
+            (tile_k, tile_v)
+        );
+        assert!(!profile.total().is_zero());
     }
 }

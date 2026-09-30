@@ -154,6 +154,7 @@ fn print_generation_measurement(
     prefill_profile: Option<mivi_model::ForwardProfileSnapshot>,
     measurement: &GenerationMeasurement,
     cache_chunks: usize,
+    cache_bytes: usize,
 ) {
     let ttft_ms = measurement
         .first_output_latency
@@ -199,6 +200,41 @@ fn print_generation_measurement(
             stage_percent(profile.ssm),
             stage_percent(profile.logits)
         );
+        let attention_total = profile.attention_stages.total();
+        if !attention_total.is_zero() {
+            let percent =
+                |duration: Duration| duration.as_secs_f64() * 100.0 / attention_total.as_secs_f64();
+            let stages = profile.attention_stages;
+            println!(
+                "  Attention time (norm/qkv/causal/out/ffn): {:.2}/{:.2}/{:.2}/{:.2}/{:.2} s",
+                stages.norm.as_secs_f64(),
+                stages.qkv_projection.as_secs_f64(),
+                stages.causal_attention.as_secs_f64(),
+                stages.output_projection.as_secs_f64(),
+                stages.ffn.as_secs_f64(),
+            );
+            println!(
+                "  Attention share (norm/qkv/causal/out/ffn): {:.1}%/{:.1}%/{:.1}%/{:.1}%/{:.1}%",
+                percent(stages.norm),
+                percent(stages.qkv_projection),
+                percent(stages.causal_attention),
+                percent(stages.output_projection),
+                percent(stages.ffn),
+            );
+        }
+        let ssm_total = profile.ssm_stages.total();
+        if !ssm_total.is_zero() {
+            let ssm_percent =
+                |duration: Duration| duration.as_secs_f64() * 100.0 / ssm_total.as_secs_f64();
+            println!(
+                "  SSM share (norm/in/conv/out/ffn): {:.1}%/{:.1}%/{:.1}%/{:.1}%/{:.1}%",
+                ssm_percent(profile.ssm_stages.norm),
+                ssm_percent(profile.ssm_stages.input_projection),
+                ssm_percent(profile.ssm_stages.convolution),
+                ssm_percent(profile.ssm_stages.output_projection),
+                ssm_percent(profile.ssm_stages.ffn),
+            );
+        }
     }
     println!("  First emitted text latency  : {ttft_display}");
     println!(
@@ -215,6 +251,10 @@ fn print_generation_measurement(
         )
     );
     println!("  Prefix-cache chunks        : {cache_chunks}");
+    println!(
+        "  Prefix-cache memory        : {:.2} MiB",
+        cache_bytes as f64 / (1024.0 * 1024.0)
+    );
     println!(
         "  Output preview             : {}",
         measurement.output.trim()
@@ -276,6 +316,7 @@ fn run_model_benchmark(
         cold_prefill_profile,
         &cold_generation,
         cold_cache_chunks,
+        model.prefix_cache.memory_usage_bytes(),
     );
 
     // The cold run populated the shared prefix. Keep it for the warm measurement.
@@ -290,6 +331,7 @@ fn run_model_benchmark(
         warm_prefill_profile,
         &warm_generation,
         warm_cache_chunks,
+        model.prefix_cache.memory_usage_bytes(),
     );
 
     println!(
