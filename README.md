@@ -126,6 +126,30 @@ cargo run --release --jobs 1 -- bench \
   --bench-prompt-tokens 2048
 ```
 
+### Experimental packed projections (test-only)
+
+Evaluate the packed Q4 kernel against real GGUF weights without enabling it in
+inference. Use an absolute model path because Cargo tests run from the crate directory:
+
+```bash
+MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 \
+  cargo test -p mivi-quant --release --lib --jobs 1 real_weight_projection_benchmark \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+Defaults select two distinct supported matrix shapes, evaluate their first 1,024
+rows, and test batches 32 and 64 with generated dense and outlier-heavy inputs.
+Override positive limits with `MIVI_TEST_MAX_ROWS`, `MIVI_TEST_ITERS` (default 4),
+`MIVI_TEST_TENSOR_LIMIT`, and `MIVI_TEST_BATCH`. Set `MIVI_TEST_TENSORS` to a
+comma-separated list of exact GGUF tensor names to override automatic selection;
+explicit unsupported formats are rejected, not silently substituted.
+
+The test reports weight formats, measured errors, and forward/reverse timings
+including packing and transposition. It checks exact packed scalar/tiled agreement
+and sampled f64 reference/error bounds. These are capped projections with generated
+activations, **not captured model activations, logit accuracy, or agent readiness**.
+Passing the mathematical error bound does not certify acceptable model quality.
+
 ### 💾 Memory Footprint
 
 Runtime RSS depends on the loaded GGUF, context size, KV precision, adapters, and OS page

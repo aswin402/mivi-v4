@@ -7,6 +7,8 @@
 use super::{dequantize_q4_k_m, get_scale_min_k4, Q4_K_BLOCK_SIZE, Q4_K_BYTES};
 use rayon::prelude::*;
 
+mod real_weights;
+
 #[derive(Clone, Copy, Debug)]
 enum PackedKernel {
     Scalar,

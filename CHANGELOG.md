@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.55] - 2026-09-30
+
+### Real GGUF Weight Projection Evaluation (Test-Only)
+
+#### Ideas, Inspirations & Sources
+
+- **Measure with real weights before enabling an approximate kernel**: reuse
+  Mivi's existing GGUF reader through a path-only model dev-dependency rather
+  than duplicate parsing or add a production dependency. Tensor selection uses
+  metadata/type/shape, not a model name or family. Cargo's separate normal/test
+  artifacts permit this dev-dependency cycle; GGUF wire type IDs avoid mixing
+  Rust types across those artifacts.
+  - *Sources*: Mivi's `mivi-model/src/gguf.rs`,
+    [Cargo dev-dependency cycles](https://doc.rust-lang.org/cargo/reference/resolver.html#dev-dependency-cycles),
+    and [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Do not rely on dense synthetic inputs for activation-quantization quality**:
+  add deterministic outlier-heavy generated inputs alongside dense inputs.
+  The stress recipe is not a measurement of either model's actual activations
+  or an implementation of mixed-precision outlier decomposition.
+  - *Inspiration/source*: [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339)
+    explains why outlier features can require separate treatment. Its results
+    do not establish quality for Mivi's small-model packed CPU experiment.
+
+#### Added
+
+- An opt-in real-weight Q4_K projection benchmark with configurable GGUF path,
+  exact tensor names, automatic tensor count, row cap, batch, and iterations.
+- Deterministic automatic selection of distinct eligible matrix shapes; format
+  inventory reporting and explicit rejection of unsupported requested tensors.
+- Finite/length-checked relative-L2 and absolute-error metrics, exact scalar/tiled
+  comparisons, and sampled dequantized f64 references with quantization error
+  bounds. Configuration and metric regression tests require no model artifact.
+- Forward/reverse timing passes include activation packing, allocation, and
+  transposition. Documentation includes the focused one-job invocation and
+  makes row-prefix sampling and generated-activation limitations explicit.
+
+#### Measured Result and Decision
+
+- Two local GGUFs tested with two Rayon threads, 1,024-row prefixes, batches
+  32/64, and dense/outlier input recipes: eight cases per file, 16 iterations
+  per timing pass in the repeated evaluation.
+  - LFM2.5-1.2B-Instruct: `blk.11.ffn_down.weight` (8,192 input columns) and
+    `blk.0.ffn_gate.weight` (2,048 input columns).
+  - LFM2.5-2.6B: `blk.10.ffn_down.weight` (10,752 input columns) and
+    `blk.0.ffn_gate.weight` (2,048 input columns).
+- Dense relative L2 projection error: **0.3896–0.3955%**. Outlier-heavy generated
+  inputs: **3.6567–3.7645%**. All tiled outputs matched the packed scalar reference
+  exactly; sampled f64/reference/error-bound checks passed. These error bounds
+  are correctness checks, not an acceptable model-quality threshold.
+- Real-weight timing gains are smaller and less consistent than the preceding
+  synthetic-weight measurements. Representative batch-64 dense down-projections:
+  - 1.2B: existing F32 12.852–13.060ms; packed tiled 11.425–11.494ms.
+  - 2.6B: existing F32 18.633–19.971ms; packed tiled 15.999–16.633ms.
+- Regressions remain: 1.2B gate, batch 32, generated outliers took
+  1.605–1.674ms packed versus 1.398–1.407ms F32. These are capped projections,
+  not full-layer, server, logit, or end-to-end agent latency measurements.
+- GGUF two-dimensional inventories include **11 Q6_K matrices** in the 1.2B file
+  and **19 Q6_K matrices** in the 2.6B file. This experiment evaluates only Q4_K;
+  filenames containing Q4_K_M do not mean every matrix is Q4_K.
+- **Keep production F32 inference unchanged**. Next: capture representative
+  model activations, evaluate logit-level effects, and address outlier sensitivity
+  and mixed-format coverage before considering an inference dispatch policy.
+
+#### Validation
+
+- Focused `mivi-quant` debug suite: 25 passed, two opt-in benchmarks ignored.
+  Release suite with the 1.2B artifact and both benchmarks included: 27 passed;
+  the 2.6B real-weight evaluation also passed on the release version.
+- Scoped Clippy passed with existing baseline lint allowances; formatting and
+  diff checks passed.
+- Both real-weight evaluations passed; no model generation or agent-readiness
+  claim is made. The new reader dependency is test-only, as confirmed by the
+  normal dependency tree. No new handwritten unsafe code was introduced.
+- Cargo builds/tests/checks remain scoped with one job, one test thread, and
+  two Rayon threads. No full-workspace Cargo build, check, or test was run.
+
 ## [v0.2.54] - 2026-09-30
 
 ### Test-Only Packed Weight Reuse and Token Tiling
