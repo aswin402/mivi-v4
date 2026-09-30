@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
 use std::time::Instant;
 
+mod captured_activations;
+
 #[derive(Debug, thiserror::Error)]
 enum EvaluationError {
     #[error("projection outputs have different lengths")]

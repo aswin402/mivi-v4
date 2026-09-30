@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.56] - 2026-09-30
+
+### Captured Prefill Activation Evaluation (Test-Only)
+
+#### Ideas, Inspirations & Sources
+
+- **Capture real inputs without production instrumentation**: reuse the public
+  model/tile layer APIs and their retained normalized/SwiGLU scratch buffers.
+  Validate the diagnostic walker against production chunked-prefill logits
+  before interpreting packed-kernel errors. BOS handling uses GGUF metadata,
+  never a model name, family, or fixed token ID.
+  - *Sources*: Mivi's `mivi-model/src/{model,prefill,ssm,transformer}.rs` and
+    [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Test real activation distributions and distinguish local error from quality**:
+  the outlier motivation in
+  [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339) inspired checking
+  actual FFN inputs rather than only uniform/random stress recipes. This does
+  not implement the paper's mixed-precision decomposition or transfer its
+  large-model quality claims to Mivi.
+
+#### Added
+
+- Opt-in, memory-only short-prefill evaluation with configurable raw-text prompt,
+  token limit (default 32, maximum 64 including BOS), and projection row cap.
+  Neither prompt text nor activation arrays are printed or dumped.
+- Replay of every eligible executed Q4 gate/up/down projection against existing
+  F32-activation inference, with packed scalar/tiled equality and sampled
+  independent f64/error-bound checks. Unsupported formats are counted explicitly;
+  SSM layers that skip the FFN do not replay stale scratch buffers.
+- A separate single-down-projection logit sensitivity walk: choose the latest
+  supported executed layer by metadata, inject packed-minus-exact residual deltas
+  for all token/output rows, and propagate through subsequent unchanged layers.
+  Report final-token logit errors and greedy-token agreement. Identity, malformed
+  delta, and invalid/tied greedy-logit cases have model-free regression coverage.
+
+#### Measured Result and Decision
+
+- One short raw-text prompt on each local GGUF, two Rayon threads, 1,024-row
+  prefixes for projection metrics. This is not chat-template/tool-call evaluation.
+  - LFM2.5-1.2B-Instruct: 16 tokens including BOS, 40 Q4 projections replayed,
+    eight unsupported FFN projections skipped. Relative L2: **0.6098–2.5631%**.
+  - LFM2.5-2.6B: 14 tokens, 76 Q4 projections replayed, 14 unsupported FFN
+    projections skipped. Relative L2: **0.4137–1.9144%**.
+- Baseline logits matched production chunked prefill exactly in both runs;
+  all replay scalar/tiled comparisons and sampled bounds passed.
+- Single full down-projection perturbations (not capped to 1,024 output rows):
+  - 1.2B layer 12: final-logit relative L2 **1.2938%**, max absolute error
+    **0.067876**; greedy next-token ID remained 509.
+  - 2.6B layer 25: final-logit relative L2 **0.2060%**, max absolute error
+    **0.035920**; greedy next-token ID remained 358.
+- Residual-delta injection introduces different rounding from replacing a
+  projection before residual addition. One unchanged greedy token and bounded
+  arithmetic errors do not establish model/agent quality. There is no timing
+  result, cumulative gate/up/down quantization validation, or production rollout.
+  Production inference remains unchanged; broader quality tests are still needed.
+
 ## [v0.2.55] - 2026-09-30
 
 ### Real GGUF Weight Projection Evaluation (Test-Only)

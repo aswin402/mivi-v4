@@ -150,6 +150,31 @@ and sampled f64 reference/error bounds. These are capped projections with genera
 activations, **not captured model activations, logit accuracy, or agent readiness**.
 Passing the mathematical error bound does not certify acceptable model quality.
 
+Replay **captured prefill activations** with a separate memory-only diagnostic:
+
+```bash
+MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
+  cargo test -p mivi-quant --release --lib --jobs 1 captured_prefill_projection_evaluation \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+This uses a short raw-text prompt, not an agent/chat-template evaluation. Set
+`MIVI_TEST_CAPTURE_PROMPT` to change it, `MIVI_TEST_CAPTURE_TOKENS` to limit the
+single tile (default 32, maximum 64, including metadata-requested BOS), and
+`MIVI_TEST_MAX_ROWS` for the projection row-prefix cap (default 1,024). Prompt
+text and activations are neither printed nor dumped to disk.
+GGUFs requesting BOS must provide a valid `u32` BOS ID: this diagnostic rejects
+missing/invalid metadata instead of using production's legacy fallback token ID.
+
+The baseline tile walker is checked against production chunked-prefill logits.
+Every executed eligible Q4 FFN gate/up/down projection is replayed, with unsupported
+formats counted explicitly. A second walk perturbs only the latest supported
+down-projection using **all** output rows and token rows, then propagates through
+the remaining layers. It reports final-token logit error and greedy-token agreement.
+Residual-delta injection has different floating-point rounding from replacing the
+projection before the residual addition. This is single-projection sensitivity,
+**not cumulative packed inference, a quality acceptance threshold, or a speedup**.
+
 ### 💾 Memory Footprint
 
 Runtime RSS depends on the loaded GGUF, context size, KV precision, adapters, and OS page
