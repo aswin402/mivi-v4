@@ -18,6 +18,7 @@ fn project(
     input: &[f32],
     batch: usize,
     packed: bool,
+    codec: super::super::super::ActivationCodec,
 ) -> EvalResult<bool> {
     if batch == 0
         || projection.rows == 0
@@ -29,14 +30,13 @@ fn project(
     let eligible = packed
         && super::supported_shape(projection.kind as u32, &[projection.cols, projection.rows]);
     if eligible {
-        super::packed_matmul_with_kernel(
+        codec.project(
             out,
             projection.weights,
             input,
             batch,
             projection.rows,
             projection.cols,
-            super::PackedKernel::detected_tiled(),
         )?;
     } else {
         super::quantized_matmul_rows(
@@ -81,6 +81,7 @@ pub(super) fn recompute(
     batch: usize,
     full: bool,
     packing: FfnPacking,
+    codec: super::super::super::ActivationCodec,
 ) -> EvalResult<Recomputed> {
     let projections = FfnProjections {
         gate: Projection::from_tensor(&ffn.w_gate, mmap)?,
@@ -88,7 +89,7 @@ pub(super) fn recompute(
         down: Projection::from_tensor(&ffn.w_down, mmap)?,
     };
     let normalized = tile.norm_mut().to_vec();
-    projections.recompute(&normalized, tile.gate(), batch, full, packing)
+    projections.recompute(&normalized, tile.gate(), batch, full, packing, codec)
 }
 
 struct FfnProjections<'a> {
@@ -135,37 +136,60 @@ fn isolated_gate_up_packing_matches_selected_projection_reference() {
     let input: Vec<_> = (0..batch * width)
         .map(|i| ((i % 31) as f32 - 15.0) / 16.0)
         .collect();
-    let mut outputs = Vec::new();
-    for (packing, packed_gate, packed_up) in [
-        (FfnPacking::GateOnly, true, false),
-        (FfnPacking::UpOnly, false, true),
+    for codec in [
+        super::super::super::ActivationCodec::Group256,
+        super::super::super::ActivationCodec::Group32,
     ] {
-        let mut gate = vec![0.0; input.len()];
-        let mut up = gate.clone();
-        let mut reference = gate.clone();
-        project(&mut gate, &projections.gate, &input, batch, packed_gate).unwrap();
-        project(&mut up, &projections.up, &input, batch, packed_up).unwrap();
-        mivi_model::swiglu_rows(&mut gate, &up, batch, width).unwrap();
-        assert!(!project(&mut reference, &projections.down, &gate, batch, false).unwrap());
-        let recomputed = projections
-            .recompute(&input, &[], batch, true, packing)
+        let mut isolated_outputs = Vec::new();
+        for (packing, packed_gate, packed_up) in [
+            (FfnPacking::GateOnly, true, false),
+            (FfnPacking::UpOnly, false, true),
+        ] {
+            let mut gate = vec![0.0; input.len()];
+            let mut up = gate.clone();
+            let mut reference = gate.clone();
+            project(
+                &mut gate,
+                &projections.gate,
+                &input,
+                batch,
+                packed_gate,
+                codec,
+            )
             .unwrap();
-        assert_eq!((recomputed.packed, recomputed.fallback), (1, 2));
-        assert_eq!(recomputed.output, reference);
-        assert!(reference.iter().any(|x| *x != 0.0));
-        outputs.push(reference);
-    }
-    assert_ne!(
-        outputs[0], outputs[1],
-        "fixture must distinguish gate from up packing"
-    );
-    for packing in [FfnPacking::GateOnly, FfnPacking::UpOnly] {
-        assert!(
-            projections
-                .recompute(&input, &input, batch, false, packing)
-                .is_err(),
-            "gate/up isolation requires full FFN recomputation"
+            project(&mut up, &projections.up, &input, batch, packed_up, codec).unwrap();
+            mivi_model::swiglu_rows(&mut gate, &up, batch, width).unwrap();
+            assert!(!project(
+                &mut reference,
+                &projections.down,
+                &gate,
+                batch,
+                false,
+                codec,
+            )
+            .unwrap());
+            let recomputed = projections
+                .recompute(&input, &[], batch, true, packing, codec)
+                .unwrap();
+            assert_eq!((recomputed.packed, recomputed.fallback), (1, 2));
+            assert_eq!(recomputed.output, reference);
+            assert!(reference.iter().any(|x| *x != 0.0));
+            isolated_outputs.push(reference);
+        }
+        assert_ne!(
+            isolated_outputs[0],
+            isolated_outputs[1],
+            "fixture must distinguish gate from up packing for {}",
+            codec.label()
         );
+        for packing in [FfnPacking::GateOnly, FfnPacking::UpOnly] {
+            assert!(
+                projections
+                    .recompute(&input, &input, batch, false, packing, codec)
+                    .is_err(),
+                "gate/up isolation requires full FFN recomputation"
+            );
+        }
     }
 }
 
@@ -177,6 +201,7 @@ impl FfnProjections<'_> {
         batch: usize,
         full: bool,
         packing: FfnPacking,
+        codec: super::super::super::ActivationCodec,
     ) -> EvalResult<Recomputed> {
         if !full && matches!(packing, FfnPacking::GateOnly | FfnPacking::UpOnly) {
             return Err("gate/up isolation requires full FFN recomputation".into());
@@ -206,9 +231,11 @@ impl FfnProjections<'_> {
             let mut gate = vec![0.0; hidden_len];
             let mut up = vec![0.0; hidden_len];
             count(project(
-                &mut gate, &self.gate, normalized, batch, pack_gate,
+                &mut gate, &self.gate, normalized, batch, pack_gate, codec,
             )?);
-            count(project(&mut up, &self.up, normalized, batch, pack_up)?);
+            count(project(
+                &mut up, &self.up, normalized, batch, pack_up, codec,
+            )?);
             mivi_model::swiglu_rows(&mut gate, &up, batch, self.gate.rows)?;
             gate
         } else {
@@ -223,7 +250,14 @@ impl FfnProjections<'_> {
                 .checked_mul(self.down.rows)
                 .ok_or("FFN output size overflow")?
         ];
-        count(project(&mut output, &self.down, &gate, batch, pack_down)?);
+        count(project(
+            &mut output,
+            &self.down,
+            &gate,
+            batch,
+            pack_down,
+            codec,
+        )?);
         Ok(Recomputed {
             output,
             packed: coverage.packed,
@@ -242,9 +276,22 @@ fn cumulative_projection_f32_fallback_preserves_nonzero_outputs() {
         rows: 2,
         cols: 2,
     };
-    let mut out = [0.0; 4];
-    assert!(!project(&mut out, &projection, &[2.0, 1.0, -1.0, 3.0], 2, true).unwrap());
-    assert_eq!(out, [4.0, -2.0, 5.0, 15.0]);
+    for codec in [
+        super::super::super::ActivationCodec::Group256,
+        super::super::super::ActivationCodec::Group32,
+    ] {
+        let mut out = [0.0; 4];
+        assert!(!project(
+            &mut out,
+            &projection,
+            &[2.0, 1.0, -1.0, 3.0],
+            2,
+            true,
+            codec
+        )
+        .unwrap());
+        assert_eq!(out, [4.0, -2.0, 5.0, 15.0]);
+    }
 }
 
 #[test]
@@ -257,29 +304,28 @@ fn cumulative_projection_uses_q4_and_rejects_invalid_inputs() {
         cols: 256,
     };
     let input = vec![0.5; 256];
-    let mut out = [0.0; 2];
-    assert!(project(&mut out, &projection, &input, 1, true).unwrap());
-    let mut expected = [0.0; 2];
-    super::packed_matmul_with_kernel(
-        &mut expected,
-        &weights,
-        &input,
-        1,
-        2,
-        256,
-        super::PackedKernel::detected_tiled(),
-    )
-    .unwrap();
-    assert_eq!(out, expected);
-    assert!(project(&mut out, &projection, &input[..255], 1, true).is_err());
-    assert!(project(&mut out, &projection, &vec![f32::NAN; 256], 1, true).is_err());
+    for codec in [
+        super::super::super::ActivationCodec::Group256,
+        super::super::super::ActivationCodec::Group32,
+    ] {
+        let mut out = [0.0; 2];
+        assert!(project(&mut out, &projection, &input, 1, true, codec).unwrap());
+        let mut expected = [0.0; 2];
+        codec
+            .project(&mut expected, &weights, &input, 1, 2, 256)
+            .unwrap();
+        assert_eq!(out, expected);
+        assert!(project(&mut out, &projection, &input[..255], 1, true, codec).is_err());
+        assert!(project(&mut out, &projection, &vec![f32::NAN; 256], 1, true, codec).is_err());
+    }
 }
 
 #[test]
 #[ignore = "requires MIVI_TEST_MODEL; cumulative multi-prompt sensitivity"]
 fn cumulative_prefill_evaluation() -> EvalResult<()> {
+    let codec = super::super::super::ActivationCodec::from_env()?;
     assert!(
-        evaluate_corpus()? >= 12,
+        evaluate_corpus(codec)? >= 12,
         "all four modes must evaluate at least three prompts"
     );
     Ok(())
@@ -353,50 +399,73 @@ fn cumulative_mixed_ffn_recomputes_swiglu_before_fallback_down() {
     let input: Vec<_> = (0..batch * width)
         .map(|i| ((i % 31) as f32 - 15.0) / 16.0)
         .collect();
-    for packed in [false, true] {
-        let mut expected = vec![0.0; input.len()];
-        let mut up = expected.clone();
-        project(&mut expected, &projections.gate, &input, batch, packed).unwrap();
-        project(&mut up, &projections.up, &input, batch, packed).unwrap();
-        mivi_model::swiglu_rows(&mut expected, &up, batch, width).unwrap();
-        let recomputed = projections
-            .recompute(
+    for codec in [
+        super::super::super::ActivationCodec::Group256,
+        super::super::super::ActivationCodec::Group32,
+    ] {
+        for packed in [false, true] {
+            let mut expected = vec![0.0; input.len()];
+            let mut up = expected.clone();
+            project(
+                &mut expected,
+                &projections.gate,
                 &input,
-                &vec![0.0; input.len()],
                 batch,
-                true,
-                if packed {
-                    FfnPacking::All
-                } else {
-                    FfnPacking::None
-                },
+                packed,
+                codec,
             )
             .unwrap();
-        assert_eq!(
-            recomputed.output, expected,
-            "down identity must receive NEW SwiGLU, not retained original gate"
-        );
-        assert_eq!(
-            (recomputed.packed, recomputed.fallback),
-            if packed { (2, 1) } else { (0, 3) }
-        );
-        assert!(expected.iter().any(|x| *x != 0.0));
+            project(&mut up, &projections.up, &input, batch, packed, codec).unwrap();
+            mivi_model::swiglu_rows(&mut expected, &up, batch, width).unwrap();
+            let recomputed = projections
+                .recompute(
+                    &input,
+                    &vec![0.0; input.len()],
+                    batch,
+                    true,
+                    if packed {
+                        FfnPacking::All
+                    } else {
+                        FfnPacking::None
+                    },
+                    codec,
+                )
+                .unwrap();
+            assert_eq!(
+                recomputed.output,
+                expected,
+                "{}: down identity must receive NEW SwiGLU, not retained original gate",
+                codec.label()
+            );
+            assert_eq!(
+                (recomputed.packed, recomputed.fallback),
+                if packed { (2, 1) } else { (0, 3) }
+            );
+            assert!(expected.iter().any(|x| *x != 0.0));
+        }
+        let original_gate = vec![0.25; input.len()];
+        let down_only = projections
+            .recompute(&input, &original_gate, batch, false, FfnPacking::All, codec)
+            .unwrap();
+        assert_eq!(down_only.output, original_gate);
+        assert_eq!((down_only.packed, down_only.fallback), (0, 1));
+        assert!(projections
+            .recompute(&input, &[], batch, false, FfnPacking::All, codec)
+            .is_err());
+        assert!(projections
+            .recompute(
+                &input[..1],
+                &original_gate,
+                batch,
+                true,
+                FfnPacking::All,
+                codec
+            )
+            .is_err());
     }
-    let original_gate = vec![0.25; input.len()];
-    let down_only = projections
-        .recompute(&input, &original_gate, batch, false, FfnPacking::All)
-        .unwrap();
-    assert_eq!(down_only.output, original_gate);
-    assert_eq!((down_only.packed, down_only.fallback), (0, 1));
-    assert!(projections
-        .recompute(&input, &[], batch, false, FfnPacking::All)
-        .is_err());
-    assert!(projections
-        .recompute(&input[..1], &original_gate, batch, true, FfnPacking::All)
-        .is_err());
 }
 
-fn evaluate_corpus() -> EvalResult<usize> {
+fn evaluate_corpus(codec: super::super::super::ActivationCodec) -> EvalResult<usize> {
     let path = std::env::var_os("MIVI_TEST_MODEL").ok_or("set MIVI_TEST_MODEL")?;
     let max_tokens = super::positive_env("MIVI_TEST_CAPTURE_TOKENS", 64)?;
     if max_tokens > 64 {
@@ -429,23 +498,23 @@ fn evaluate_corpus() -> EvalResult<usize> {
         model.prefix_cache.clear();
         model.generate_tokens_incremental(&tokens, 0, 0, |_, _| true)?;
         let production = model.state.logits.to_vec();
-        let (_, residual) = super::walk(&mut model, &tokens, 1, WalkMode::Exact)?;
+        let (_, residual) = super::walk(&mut model, &tokens, 1, WalkMode::Exact, codec)?;
         let baseline = super::logits(&model, &residual)?;
         let (control_coverage, residual) =
-            super::walk(&mut model, &tokens, 1, WalkMode::FullFfnControl)?;
+            super::walk(&mut model, &tokens, 1, WalkMode::FullFfnControl, codec)?;
         assert_eq!(control_coverage.packed, 0);
         assert_eq!(control_coverage.fallback, executed_layers * 3);
         let recomputed = super::logits(&model, &residual)?;
         let (control, recompute_control) = validate_controls(&production, &baseline, &recomputed)?;
         let walker_recompute = checked_logit_error(&baseline, &recomputed)?;
-        println!("fixture={label}, tokens={}, baseline/production max abs={:.8}, recompute/production max abs={:.8}, recompute/walker max abs={:.8}", tokens.len(), control.max_abs, recompute_control.max_abs, walker_recompute.max_abs);
+        println!("fixture={label}, codec={}, tokens={}, baseline/production max abs={:.8}, recompute/production max abs={:.8}, recompute/walker max abs={:.8}", codec.label(), tokens.len(), control.max_abs, recompute_control.max_abs, walker_recompute.max_abs);
         for (mode, name) in [
             (WalkMode::DownOnly, "cumulative-down"),
             (WalkMode::GateOnly, "cumulative-gate"),
             (WalkMode::UpOnly, "cumulative-up"),
             (WalkMode::FullFfn, "cumulative-full-ffn"),
         ] {
-            let (coverage, residual) = super::walk(&mut model, &tokens, 1, mode)?;
+            let (coverage, residual) = super::walk(&mut model, &tokens, 1, mode, codec)?;
             assert!(
                 coverage.packed > 0,
                 "no supported packed projections for {name}"
@@ -458,10 +527,10 @@ fn evaluate_corpus() -> EvalResult<usize> {
             );
             let changed = super::logits(&model, &residual)?;
             let error = checked_logit_error(&baseline, &changed)?;
-            println!("  mode={name}, packed={}, fallback={}, logit relative L2={:.6}, max abs={:.6}, greedy token {} -> {}", coverage.packed, coverage.fallback, error.relative_l2, error.max_abs, super::top_token(&baseline)?, super::top_token(&changed)?);
+            println!("  mode={name}, codec={}, packed={}, fallback={}, logit relative L2={:.6}, max abs={:.6}, greedy token {} -> {}", codec.label(), coverage.packed, coverage.fallback, error.relative_l2, error.max_abs, super::top_token(&baseline)?, super::top_token(&changed)?);
             cases += 1;
         }
     }
-    println!("{cases} cumulative cases; complete matrices, raw fixtures, residual-delta rounding; no generation/tool-quality or timing claim");
+    println!("{cases} cumulative cases, codec={}; complete matrices, raw fixtures, residual-delta rounding; no generation/tool-quality or timing claim", codec.label());
     Ok(cases)
 }

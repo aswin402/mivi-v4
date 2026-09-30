@@ -10,6 +10,138 @@ use rayon::prelude::*;
 mod group32;
 mod real_weights;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationCodec {
+    Group256,
+    Group32,
+}
+
+impl ActivationCodec {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "256" => Ok(Self::Group256),
+            "32" => Ok(Self::Group32),
+            _ => Err(format!(
+                "unsupported MIVI_TEST_ACTIVATION_GROUP={value:?}; use 256 or 32"
+            )),
+        }
+    }
+
+    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        match std::env::var("MIVI_TEST_ACTIVATION_GROUP") {
+            Ok(value) => Self::parse(&value).map_err(Into::into),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Group256),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Group256 => format!(
+                "group=256, kernel={}",
+                PackedKernel::detected_tiled().label()
+            ),
+            Self::Group32 => "group=32, kernel=scalar".to_owned(),
+        }
+    }
+
+    fn project(
+        self,
+        out: &mut [f32],
+        weights: &[u8],
+        input: &[f32],
+        batch: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<(), PackedError> {
+        match self {
+            Self::Group256 => packed_matmul_with_kernel(
+                out,
+                weights,
+                input,
+                batch,
+                rows,
+                cols,
+                PackedKernel::detected_tiled(),
+            ),
+            Self::Group32 => group32::packed_matmul(out, weights, input, batch, rows, cols),
+        }
+    }
+
+    fn reconstruct(self, input: &[f32]) -> Result<[f32; Q4_K_BLOCK_SIZE], PackedError> {
+        match self {
+            Self::Group256 => {
+                let packed = PackedActivation::pack(input)?;
+                Ok(std::array::from_fn(|i| {
+                    f32::from(packed.values[i]) * packed.scale
+                }))
+            }
+            Self::Group32 => Ok(group32::Group32Activation::pack(input)?.reconstructed()),
+        }
+    }
+}
+
+#[test]
+fn activation_codec_rejects_unsupported_settings() {
+    assert_eq!(
+        ActivationCodec::parse("256").unwrap(),
+        ActivationCodec::Group256
+    );
+    assert_eq!(
+        ActivationCodec::parse("32").unwrap(),
+        ActivationCodec::Group32
+    );
+    for text in ["", "0", "16", "64", "128", "bad", " 32", "32 "] {
+        assert!(ActivationCodec::parse(text).is_err());
+    }
+}
+
+#[test]
+fn activation_codec_dispatches_and_reconstructs_with_selected_packing() {
+    let (rows, batch, cols) = (3, 2, 512);
+    let weights = fixture_weights(rows, cols, 43);
+    let input: Vec<_> = (0..batch * cols)
+        .map(|i| (i * 41 % 113) as f32 / 37.0 - 1.3)
+        .collect();
+    for codec in [ActivationCodec::Group256, ActivationCodec::Group32] {
+        let mut actual = vec![0.0; rows * batch];
+        codec
+            .project(&mut actual, &weights, &input, batch, rows, cols)
+            .unwrap();
+        let mut expected = vec![0.0; rows * batch];
+        match codec {
+            ActivationCodec::Group256 => packed_matmul_with_kernel(
+                &mut expected,
+                &weights,
+                &input,
+                batch,
+                rows,
+                cols,
+                PackedKernel::detected_tiled(),
+            )
+            .unwrap(),
+            ActivationCodec::Group32 => {
+                group32::packed_matmul(&mut expected, &weights, &input, batch, rows, cols).unwrap()
+            }
+        }
+        assert_eq!(actual, expected, "{}", codec.label());
+
+        for block in input.chunks_exact(Q4_K_BLOCK_SIZE) {
+            let reconstructed = codec.reconstruct(block).unwrap();
+            let expected = match codec {
+                ActivationCodec::Group256 => {
+                    let packed = PackedActivation::pack(block).unwrap();
+                    std::array::from_fn(|i| f32::from(packed.values[i]) * packed.scale)
+                }
+                ActivationCodec::Group32 => group32::Group32Activation::pack(block)
+                    .unwrap()
+                    .reconstructed(),
+            };
+            assert_eq!(reconstructed, expected, "{}", codec.label());
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum PackedKernel {
     Scalar,

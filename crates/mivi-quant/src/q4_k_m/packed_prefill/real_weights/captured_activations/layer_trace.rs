@@ -1,6 +1,6 @@
 //! Layer-wise sensitivity tracing; no production instrumentation or tensor dumps.
 
-use super::super::PackedActivation;
+use super::super::super::ActivationCodec;
 use super::{EvalResult, LayerWeights, Model, PrefillStrategy, WalkMode, Q4_K_BLOCK_SIZE};
 
 struct ActivationStats {
@@ -8,7 +8,11 @@ struct ActivationStats {
     peak_over_rms: f64,
 }
 
-fn activation_stats(input: &[f32], width: usize) -> EvalResult<Option<ActivationStats>> {
+fn activation_stats(
+    input: &[f32],
+    width: usize,
+    codec: ActivationCodec,
+) -> EvalResult<Option<ActivationStats>> {
     if width == 0
         || input.is_empty()
         || !input.len().is_multiple_of(width)
@@ -23,10 +27,10 @@ fn activation_stats(input: &[f32], width: usize) -> EvalResult<Option<Activation
     let mut error_squared = 0.0;
     let mut peak = 0.0f64;
     for block in input.chunks_exact(Q4_K_BLOCK_SIZE) {
-        let packed = PackedActivation::pack(block)?;
-        for (&original, &integer) in block.iter().zip(&packed.values) {
+        let reconstructed = codec.reconstruct(block)?;
+        for (&original, reconstructed) in block.iter().zip(reconstructed) {
             let value = f64::from(original);
-            let reconstructed = f64::from(f32::from(integer) * packed.scale);
+            let reconstructed = f64::from(reconstructed);
             reference_squared += value * value;
             error_squared += (reconstructed - value).powi(2);
             peak = peak.max(value.abs());
@@ -49,28 +53,35 @@ fn layer_trace_activation_stats_measure_actual_packing_error() {
     let width = super::Q4_K_BLOCK_SIZE;
     let mut input = vec![0.25; width];
     input[0] = 12.0;
-    let stats = activation_stats(&input, width).unwrap().unwrap();
-    assert!(stats.relative_l2 > 0.0);
-    assert!(stats.peak_over_rms > 10.0);
-    let scale = -12.0f32 / 127.0;
-    let small_error = f64::from(-3.0 * scale) - 0.25;
-    let peak_error = f64::from(-127.0 * scale) - 12.0;
-    let energy = 144.0 + (width - 1) as f64 * 0.25f64.powi(2);
-    let expected_error =
-        (((width - 1) as f64 * small_error.powi(2) + peak_error.powi(2)) / energy).sqrt();
-    assert!((stats.relative_l2 - expected_error).abs() < 1e-12);
-    assert!((stats.peak_over_rms - 12.0 / (energy / width as f64).sqrt()).abs() < 1e-12);
-    let zeros = activation_stats(&vec![0.0; width], width).unwrap().unwrap();
-    assert_eq!((zeros.relative_l2, zeros.peak_over_rms), (0.0, 0.0));
-    assert!(activation_stats(&input[..width - 1], width).is_err());
-    assert!(activation_stats(&[f32::NAN; 256], width).is_err());
-    assert!(activation_stats(&[1.0; 3], 3).unwrap().is_none());
+    for codec in [ActivationCodec::Group256, ActivationCodec::Group32] {
+        let stats = activation_stats(&input, width, codec).unwrap().unwrap();
+        assert!(stats.relative_l2 > 0.0);
+        assert!(stats.peak_over_rms > 10.0);
+        let reconstructed = codec.reconstruct(&input).unwrap();
+        let energy = input.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>();
+        let error = input
+            .iter()
+            .zip(reconstructed)
+            .map(|(&original, restored)| (f64::from(restored) - f64::from(original)).powi(2))
+            .sum::<f64>();
+        let expected_error = (error / energy).sqrt();
+        assert!((stats.relative_l2 - expected_error).abs() < 1e-12);
+        assert!((stats.peak_over_rms - 12.0 / (energy / width as f64).sqrt()).abs() < 1e-12);
+        let zeros = activation_stats(&vec![0.0; width], width, codec)
+            .unwrap()
+            .unwrap();
+        assert_eq!((zeros.relative_l2, zeros.peak_over_rms), (0.0, 0.0));
+        assert!(activation_stats(&input[..width - 1], width, codec).is_err());
+        assert!(activation_stats(&[f32::NAN; 256], width, codec).is_err());
+        assert!(activation_stats(&[1.0; 3], 3, codec).unwrap().is_none());
+    }
 }
 
 #[test]
 #[ignore = "requires MIVI_TEST_MODEL; traces cumulative residual error by layer"]
 fn layerwise_prefill_error_trace() -> EvalResult<()> {
-    assert!(trace()? > 0, "no layers traced");
+    let codec = ActivationCodec::from_env()?;
+    assert!(trace(codec)? > 0, "no layers traced");
     Ok(())
 }
 
@@ -94,7 +105,7 @@ fn layer_trace_rejects_blank_prompt_before_tokenization() {
     assert!(validate_prompt_text("Inspect src/main.rs").is_ok());
 }
 
-fn trace() -> EvalResult<usize> {
+fn trace(codec: ActivationCodec) -> EvalResult<usize> {
     let path = std::env::var_os("MIVI_TEST_MODEL").ok_or("set MIVI_TEST_MODEL")?;
     let max_tokens = super::positive_env("MIVI_TEST_CAPTURE_TOKENS", 64)?;
     if max_tokens > 64 {
@@ -136,6 +147,7 @@ fn trace() -> EvalResult<usize> {
         &tokens,
         1,
         WalkMode::Exact,
+        codec,
         |index, tile, before_delta| {
             if index != snapshots.len() {
                 return Err("out-of-order baseline layer observation".into());
@@ -147,12 +159,12 @@ fn trace() -> EvalResult<usize> {
             let dim = tile.dim();
             let hidden = tile.hidden_dim();
             let normalized = if executed_ffn {
-                activation_stats(tile.norm_mut(), dim)?
+                activation_stats(tile.norm_mut(), dim, codec)?
             } else {
                 None
             };
             let swiglu = if executed_ffn {
-                activation_stats(tile.gate(), hidden)?
+                activation_stats(tile.gate(), hidden, codec)?
             } else {
                 None
             };
@@ -182,6 +194,7 @@ fn trace() -> EvalResult<usize> {
         &tokens,
         1,
         WalkMode::FullFfnControl,
+        codec,
         |index, tile, _| {
             if index != control_layers {
                 return Err("out-of-order control observation".into());
@@ -206,10 +219,11 @@ fn trace() -> EvalResult<usize> {
         control.max_abs < 1e-3,
         "traced recompute control differs from production"
     );
-    println!("layer trace: tokens={batch}, layers={}, baseline/production max abs={:.8}, per-layer recompute max abs={max_control:.8}, recompute/production max abs={:.8}; final-token residuals, activation stats over all token rows", snapshots.len(), baseline_control.max_abs, control.max_abs);
+    println!("layer trace: codec={}, tokens={batch}, layers={}, baseline/production max abs={:.8}, per-layer recompute max abs={max_control:.8}, recompute/production max abs={:.8}; final-token residuals, activation stats over all token rows", codec.label(), snapshots.len(), baseline_control.max_abs, control.max_abs);
     for (index, snapshot) in snapshots.iter().enumerate() {
         println!(
-            "baseline layer={index}, kind={}, normalized={}, swiglu={}",
+            "baseline layer={index}, codec={}, kind={}, normalized={}, swiglu={}",
+            codec.label(),
             layer_metadata[index].0,
             describe_stats(&snapshot.normalized),
             describe_stats(&snapshot.swiglu)
@@ -230,6 +244,7 @@ fn trace() -> EvalResult<usize> {
             &tokens,
             1,
             mode,
+            codec,
             |index, tile, before_delta| {
                 if index != seen {
                     return Err("out-of-order packed observation".into());
@@ -246,7 +261,7 @@ fn trace() -> EvalResult<usize> {
                 if jump > largest_jump.1 {
                     largest_jump = (index, jump);
                 }
-                println!("mode={name}, layer={index}, kind={}, propagated relative L2={:.6}, post relative L2={:.6}, injection relative L2={:.6}, post max abs={:.6}", layer_metadata[index].0, propagated.relative_l2, post.relative_l2, injection.relative_l2, post.max_abs);
+                println!("mode={name}, codec={}, layer={index}, kind={}, propagated relative L2={:.6}, post relative L2={:.6}, injection relative L2={:.6}, post max abs={:.6}", codec.label(), layer_metadata[index].0, propagated.relative_l2, post.relative_l2, injection.relative_l2, post.max_abs);
                 previous_error = post.relative_l2;
                 last_observed = current.to_vec();
                 seen += 1;
@@ -269,7 +284,7 @@ fn trace() -> EvalResult<usize> {
         );
         let changed_logits = super::logits(&model, &residual)?;
         let error = super::cumulative::checked_logit_error(&baseline, &changed_logits)?;
-        println!("summary mode={name}, largest relative-residual increase layer={} ({:.6}), final logit relative L2={:.6}, max abs={:.6}, greedy token {} -> {}; packed={}, fallback={}", largest_jump.0, largest_jump.1, error.relative_l2, error.max_abs, super::top_token(&baseline)?, super::top_token(&changed_logits)?, coverage.packed, coverage.fallback);
+        println!("summary mode={name}, codec={}, largest relative-residual increase layer={} ({:.6}), final logit relative L2={:.6}, max abs={:.6}, greedy token {} -> {}; packed={}, fallback={}", codec.label(), largest_jump.0, largest_jump.1, error.relative_l2, error.max_abs, super::top_token(&baseline)?, super::top_token(&changed_logits)?, coverage.packed, coverage.fallback);
     }
     println!("No intermediate logits, tensor dumps, long-context, timing, or agent-quality result; growth localization is not causal attribution.");
     Ok(snapshots.len())

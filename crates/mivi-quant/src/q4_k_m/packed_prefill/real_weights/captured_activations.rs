@@ -1,10 +1,9 @@
 //! Memory-only replay of actual prefill inputs; never compiled into inference.
 
-use super::super::{
-    packed_matmul, packed_matmul_with_kernel, PackedKernel, Q4_K_BLOCK_SIZE, Q4_K_BYTES,
-};
+use super::super::{packed_matmul, ActivationCodec, Q4_K_BLOCK_SIZE, Q4_K_BYTES};
 use super::{
-    positive_env, supported_shape, validate_sampled_error_bound, EvalResult, ProjectionError,
+    positive_env, supported_shape, validate_group32_sampled_error_bound,
+    validate_sampled_error_bound, EvalResult, ProjectionError,
 };
 use crate::{dequantize_slice, quantized_matmul_rows, GgmlType};
 use mivi_model::{LayerWeights, Model, PrefillStrategy, QuantizedTensor, TileActivations};
@@ -33,11 +32,12 @@ struct Coverage {
 #[test]
 #[ignore = "requires MIVI_TEST_MODEL; captures real prefill activations"]
 fn captured_prefill_projection_evaluation() -> EvalResult<()> {
-    assert!(evaluate()? > 0, "no captured Q4 projections evaluated");
+    let codec = ActivationCodec::from_env()?;
+    assert!(evaluate(codec)? > 0, "no captured Q4 projections evaluated");
     Ok(())
 }
 
-fn evaluate() -> EvalResult<usize> {
+fn evaluate(codec: ActivationCodec) -> EvalResult<usize> {
     let path = std::env::var_os("MIVI_TEST_MODEL").ok_or("set MIVI_TEST_MODEL")?;
     let max_tokens = positive_env("MIVI_TEST_CAPTURE_TOKENS", 32)?;
     // One tile only: this diagnostic deliberately does not become a long-context run.
@@ -60,18 +60,20 @@ fn evaluate() -> EvalResult<usize> {
         return Err("capture prompt encoded to no tokens".into());
     }
     let batch = tokens.len();
-    println!("captured prefill: tokens={batch}, original tokens={original_len}, row cap={row_cap}, Rayon threads={}; prompt/activations are not printed or written", rayon::current_num_threads());
+    println!("captured prefill: codec={}, tokens={batch}, original tokens={original_len}, row cap={row_cap}, Rayon threads={}; prompt/activations are not printed or written", codec.label(), rayon::current_num_threads());
     model.set_prefill_strategy(PrefillStrategy::Chunked {
         tile_tokens: max_tokens,
     })?;
     model.generate_tokens_incremental(&tokens, 0, 0, |_, _| true)?;
     let production_logits = model.state.logits.to_vec();
-    let (tested, residual) = walk(&mut model, &tokens, row_cap, WalkMode::Replay)?;
+    let (tested, residual) = walk(&mut model, &tokens, row_cap, WalkMode::Replay, codec)?;
     let baseline = logits(&model, &residual)?;
     let control = ProjectionError::compare(&production_logits, &baseline)?;
     println!(
-        "production chunked control: relative L2={:.8}, max abs={:.8}",
-        control.relative_l2, control.max_abs
+        "production chunked control: codec={}, relative L2={:.8}, max abs={:.8}",
+        codec.label(),
+        control.relative_l2,
+        control.max_abs
     );
     assert!(
         control.max_abs < 1e-3,
@@ -93,10 +95,16 @@ fn evaluate() -> EvalResult<usize> {
             supported_shape(down.quant_type as u32, &[down.cols, down.rows]).then_some(index)
         });
     if let Some(index) = selected {
-        let (_, changed) = walk(&mut model, &tokens, row_cap, WalkMode::SingleDown(index))?;
+        let (_, changed) = walk(
+            &mut model,
+            &tokens,
+            row_cap,
+            WalkMode::SingleDown(index),
+            codec,
+        )?;
         let changed_logits = logits(&model, &changed)?;
         let error = ProjectionError::compare(&baseline, &changed_logits)?;
-        println!("layer={index} down-only residual-delta logit sensitivity: relative L2={:.6}, max abs={:.6}, greedy token {} -> {}; NOT full packed inference or a quality acceptance gate", error.relative_l2, error.max_abs, top_token(&baseline)?, top_token(&changed_logits)?);
+        println!("layer={index} down-only residual-delta logit sensitivity: codec={}, relative L2={:.6}, max abs={:.6}, greedy token {} -> {}; NOT full packed inference or a quality acceptance gate", codec.label(), error.relative_l2, error.max_abs, top_token(&baseline)?, top_token(&changed_logits)?);
     } else {
         println!("no supported executed down projection; no logit perturbation evaluated");
     }
@@ -128,8 +136,9 @@ fn walk(
     tokens: &[u32],
     row_cap: usize,
     mode: WalkMode,
+    codec: ActivationCodec,
 ) -> EvalResult<(Coverage, Vec<f32>)> {
-    walk_observed(model, tokens, row_cap, mode, |_, _, _| Ok(()))
+    walk_observed(model, tokens, row_cap, mode, codec, |_, _, _| Ok(()))
 }
 
 fn walk_observed<F>(
@@ -137,6 +146,7 @@ fn walk_observed<F>(
     tokens: &[u32],
     row_cap: usize,
     mode: WalkMode,
+    codec: ActivationCodec,
     mut observe: F,
 ) -> EvalResult<(Coverage, Vec<f32>)>
 where
@@ -243,7 +253,7 @@ where
             } else {
                 tile.norm_mut()
             };
-            replay(name, weight, &model.gguf.mmap, input, batch, row_cap)?;
+            replay(name, weight, &model.gguf.mmap, input, batch, row_cap, codec)?;
             coverage.packed += 1;
         }
         // Isolate one down projection; subsequent layers remain F32-activation inference.
@@ -255,14 +265,13 @@ where
                     .checked_mul(ffn.w_down.rows)
                     .ok_or("down shape overflow")?
             ];
-            packed_matmul_with_kernel(
+            codec.project(
                 &mut packed,
                 ffn.w_down.as_slice(&model.gguf.mmap),
                 tile.gate(),
                 batch,
                 ffn.w_down.rows,
                 ffn.w_down.cols,
-                PackedKernel::detected_tiled(),
             )?;
             if ffn.w_down.rows != cfg.dim {
                 return Err("FFN down output does not match residual dimension".into());
@@ -285,8 +294,15 @@ where
                 WalkMode::UpOnly => cumulative::FfnPacking::UpOnly,
                 _ => cumulative::FfnPacking::All,
             };
-            let recomputed =
-                cumulative::recompute(&mut tile, ffn, &model.gguf.mmap, batch, full, packing)?;
+            let recomputed = cumulative::recompute(
+                &mut tile,
+                ffn,
+                &model.gguf.mmap,
+                batch,
+                full,
+                packing,
+                codec,
+            )?;
             coverage.packed += recomputed.packed;
             coverage.fallback += recomputed.fallback;
             let changed = residual_delta(tile.current(), tile.next(), &recomputed.output)?;
@@ -295,7 +311,7 @@ where
         observe(index, &mut tile, &before_delta)?;
     }
     if mode == WalkMode::Replay {
-        println!("captured Q4 projections={}, unsupported FFN projections={}; no timing/agent readiness claim", coverage.packed, coverage.fallback);
+        println!("captured Q4 projections={}, unsupported FFN projections={}, codec={}; no timing/agent readiness claim", coverage.packed, coverage.fallback, codec.label());
     }
     Ok((coverage, tile.final_current_row(batch)?.to_vec()))
 }
@@ -307,6 +323,7 @@ fn replay(
     input: &[f32],
     batch: usize,
     row_cap: usize,
+    codec: ActivationCodec,
 ) -> EvalResult<()> {
     let rows = weight.rows.min(row_cap);
     let row_bytes = (weight.cols / Q4_K_BLOCK_SIZE)
@@ -321,8 +338,6 @@ fn replay(
         .get(..length)
         .ok_or("weight prefix outside tensor")?;
     let mut reference = vec![0.0; batch.checked_mul(rows).ok_or("projection shape overflow")?];
-    let mut scalar = reference.clone();
-    let mut tiled = reference.clone();
     quantized_matmul_rows(
         &mut reference,
         GgmlType::Q4_K,
@@ -332,22 +347,43 @@ fn replay(
         rows,
         weight.cols,
     )?;
-    packed_matmul(&mut scalar, bytes, input, batch, rows, weight.cols)?;
-    packed_matmul_with_kernel(
-        &mut tiled,
-        bytes,
-        input,
-        batch,
-        rows,
-        weight.cols,
-        PackedKernel::detected_tiled(),
-    )?;
-    assert_eq!(scalar, tiled, "captured scalar/tiled mismatch for {name}");
-    validate_sampled_error_bound(bytes, input, &reference, &tiled, batch, rows, weight.cols)?;
-    let error = ProjectionError::compare(&reference, &tiled)?;
+    let mut selected = reference.clone();
+    codec.project(&mut selected, bytes, input, batch, rows, weight.cols)?;
+    if codec == ActivationCodec::Group256 {
+        let mut scalar = reference.clone();
+        packed_matmul(&mut scalar, bytes, input, batch, rows, weight.cols)?;
+        assert_eq!(
+            scalar, selected,
+            "captured scalar/tiled mismatch for {name}"
+        );
+        validate_sampled_error_bound(
+            bytes,
+            input,
+            &reference,
+            &selected,
+            batch,
+            rows,
+            weight.cols,
+        )?;
+    } else {
+        validate_group32_sampled_error_bound(
+            bytes,
+            input,
+            &reference,
+            &selected,
+            batch,
+            rows,
+            weight.cols,
+        )?;
+    }
+    let error = ProjectionError::compare(&reference, &selected)?;
     println!(
-        "  {name}: rows={rows}/{}, cols={}, relative L2={:.6}, max abs={:.6}",
-        weight.rows, weight.cols, error.relative_l2, error.max_abs
+        "  {name}: codec={}, rows={rows}/{}, cols={}, relative L2={:.6}, max abs={:.6}",
+        codec.label(),
+        weight.rows,
+        weight.cols,
+        error.relative_l2,
+        error.max_abs
     );
     Ok(())
 }

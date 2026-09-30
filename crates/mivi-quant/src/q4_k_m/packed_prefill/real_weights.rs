@@ -325,6 +325,141 @@ fn validate_sampled_error_bound(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_group32_sampled_error_bound(
+    weights: &[u8],
+    inputs: &[f32],
+    reference: &[f32],
+    actual: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+) -> EvalResult<()> {
+    let blocks = cols / super::Q4_K_BLOCK_SIZE;
+    let row_bytes = blocks * super::Q4_K_BYTES;
+    for row in [0, rows / 2, rows - 1] {
+        let mut decoded = vec![0.0; cols];
+        crate::q4_k_m::dequantize_q4_k_m_slice(
+            &weights[row * row_bytes..(row + 1) * row_bytes],
+            &mut decoded,
+        );
+        for b in [0, batch / 2, batch - 1] {
+            let input = &inputs[b * cols..(b + 1) * cols];
+            let mut expected = 0.0f64;
+            let mut magnitude = 0.0f64;
+            let mut reconstruction_bound = 0.0f64;
+            let mut affine_components = 0.0f64;
+            for (block_index, (w, x)) in decoded
+                .chunks_exact(super::Q4_K_BLOCK_SIZE)
+                .zip(input.chunks_exact(super::Q4_K_BLOCK_SIZE))
+                .enumerate()
+            {
+                let activation = super::group32::Group32Activation::pack(x)?;
+                let reconstructed = activation.reconstructed();
+                let weight_start = row * row_bytes + block_index * super::Q4_K_BYTES;
+                let packed_weight = super::PackedWeights::new(
+                    &weights[weight_start..weight_start + super::Q4_K_BYTES],
+                );
+                for ((&weight, &original), reconstructed) in w.iter().zip(x).zip(reconstructed) {
+                    let product = f64::from(weight) * f64::from(original);
+                    expected += product;
+                    magnitude += product.abs();
+                    reconstruction_bound += f64::from(weight).abs()
+                        * (f64::from(reconstructed) - f64::from(original)).abs();
+                }
+
+                for group in 0..super::group32::GROUPS {
+                    let group_input = &x[group * super::group32::GROUP_WIDTH
+                        ..(group + 1) * super::group32::GROUP_WIDTH];
+                    let max_abs = group_input
+                        .iter()
+                        .fold(0.0f32, |max, value| max.max(value.abs()));
+                    if max_abs == 0.0 {
+                        continue;
+                    }
+                    let activation_scale = max_abs / 127.0;
+                    let packed_values = &reconstructed[group * super::group32::GROUP_WIDTH
+                        ..(group + 1) * super::group32::GROUP_WIDTH];
+                    let activation_values: Vec<i32> = packed_values
+                        .iter()
+                        .map(|value| (value / -activation_scale).round() as i32)
+                        .collect();
+                    let start = (group / 2) * super::group32::GROUP_WIDTH;
+                    let quant_bytes =
+                        &packed_weight.quants[start..start + super::group32::GROUP_WIDTH];
+                    let mut integer_magnitude = 0i64;
+                    let mut activation_sum = 0i64;
+                    for (&byte, &activation_value) in quant_bytes.iter().zip(&activation_values) {
+                        let quant = if group % 2 == 0 { byte & 15 } else { byte >> 4 };
+                        integer_magnitude += i64::from(quant) * i64::from(activation_value).abs();
+                        activation_sum += i64::from(activation_value);
+                    }
+                    let weight_term =
+                        f64::from(packed_weight.scale) * f64::from(packed_weight.scales[group]);
+                    let minimum_term =
+                        f64::from(packed_weight.min_scale) * f64::from(packed_weight.mins[group]);
+                    affine_components += f64::from(activation_scale)
+                        * (weight_term.abs() * integer_magnitude as f64
+                            + minimum_term.abs() * activation_sum.abs() as f64);
+                }
+            }
+            let reference_rounding = gamma(cols.saturating_add(8)) * magnitude
+                + f64::from(f32::from_bits(1)) * cols as f64;
+            assert!(
+                (f64::from(reference[b * rows + row]) - expected).abs() <= reference_rounding,
+                "existing F32 disagrees with the sampled f64 reference"
+            );
+            let affine_operations =
+                (7 * super::group32::GROUPS + 1) * blocks + super::group32::GROUPS + 4;
+            let codec_rounding = gamma(affine_operations) * affine_components
+                + f64::from(f32::from_bits(1)) * (super::group32::GROUPS * blocks) as f64;
+            let bound = reconstruction_bound + reference_rounding + codec_rounding;
+            assert!(
+                (f64::from(actual[b * rows + row]) - expected).abs() <= bound,
+                "group-32 result exceeded its reconstruction and arithmetic bound"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn gamma(operations: usize) -> f64 {
+    // Standard forward-error factor for a sequence of rounded f32 operations.
+    let product = operations as f64 * f64::from(f32::EPSILON);
+    product / (1.0 - product)
+}
+
+#[test]
+fn group32_sampled_bound_covers_affine_cancellation_and_multiple_blocks() {
+    let (rows, batch, cols) = (3, 3, 512);
+    let weights = crate::q4_k_m::packed_prefill::fixture_weights(rows, cols, 71);
+    let inputs: Vec<_> = (0..batch * cols)
+        .map(|i| {
+            let within_block = i % super::Q4_K_BLOCK_SIZE;
+            if within_block % 2 == 0 {
+                0.375
+            } else {
+                -0.375
+            }
+        })
+        .collect();
+    let mut reference = vec![0.0; rows * batch];
+    let mut actual = reference.clone();
+    quantized_matmul_rows(
+        &mut reference,
+        GgmlType::Q4_K,
+        &weights,
+        &inputs,
+        batch,
+        rows,
+        cols,
+    )
+    .unwrap();
+    super::group32::packed_matmul(&mut actual, &weights, &inputs, batch, rows, cols).unwrap();
+    validate_group32_sampled_error_bound(&weights, &inputs, &reference, &actual, batch, rows, cols)
+        .unwrap();
+}
+
 #[test]
 fn projection_error_measures_difference_and_rejects_invalid_outputs() {
     let metrics = ProjectionError::compare(&[1.0, 2.0], &[1.1, 1.9]).unwrap();
