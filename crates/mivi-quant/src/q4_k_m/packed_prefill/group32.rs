@@ -1,4 +1,5 @@
-use super::{PackedError, PackedWeights, Q4_K_BLOCK_SIZE};
+use super::{PackedError, PackedWeights, Q4_K_BLOCK_SIZE, Q4_K_BYTES};
+use rayon::prelude::*;
 
 pub(super) const GROUP_WIDTH: usize = 32;
 pub(super) const GROUPS: usize = Q4_K_BLOCK_SIZE / GROUP_WIDTH;
@@ -12,6 +13,86 @@ pub(super) struct Group32Activation {
     scales: [f32; GROUPS],
     values: [i8; Q4_K_BLOCK_SIZE],
     sums: [i16; GROUPS],
+}
+
+pub(super) fn packed_matmul(
+    out: &mut [f32],
+    weights: &[u8],
+    inputs: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(), PackedError> {
+    let blocks = cols / Q4_K_BLOCK_SIZE;
+    let row_bytes = blocks
+        .checked_mul(Q4_K_BYTES)
+        .ok_or(crate::QuantError::ArithmeticOverflow)?;
+    crate::validate_matmul_args(
+        out,
+        weights,
+        inputs,
+        batch,
+        rows,
+        cols,
+        row_bytes,
+        Q4_K_BLOCK_SIZE,
+    )?;
+    let used_weight_bytes = rows
+        .checked_mul(row_bytes)
+        .ok_or(crate::QuantError::ArithmeticOverflow)?;
+    if batch == 0 || rows == 0 {
+        return Ok(());
+    }
+
+    for block in weights[..used_weight_bytes].chunks_exact(Q4_K_BYTES) {
+        let weight = PackedWeights::new(block);
+        if !weight.scale.is_finite() || !weight.min_scale.is_finite() {
+            return Err(PackedError::NonFiniteWeight);
+        }
+    }
+
+    let activation_count = batch
+        .checked_mul(blocks)
+        .ok_or(crate::QuantError::ArithmeticOverflow)?;
+    let activations = inputs[..batch * cols]
+        .chunks_exact(Q4_K_BLOCK_SIZE)
+        .map(Group32Activation::pack)
+        .collect::<Result<Vec<_>, _>>()?;
+    debug_assert_eq!(activations.len(), activation_count);
+
+    let result_count = rows
+        .checked_mul(batch)
+        .ok_or(crate::QuantError::ArithmeticOverflow)?;
+    let mut row_major = vec![0.0f32; result_count];
+    let compute = |row: usize, output: &mut [f32]| {
+        for block in 0..blocks {
+            let start = row * row_bytes + block * Q4_K_BYTES;
+            let weight = PackedWeights::new(&weights[start..start + Q4_K_BYTES]);
+            for (b, value) in output.iter_mut().enumerate() {
+                *value += activations[b * blocks + block].dot(&weight);
+            }
+        }
+    };
+    if rows >= crate::RAYON_PARALLEL_THRESHOLD && rayon::current_num_threads() > 1 {
+        row_major
+            .par_chunks_mut(batch)
+            .enumerate()
+            .for_each(|(row, output)| compute(row, output));
+    } else {
+        row_major
+            .chunks_mut(batch)
+            .enumerate()
+            .for_each(|(row, output)| compute(row, output));
+    }
+    if row_major.iter().any(|value| !value.is_finite()) {
+        return Err(PackedError::NonFiniteOutput);
+    }
+    for row in 0..rows {
+        for b in 0..batch {
+            out[b * rows + row] = row_major[row * batch + b];
+        }
+    }
+    Ok(())
 }
 
 impl Group32Activation {
@@ -90,6 +171,194 @@ mod tests {
     use super::*;
     use crate::q4_k_m::dequantize_q4_k_m;
     use crate::q4_k_m::packed_prefill::{fixture_weights, PackedActivation};
+
+    fn assert_close_to_reference(rows: usize, batch: usize, cols: usize, seed: usize) {
+        let blocks = cols / Q4_K_BLOCK_SIZE;
+        let weights = fixture_weights(rows, cols, seed);
+        let inputs: Vec<_> = (0..batch * cols)
+            .map(|i| (i * 37 % 101) as f32 / 31.0 - 1.6)
+            .collect();
+        let mut out = vec![9876.5; rows * batch + 1];
+        packed_matmul(&mut out, &weights, &inputs, batch, rows, cols).unwrap();
+
+        for row in 0..rows {
+            let row_weights = &weights[row * blocks * Q4_K_BYTES..(row + 1) * blocks * Q4_K_BYTES];
+            for b in 0..batch {
+                let mut expected = 0.0f64;
+                let mut component_energy = 0.0f64;
+                let mut block_magnitudes = 0.0f64;
+                for block in 0..blocks {
+                    let start = b * cols + block * Q4_K_BLOCK_SIZE;
+                    let activation =
+                        Group32Activation::pack(&inputs[start..start + Q4_K_BLOCK_SIZE]).unwrap();
+                    let reconstructed = activation.reconstructed();
+                    let weights_start = block * Q4_K_BYTES;
+                    let mut decoded_block = [0.0; Q4_K_BLOCK_SIZE];
+                    dequantize_q4_k_m(
+                        &row_weights[weights_start..weights_start + Q4_K_BYTES],
+                        &mut decoded_block,
+                    );
+                    let block_expected: f64 = decoded_block
+                        .iter()
+                        .zip(reconstructed)
+                        .map(|(&w, x)| f64::from(w) * f64::from(x))
+                        .sum();
+                    expected += block_expected;
+                    block_magnitudes += block_expected.abs();
+
+                    let packed_weight =
+                        PackedWeights::new(&row_weights[weights_start..weights_start + Q4_K_BYTES]);
+                    component_energy += component_energy_bound(&activation, &packed_weight);
+                }
+                let internal = (blocks * 64) as f64 * f64::from(f32::EPSILON);
+                let internal = internal / (1.0 - internal) * component_energy
+                    + (blocks * 64) as f64 * f64::from(f32::from_bits(1));
+                let interblock = if blocks > 1 {
+                    (blocks as f64 * f64::from(f32::EPSILON))
+                        / (1.0 - blocks as f64 * f64::from(f32::EPSILON))
+                        * (block_magnitudes + internal)
+                } else {
+                    0.0
+                };
+                let actual = out[b * rows + row];
+                assert!(
+                    (f64::from(actual) - expected).abs() <= internal + interblock,
+                    "row={row}, batch={b}, cols={cols}: actual={actual}, expected={expected}, bound={}",
+                    internal + interblock
+                );
+            }
+        }
+        assert_eq!(out[rows * batch], 9876.5);
+    }
+
+    fn component_energy_bound(activation: &Group32Activation, weight: &PackedWeights<'_>) -> f64 {
+        (0..GROUPS)
+            .map(|group| {
+                let bytes =
+                    &weight.quants[(group / 2) * GROUP_WIDTH..(group / 2 + 1) * GROUP_WIDTH];
+                let activations =
+                    &activation.values[group * GROUP_WIDTH..(group + 1) * GROUP_WIDTH];
+                let (mut weighted, mut activation_sum) = (0.0f64, 0.0f64);
+                for (&byte, &x) in bytes.iter().zip(activations) {
+                    let q = if group % 2 == 0 { byte & 15 } else { byte >> 4 };
+                    weighted += f64::from(q) * f64::from(x).abs();
+                    activation_sum += f64::from(x).abs();
+                }
+                f64::from(activation.scales[group].abs())
+                    * (f64::from(weight.scale.abs())
+                        * f64::from((weight.scales[group] as f32).abs())
+                        * weighted
+                        + f64::from(weight.min_scale.abs())
+                            * f64::from((weight.mins[group] as f32).abs())
+                            * activation_sum)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn group32_matmul_matches_independent_f64_reference_and_preserves_tail() {
+        for (rows, batch, cols) in [(3, 2, 512), (1, 1, 256), (257, 3, 256)] {
+            assert_close_to_reference(rows, batch, cols, 47);
+        }
+    }
+
+    #[test]
+    fn group32_matmul_validates_zero_work_shapes_and_preserves_tail() {
+        for (rows, batch, cols) in [(0, 3, 256), (3, 0, 256), (3, 2, 0)] {
+            let weights = fixture_weights(rows, cols, 47);
+            let inputs = vec![f32::NAN; batch * cols + 1];
+            let mut out = vec![9876.5; rows * batch + 1];
+            packed_matmul(&mut out, &weights, &inputs, batch, rows, cols).unwrap();
+            assert!(out[..rows * batch].iter().all(|&x| x == 0.0));
+            assert_eq!(out[rows * batch], 9876.5);
+        }
+    }
+
+    #[test]
+    fn group32_matmul_all_zero_inputs_produce_zero_and_ignore_unused_tails() {
+        let rows = 3;
+        let cols = 512;
+        let mut weights = fixture_weights(rows, cols, 47);
+        weights.extend_from_slice(&half::f16::INFINITY.to_le_bytes());
+        weights.extend_from_slice(&[0; Q4_K_BYTES - 2]);
+        let mut inputs = vec![0.0; 2 * cols + 1];
+        inputs[2 * cols] = f32::NAN;
+        let mut out = [9876.5; 7];
+        packed_matmul(&mut out, &weights, &inputs, 2, rows, cols).unwrap();
+        assert!(out[..rows * 2].iter().all(|&x| x == 0.0));
+        assert_eq!(out[rows * 2..], [9876.5]);
+    }
+
+    #[test]
+    fn group32_matmul_rejects_before_output_write() {
+        let weights = fixture_weights(3, 512, 47);
+        let mut input = vec![0.25; 2 * 512];
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            input[512 + 33] = invalid;
+            let mut out = [123.0; 7];
+            assert!(matches!(
+                packed_matmul(&mut out, &weights, &input, 2, 3, 512),
+                Err(PackedError::NonFinite)
+            ));
+            assert_eq!(out, [123.0; 7]);
+        }
+    }
+
+    #[test]
+    fn group32_matmul_rejects_malformed_inputs_and_late_block_underflow_transactionally() {
+        let weights = fixture_weights(3, 512, 47);
+        let mut out = [123.0; 7];
+        let input = vec![1.0; 2 * 512];
+        assert!(packed_matmul(&mut out[..5], &weights, &input, 2, 3, 512).is_err());
+        assert_eq!(out, [123.0; 7]);
+        assert!(packed_matmul(&mut out, &weights[..weights.len() - 1], &input, 2, 3, 512).is_err());
+        assert_eq!(out, [123.0; 7]);
+        assert!(packed_matmul(&mut out, &weights, &input[..input.len() - 1], 2, 3, 512).is_err());
+        assert_eq!(out, [123.0; 7]);
+        assert!(packed_matmul(&mut out, &weights, &input, 2, 3, 511).is_err());
+        assert_eq!(out, [123.0; 7]);
+
+        let mut tiny = vec![1.0; 2 * 512];
+        tiny[256..512].fill(f32::from_bits(1));
+        assert!(packed_matmul(&mut out, &weights, &tiny, 2, 3, 512).is_err());
+        assert_eq!(out, [123.0; 7]);
+    }
+
+    #[test]
+    fn group32_matmul_rejects_nonfinite_weight_headers_transactionally() {
+        for header in [0, 2] {
+            let mut weights = fixture_weights(1, 256, 47);
+            weights[header..header + 2].copy_from_slice(&half::f16::INFINITY.to_le_bytes());
+            let mut out = [123.0; 2];
+            assert!(matches!(
+                packed_matmul(&mut out, &weights, &[1.0; 256], 1, 1, 256),
+                Err(PackedError::NonFiniteWeight)
+            ));
+            assert_eq!(out, [123.0; 2]);
+        }
+    }
+
+    #[test]
+    fn group32_matmul_rejects_nonfinite_derived_output_transactionally() {
+        let mut weights = fixture_weights(1, 256, 47);
+        weights[..2].copy_from_slice(&half::f16::from_f32(65504.0).to_le_bytes());
+        weights[2..4].copy_from_slice(&half::f16::from_f32(0.0).to_le_bytes());
+        let mut out = [123.0; 2];
+        assert!(matches!(
+            packed_matmul(&mut out, &weights, &[f32::MAX; 256], 1, 1, 256),
+            Err(PackedError::NonFiniteOutput)
+        ));
+        assert_eq!(out, [123.0; 2]);
+    }
+
+    #[test]
+    fn group32_matmul_rejects_checked_product_overflow_before_output_write() {
+        let mut out = [123.0; 1];
+        assert!(packed_matmul(&mut out, &[], &[], usize::MAX, 2, 0).is_err());
+        assert_eq!(out, [123.0; 1]);
+        assert!(packed_matmul(&mut out, &[], &[], 1, 1, usize::MAX).is_err());
+        assert_eq!(out, [123.0; 1]);
+    }
 
     #[test]
     fn group32_pack_limits_cross_group_outlier_error() {
@@ -185,34 +454,7 @@ mod tests {
                 "fixture should distinguish a zero stub"
             );
 
-            let component_energy: f64 = (0..GROUPS)
-                .map(|g| {
-                    let bytes =
-                        &packed_weights.quants[(g / 2) * GROUP_WIDTH..(g / 2 + 1) * GROUP_WIDTH];
-                    let quantized_products = bytes
-                        .iter()
-                        .zip(&activation.values[g * GROUP_WIDTH..(g + 1) * GROUP_WIDTH])
-                        .map(|(&byte, &x)| {
-                            let q = if g % 2 == 0 { byte & 15 } else { byte >> 4 };
-                            (f64::from(q), f64::from(x))
-                        });
-                    let mut weighted_magnitude = 0.0f64;
-                    let mut activation_magnitude = 0.0f64;
-                    for (q, x) in quantized_products {
-                        weighted_magnitude += q * x.abs();
-                        activation_magnitude += x.abs();
-                    }
-                    let scale_component = f64::from(activation.scales[g].abs())
-                        * f64::from(packed_weights.scale.abs())
-                        * f64::from((packed_weights.scales[g] as f32).abs())
-                        * weighted_magnitude;
-                    let min_component = f64::from(activation.scales[g].abs())
-                        * f64::from(packed_weights.min_scale.abs())
-                        * f64::from((packed_weights.mins[g] as f32).abs())
-                        * activation_magnitude;
-                    scale_component + min_component
-                })
-                .sum::<f64>();
+            let component_energy = component_energy_bound(&activation, &packed_weights);
             // Conservative 64-operation F32 budget includes decoded-weight and
             // activation reconstruction rounding, affine terms and group summation.
             let gamma = 64.0 * f64::from(f32::EPSILON) / (1.0 - 64.0 * f64::from(f32::EPSILON));
