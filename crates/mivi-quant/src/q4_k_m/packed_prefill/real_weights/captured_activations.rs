@@ -10,6 +10,7 @@ use crate::{dequantize_slice, quantized_matmul_rows, GgmlType};
 use mivi_model::{LayerWeights, Model, PrefillStrategy, QuantizedTensor, TileActivations};
 
 mod cumulative;
+mod layer_trace;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WalkMode {
@@ -126,6 +127,19 @@ fn walk(
     row_cap: usize,
     mode: WalkMode,
 ) -> EvalResult<(Coverage, Vec<f32>)> {
+    walk_observed(model, tokens, row_cap, mode, |_, _, _| Ok(()))
+}
+
+fn walk_observed<F>(
+    model: &mut Model,
+    tokens: &[u32],
+    row_cap: usize,
+    mode: WalkMode,
+    mut observe: F,
+) -> EvalResult<(Coverage, Vec<f32>)>
+where
+    F: FnMut(usize, &mut TileActivations, &[f32]) -> EvalResult<()>,
+{
     model.reset_context();
     let batch = tokens.len();
     let cfg = &model.config;
@@ -200,11 +214,16 @@ fn walk(
                 )?;
                 if cfg.ssm_conv_kernel == 0 {
                     println!("layer={index}: SSM branch skipped FFN; no stale scratch replay");
+                    let before_delta = tile.final_current_row(batch)?.to_vec();
+                    observe(index, &mut tile, &before_delta)?;
                     continue;
                 }
                 &w.ffn
             }
         };
+        // Exact layer output for the CURRENT (possibly perturbed) layer input.
+        // Observers can separate propagated error from this layer's delta injection.
+        let before_delta = tile.final_current_row(batch)?.to_vec();
         for (name, weight, down_input) in [
             (&ffn.ffn_gate_name, &ffn.w_gate, false),
             (&ffn.ffn_up_name, &ffn.w_up, false),
@@ -262,6 +281,7 @@ fn walk(
             let changed = residual_delta(tile.current(), tile.next(), &recomputed.output)?;
             tile.current_mut().copy_from_slice(&changed);
         }
+        observe(index, &mut tile, &before_delta)?;
     }
     if mode == WalkMode::Replay {
         println!("captured Q4 projections={}, unsupported FFN projections={}; no timing/agent readiness claim", coverage.packed, coverage.fallback);

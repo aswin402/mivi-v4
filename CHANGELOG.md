@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.58] - 2026-09-30
+
+### Layer-Wise Packed FFN Error Localization (Test-Only)
+
+#### Ideas, Inspirations & Sources
+
+- **Trace boundaries before changing a quantization policy**: observe the existing
+  test-only walker after each ordinary layer computation and after its packed
+  FFN residual-delta injection. Compare both against the same baseline layer
+  output, separating propagated error from the newly introduced delta.
+  No instrumentation is added to production inference.
+  - *Sources*: Mivi's `mivi-model/src/{prefill,ssm,transformer}.rs`, the preceding
+    captured/cumulative diagnostics, and
+    [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- **Measure real activation distributions without assuming outliers explain
+  quality loss**: probe normalized and SwiGLU inputs with the experimental codec;
+  report reconstruction error and global peak/RMS across all prompt rows.
+  - *Inspiration/source*: [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339).
+    These aggregate probes are not that paper's feature-wise outlier analysis,
+    do not implement mixed-precision decomposition, and do not prove causation.
+
+#### Added
+
+- An opt-in layer-wise trace for a configurable short raw prompt (default is the
+  preceding tool-request fixture). It rejects empty/truncated prompts, derives
+  model dimensions/layer kinds/BOS from metadata, and uses complete matrices.
+- Final-token residual snapshots only, plus scalar baseline activation metrics;
+  neither prompt text nor activation/residual arrays are dumped. Codec probes
+  include inputs to fallback-format projections and do not claim those
+  projections actually used the packed kernel.
+- Ordered/full layer observation checks, final-observation/state agreement,
+  per-layer non-packed FFN controls, final production-logit controls, and existing
+  finite-error/coverage checks. Skipped SSM FFNs do not probe stale scratch.
+- Model-free activation-stat regression with an independent analytical reference,
+  plus zero, malformed, non-finite, and unsupported-width cases.
+- Blank/whitespace prompt validation before tokenization, so a metadata-derived
+  beginning-of-sequence token cannot mask an empty diagnostic input.
+
+#### Measured Result and Decision
+
+- One raw tool-request prompt per local GGUF, two Rayon/inference threads:
+  1.2B has 26 tokens/16 layers; 2.6B has 23 tokens/30 layers. Baseline final logits,
+  all non-packed layer controls, and recomputed final logits matched exactly.
+- Final logit errors reproduce v0.2.57: 1.2B down/full relative L2
+  **6.1920% / 24.4887%**; 2.6B **3.7911% / 4.6426%**. Greedy next-token IDs
+  remained 509 and 124902 respectively for this prompt.
+- **1.2B full FFN**: the largest relative-residual increase occurs in layer 15,
+  an SSM-labelled block. Error after layer 14 is **12.3131%**; after the ordinary
+  layer-15 computation on the perturbed input it is **22.9116%**; after the new
+  packed delta it is **23.1402%**. The delta itself has relative L2 **0.6861%**
+  versus the pre-injection residual. Down-only also has its largest increase
+  in layer 15, where that mode performs no packed projection.
+- **2.6B**: both modes' largest relative-residual increase occurs in layer 13,
+  an attention-labelled block. Full FFN increases from **2.7849%** (layer 12)
+  to **3.7696%** before the next delta and **3.8986%** afterward. Its final
+  layer residual error is **7.8027%**, distinct from vocabulary-logit error.
+- Baseline codec reconstruction relative L2 across layers:
+  - 1.2B normalized **0.8765–1.5501%**, SwiGLU **1.1946–2.1492%**;
+    highest SwiGLU global peak/RMS **390.890** (layer 7).
+  - 2.6B normalized **0.7895–1.5722%**, SwiGLU **0.8491–1.9046%**;
+    highest SwiGLU global peak/RMS **490.381** (layer 4).
+- Growth differs across models, and high aggregate peak/RMS does not establish
+  which projection caused final quality loss. Relative-error denominators also
+  change across layers. These measurements localize amplification; they do not
+  establish a defective SSM/attention implementation, justify hardcoded layer
+  exclusions, or explain existing Minicode latency. The packed prototype remains
+  disabled in production. Next work should isolate gate/up contributions and
+  compare safer policies with the same controls before considering rollout.
+
 ## [v0.2.57] - 2026-09-30
 
 ### Cumulative FFN Quantization Sensitivity (Test-Only)

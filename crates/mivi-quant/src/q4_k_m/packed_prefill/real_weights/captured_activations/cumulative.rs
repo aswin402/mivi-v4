@@ -205,7 +205,7 @@ fn cumulative_prefill_evaluation() -> EvalResult<()> {
     Ok(())
 }
 
-fn checked_logit_error(expected: &[f32], actual: &[f32]) -> EvalResult<ProjectionError> {
+pub(super) fn checked_logit_error(expected: &[f32], actual: &[f32]) -> EvalResult<ProjectionError> {
     let error = ProjectionError::compare(expected, actual)?;
     if !error.relative_l2.is_finite() || !error.max_abs.is_finite() {
         return Err("non-finite derived logit error metric".into());

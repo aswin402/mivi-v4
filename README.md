@@ -199,6 +199,32 @@ quality**. Residual-delta rounding remains different from direct replacement;
 these are prefill-only sensitivity tests, not generated coding/tool answers,
 chat-template negotiation, server timings, or agent-readiness validation.
 
+Trace **where** cumulative error grows using the short layer-wise diagnostic:
+
+```bash
+MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
+  cargo test -p mivi-quant --release --lib --jobs 1 layerwise_prefill_error_trace \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+The default raw prompt is the tool-request fixture. Override it with
+`MIVI_TEST_CAPTURE_PROMPT`; the token limit uses `MIVI_TEST_CAPTURE_TOKENS`
+(default/maximum 64), refusing empty/truncated prompts. There is no row cap.
+The observer lives entirely in the test-only walker, not production inference.
+It stores only the final token's residual per baseline layer and aggregate
+statistics; prompt text and activation/residual arrays are not dumped.
+
+All-layer non-packed controls and final production logits must agree. Each mode
+reports propagated residual error **after the ordinary layer computation**,
+post-injection error, and the new residual delta's magnitude. These are residual
+errors, not intermediate-layer vocabulary logits. Baseline normalized/SwiGLU
+statistics measure the experimental codec's reconstruction error and global
+peak/RMS over all token rows, even where weight formats subsequently require a
+fallback. These are codec probes, not evidence that those fallback projections
+actually packed their inputs. Largest relative-error increases localize growth;
+they do not prove a causal layer defect or justify hardcoded layer exclusions.
+The diagnostic performs no packing-policy change or production rollout.
+
 ### 💾 Memory Footprint
 
 Runtime RSS depends on the loaded GGUF, context size, KV precision, adapters, and OS page
