@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.54] - 2026-09-30
+
+### Test-Only Packed Weight Reuse and Token Tiling
+
+#### Ideas, Inspirations & Sources
+
+- **Reuse weight vectors across a four-token register tile**: prepare Q4_K
+  nibble vectors and integer scale/minimum corrections once per weight block,
+  then reuse them across tokens. Accumulate scaled products in i32 vectors and
+  reduce once per block/token instead of once per 32-value subgroup.
+  - *Inspiration*: register blocking and packed operands in high-performance
+    matrix multiplication; GGML's Q4_K x Q8 activation dot products.
+  - *Sources*: [Goto and van de Geijn, Anatomy of High-Performance Matrix Multiplication](https://www.cs.utexas.edu/~flame/pubs/GotoTOMS_final.pdf),
+    [GGML quantization reference](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c),
+    [Pulp safe runtime SIMD](https://docs.rs/pulp/0.22.3/pulp/),
+    and Mivi's existing packed scalar reference.
+- **Place tokens sharing a weight block next to each other**: pack activations
+  directly in block-major order for the tiled experiment, without allocating
+  a second packed activation matrix. Keep the earlier reference layouts for
+  reproducible comparisons. The four-token tile is a kernel tuning parameter,
+  not a model-name or model-family rule.
+  - *Sources*: the matrix-multiplication paper above and local layout benchmarks.
+
+#### Added
+
+- A test-only safe AVX2 tiled kernel, scalar CPU fallback, and single-token
+  remainder handling. No production inference path or dependency changed.
+- Exact scalar/tiled comparisons covering selected batch sizes between 1 and 65, multiple blocks,
+  metadata seeds, zero dimensions, odd/parallel output rows, and sentinels.
+- Maximum-scale/max-nibble tests exercising integer sums beyond i16 range,
+  signed and zero inputs, tiny finite inputs, and error-before-output-mutation
+  checks for non-finite, underflowed, and short-buffer inputs.
+- Benchmark coverage expanded to 257 and 1,024 output rows, with 16 iterations
+  per method/pass and both reverse and forward method order. Timings include
+  packing, allocation, and transposition, not just the inner dot product.
+
+#### Measured Result and Decision
+
+- Latest two-thread synthetic benchmark, 1,024 output rows, milliseconds per
+  complete matrix multiplication:
+
+  | Columns | Batch | Existing F32 | Packed tiled |
+  | --- | --- | --- | --- |
+  | 2,048 | 32 | 1.649–1.655 | 1.182–1.285 |
+  | 2,048 | 64 | 4.076–4.215 | 2.304–2.369 |
+  | 8,192 | 32 | 5.492–6.405 | 4.819–5.116 |
+  | 8,192 | 64 | 12.410–12.545 | 8.970–9.534 |
+
+- An earlier eight-iteration run also favored tiled compute for all four
+  1,024-row cases. These are local synthetic measurements, not statistical
+  guarantees or end-to-end agent latency results.
+- Small 257-row cases remain mixed: the latest 8,192-column/batch-64 case
+  regressed from F32 3.998–4.032ms to tiled 4.511–4.527ms. Do not make tiled
+  compute a universal default from the favorable large-matrix results.
+- Tiled outputs exactly match the packed scalar reference in the tested
+  cases. Relative L2 error versus original F32 inputs remains 0.6799–0.7280%.
+  This is activation quantization error, not a demonstrated real-model quality
+  bound; the experiment is not a bit-identical GGML activation codec.
+- **Retain as test-only**: production F32 inference is unchanged. Next gates are
+  representative real-model projection benchmarks, numerical/logit validation,
+  and mixed-format coverage such as Q6_K before considering inference dispatch.
+
+#### Validation
+
+- Focused `mivi-quant` release suite, including opt-in benchmark: 24 passed.
+- Debug suite: 23 passed, benchmark ignored. Scoped Clippy passed with the
+  existing baseline lint allowances; formatting and diff checks passed.
+- One Cargo job, one test thread, two Rayon threads; no full-workspace Cargo
+  build, check, or test. No new handwritten unsafe code or model-specific rules.
+
 ## [v0.2.53] - 2026-09-30
 
 ### Test-Only Safe SIMD Packed Dot Experiment
