@@ -440,4 +440,134 @@ mod tests {
             assert_eq!(recorder.snapshot.decode, None);
         }
     }
+
+    #[test]
+    fn fixture_lifecycle_tokenization_only_has_no_prefill_or_decode() {
+        let entry = Instant::now();
+        for outcome in [
+            ModelOutcome::Complete,
+            ModelOutcome::Cancelled,
+            ModelOutcome::ModelError,
+        ] {
+            let mut recorder = ModelRecorder::new(CaptureLimits {
+                text_bytes: 8,
+                token_ids: 2,
+            })
+            .unwrap();
+            recorder.begin(entry);
+            recorder.tokenization_done(entry + Duration::from_millis(2));
+            recorder.finish(entry + Duration::from_millis(5), outcome);
+
+            assert_eq!(
+                recorder.snapshot.tokenization,
+                Some(Duration::from_millis(2))
+            );
+            assert_eq!(recorder.snapshot.prefill, None);
+            assert_eq!(recorder.snapshot.decode, None);
+            assert_eq!(recorder.snapshot.processed_tokens, None);
+            assert_eq!(recorder.snapshot.first_raw, None);
+            assert_eq!(recorder.snapshot.first_delivered, None);
+            assert_eq!(recorder.snapshot.outcome, Some(outcome));
+        }
+    }
+
+    #[test]
+    fn fixture_lifecycle_partial_prefill_retains_completed_work() {
+        let entry = Instant::now();
+        for (stage, outcome) in [
+            (StageOutcome::Cancelled, ModelOutcome::Cancelled),
+            (StageOutcome::ModelError, ModelOutcome::ModelError),
+        ] {
+            let mut recorder = ModelRecorder::new(CaptureLimits {
+                text_bytes: 8,
+                token_ids: 2,
+            })
+            .unwrap();
+            recorder.begin(entry);
+            recorder.prefill_begin(entry + Duration::from_millis(2), 9);
+            recorder.processed(2);
+            let completed = recorder.snapshot.processed_tokens.unwrap();
+            recorder.prefill_end(entry + Duration::from_millis(8), 4, completed, stage);
+            assert_eq!(recorder.snapshot.outcome, None);
+            recorder.finish(entry + Duration::from_millis(12), outcome);
+
+            assert_eq!(recorder.snapshot.prefill, Some(Duration::from_millis(6)));
+            assert_eq!(recorder.snapshot.reused_tokens, Some(4));
+            assert_eq!(recorder.snapshot.processed_tokens, Some(2));
+            assert_eq!(recorder.snapshot.prefill_outcome, Some(stage));
+            assert_eq!(recorder.snapshot.decode, None);
+            assert_eq!(recorder.snapshot.outcome, Some(outcome));
+        }
+    }
+
+    #[test]
+    fn fixture_lifecycle_finish_measures_through_physical_return() {
+        let entry = Instant::now();
+        let mut recorder = ModelRecorder::new(CaptureLimits {
+            text_bytes: 8,
+            token_ids: 2,
+        })
+        .unwrap();
+        recorder.begin(entry);
+        recorder.prefill_begin(entry + Duration::from_millis(2), 1);
+        recorder.prefill_end(
+            entry + Duration::from_millis(3),
+            0,
+            1,
+            StageOutcome::Complete,
+        );
+        recorder.raw(entry + Duration::from_millis(4), "x");
+        recorder.delivered(entry + Duration::from_millis(7), "x");
+        assert_eq!(recorder.snapshot.outcome, None);
+        assert_eq!(recorder.snapshot.decode, None);
+        recorder.finish(
+            entry + Duration::from_millis(20),
+            ModelOutcome::DeliveryStopped,
+        );
+
+        assert_eq!(recorder.snapshot.first_raw, Some(Duration::from_millis(4)));
+        assert_eq!(
+            recorder.snapshot.first_delivered,
+            Some(Duration::from_millis(7))
+        );
+        assert_eq!(recorder.snapshot.decode, Some(Duration::from_millis(17)));
+        assert_eq!(
+            recorder.snapshot.outcome,
+            Some(ModelOutcome::DeliveryStopped)
+        );
+    }
+
+    #[test]
+    fn fixture_lifecycle_raw_stop_and_utf8_flush_remain_separate_from_delivery() {
+        let entry = Instant::now();
+        let mut recorder = ModelRecorder::new(CaptureLimits {
+            text_bytes: 16,
+            token_ids: 2,
+        })
+        .unwrap();
+        let mut decoder = mivi_tokenizer::Utf8StreamDecoder::new();
+        recorder.begin(entry);
+        let raw = decoder.feed(b"xSTOP");
+        recorder.raw(entry + Duration::from_millis(4), &raw);
+        recorder.snapshot.generated_ids.push(9);
+        recorder.delivered(entry + Duration::from_millis(5), &raw[..1]);
+        let incomplete = decoder.feed(&[0xc3]);
+        assert!(incomplete.is_empty());
+        recorder.raw(entry + Duration::from_millis(6), &incomplete);
+        recorder.snapshot.generated_ids.push(10);
+        let flushed = decoder.flush();
+        recorder.raw(entry + Duration::from_millis(7), &flushed);
+        recorder.delivered(entry + Duration::from_millis(8), &flushed);
+
+        assert_eq!(recorder.snapshot.raw_decoded.observed_bytes, 8);
+        assert_eq!(recorder.snapshot.delivered.observed_bytes, 4);
+        assert!(recorder.snapshot.raw_decoded.text.ends_with(&flushed));
+        assert!(recorder.snapshot.delivered.text.ends_with(&flushed));
+        assert_eq!(recorder.snapshot.generated_ids.ids, [9, 10]);
+        assert_eq!(recorder.snapshot.first_raw, Some(Duration::from_millis(4)));
+        assert_eq!(
+            recorder.snapshot.first_delivered,
+            Some(Duration::from_millis(5))
+        );
+    }
 }

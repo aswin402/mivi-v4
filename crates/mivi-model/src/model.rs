@@ -2,6 +2,8 @@ use crate::config::{
     BlockType, GenerationConfig, ModelConfig, PrefillStrategy, DEFAULT_MAX_LORA_RANK,
     DEFAULT_N_EXPERTS, RECENT_TOKENS_WINDOW,
 };
+#[cfg(feature = "fixture-diagnostics")]
+use crate::fixture_diagnostics::ModelRecorder;
 use crate::gguf::{GgufFile, GgufValue};
 use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve_model_weights};
 use crate::lora::ActiveAdapters;
@@ -84,6 +86,8 @@ pub struct Model {
     pub prefix_cache: mivi_kv::PrefixCache,
     prefill_strategy: PrefillStrategy,
     forward_profile: Option<ForwardProfileSnapshot>,
+    #[cfg(feature = "fixture-diagnostics")]
+    fixture_recorder: Option<ModelRecorder>,
 }
 
 impl Model {
@@ -223,7 +227,33 @@ impl Model {
             prefix_cache: mivi_kv::PrefixCache::default(),
             prefill_strategy: PrefillStrategy::default(),
             forward_profile: None,
+            #[cfg(feature = "fixture-diagnostics")]
+            fixture_recorder: None,
         })
+    }
+
+    /// Arm a bounded observation of the next streaming generation.
+    ///
+    /// # Errors
+    /// Returns an error if capture is already armed or its limits are invalid.
+    #[cfg(feature = "fixture-diagnostics")]
+    pub fn start_fixture_capture(
+        &mut self,
+        limits: crate::fixture_diagnostics::CaptureLimits,
+    ) -> std::result::Result<(), &'static str> {
+        if self.fixture_recorder.is_some() {
+            return Err("fixture capture already active");
+        }
+        self.fixture_recorder = Some(ModelRecorder::new(limits)?);
+        Ok(())
+    }
+
+    /// Take the armed recorder's snapshot and disarm observation.
+    #[cfg(feature = "fixture-diagnostics")]
+    pub fn take_fixture_capture(&mut self) -> Option<crate::fixture_diagnostics::ModelCapture> {
+        self.fixture_recorder
+            .take()
+            .map(|recorder| recorder.snapshot)
     }
 
     /// Set the prompt-prefill execution strategy.
@@ -533,6 +563,10 @@ impl Model {
             let cur_pos = start_pos + i;
             let is_last = i + 1 == n_prompt;
             let _ = self.forward_step(tok, cur_pos, is_last)?;
+            #[cfg(feature = "fixture-diagnostics")]
+            if let Some(recorder) = self.fixture_recorder.as_mut() {
+                recorder.processed(1);
+            }
 
             if n_prompt >= 500 && (i + 1) % 500 == 0 {
                 use std::io::Write;
@@ -753,6 +787,10 @@ impl Model {
                 self.state.x.copy_from_slice(final_row);
                 self.compute_logits_from_state()?;
             }
+            #[cfg(feature = "fixture-diagnostics")]
+            if let Some(recorder) = self.fixture_recorder.as_mut() {
+                recorder.processed(rows);
+            }
             let logits_elapsed = logits_start
                 .map(|start| start.elapsed())
                 .unwrap_or_default();
@@ -824,14 +862,62 @@ impl Model {
         F: FnMut(u32, &str) -> bool,
         C: FnMut() -> bool,
     {
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            recorder.begin(Instant::now());
+        }
         self.reset_context();
-        self.generate_streaming_incremental_with_cancel(
+        #[cfg(feature = "fixture-diagnostics")]
+        let cancellation_observed = std::cell::Cell::new(false);
+        #[cfg(feature = "fixture-diagnostics")]
+        let delivery_stopped = std::cell::Cell::new(false);
+        #[cfg(feature = "fixture-diagnostics")]
+        let result = {
+            let mut on_token = on_token;
+            let mut should_cancel = should_cancel;
+            self.generate_streaming_incremental_with_cancel(
+                prompt,
+                0,
+                max_tokens,
+                |id, text| {
+                    let keep_going = on_token(id, text);
+                    if !keep_going {
+                        delivery_stopped.set(true);
+                    }
+                    keep_going
+                },
+                || {
+                    let cancelled = should_cancel();
+                    if cancelled {
+                        cancellation_observed.set(true);
+                    }
+                    cancelled
+                },
+            )
+        };
+        #[cfg(not(feature = "fixture-diagnostics"))]
+        let result = self.generate_streaming_incremental_with_cancel(
             prompt,
             0,
             max_tokens,
             on_token,
             should_cancel,
-        )
+        );
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            use crate::fixture_diagnostics::ModelOutcome;
+            let outcome = if result.is_err() {
+                ModelOutcome::ModelError
+            } else if cancellation_observed.get() {
+                ModelOutcome::Cancelled
+            } else if delivery_stopped.get() {
+                ModelOutcome::DeliveryStopped
+            } else {
+                ModelOutcome::Complete
+            };
+            recorder.finish(Instant::now(), outcome);
+        }
+        result
     }
 
     /// Prefill prompt tokens starting from `start_pos` without resetting KV cache or recurrent states.
@@ -870,6 +956,10 @@ impl Model {
     {
         let mut token_ids = self.tokenizer.encode(prompt);
         if token_ids.is_empty() {
+            #[cfg(feature = "fixture-diagnostics")]
+            if let Some(recorder) = self.fixture_recorder.as_mut() {
+                recorder.tokenization_done(Instant::now());
+            }
             return Ok(String::new());
         }
 
@@ -885,6 +975,10 @@ impl Model {
             .unwrap_or(1);
         if should_prepend_bos(add_bos, start_pos, token_ids.first(), bos_id) {
             token_ids.insert(0, bos_id);
+        }
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            recorder.tokenization_done(Instant::now());
         }
 
         self.generate_tokens_incremental_with_cancel(
@@ -965,6 +1059,10 @@ impl Model {
 
         let n_prompt = prompt_tokens.len();
         let context_end = checked_context_end(start_pos, n_prompt, self.config.max_seq_len)?;
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            recorder.prefill_begin(Instant::now(), n_prompt);
+        }
 
         // 1. Check hierarchical prefix cache if starting from sequence position 0
         let mut start_prefill_idx = 0;
@@ -990,13 +1088,25 @@ impl Model {
         // that a snapshot is causally valid for this continuation.
 
         // 2. Prefill new prompt tokens (skipping already-cached prefix tokens)
-        if !self.run_prefill(
+        let prefill_result = self.run_prefill(
             prompt_tokens,
             start_pos,
             start_prefill_idx,
             &mut chained_hash,
             &mut should_cancel,
-        )? {
+        );
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            use crate::fixture_diagnostics::StageOutcome;
+            let stage_outcome = match &prefill_result {
+                Ok(true) => StageOutcome::Complete,
+                Ok(false) => StageOutcome::Cancelled,
+                Err(_) => StageOutcome::ModelError,
+            };
+            let processed = recorder.snapshot.processed_tokens.unwrap_or(0);
+            recorder.prefill_end(Instant::now(), start_prefill_idx, processed, stage_outcome);
+        }
+        if !prefill_result? {
             return Ok((String::new(), Vec::new()));
         }
         let mut pos = context_end;
@@ -1071,6 +1181,11 @@ impl Model {
             self.tokenizer
                 .decode_token_bytes(next_token, &mut raw_bytes);
             let decoded_chunk = stream_decoder.feed(&raw_bytes);
+            #[cfg(feature = "fixture-diagnostics")]
+            if let Some(recorder) = self.fixture_recorder.as_mut() {
+                recorder.raw(Instant::now(), &decoded_chunk);
+                recorder.snapshot.generated_ids.push(next_token);
+            }
             pending_text.push_str(&decoded_chunk);
 
             // Check for full stop sequence matches
@@ -1080,7 +1195,12 @@ impl Model {
                 let keep_len = pending_text.len().saturating_sub(matched_len);
                 pending_text.truncate(keep_len);
                 if !pending_text.is_empty() {
-                    let _ = on_token(next_token, &pending_text);
+                    #[cfg(feature = "fixture-diagnostics")]
+                    if let Some(recorder) = self.fixture_recorder.as_mut() {
+                        recorder.delivered(Instant::now(), &pending_text);
+                    }
+                    // Preserve this site's existing ignored callback result.
+                    let _keep_going = on_token(next_token, &pending_text);
                     pending_text.clear();
                 }
                 break;
@@ -1092,8 +1212,15 @@ impl Model {
             if hold_back < pending_text.len() {
                 let emit_len = pending_text.len() - hold_back;
                 let emit_str: String = pending_text.drain(..emit_len).collect();
-                if !emit_str.is_empty() && !on_token(next_token, &emit_str) {
-                    break;
+                if !emit_str.is_empty() {
+                    #[cfg(feature = "fixture-diagnostics")]
+                    if let Some(recorder) = self.fixture_recorder.as_mut() {
+                        recorder.delivered(Instant::now(), &emit_str);
+                    }
+                    let keep_going = on_token(next_token, &emit_str);
+                    if !keep_going {
+                        break;
+                    }
                 }
             }
 
@@ -1104,6 +1231,10 @@ impl Model {
 
         // Flush remaining decoder bytes
         let flushed = stream_decoder.flush();
+        #[cfg(feature = "fixture-diagnostics")]
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            recorder.raw(Instant::now(), &flushed);
+        }
         pending_text.push_str(&flushed);
         if !pending_text.is_empty() {
             if let Some(matched_len) =
@@ -1114,7 +1245,12 @@ impl Model {
             }
             if !pending_text.is_empty() {
                 let last_id = generated_ids.last().copied().unwrap_or(0);
-                let _ = on_token(last_id, &pending_text);
+                #[cfg(feature = "fixture-diagnostics")]
+                if let Some(recorder) = self.fixture_recorder.as_mut() {
+                    recorder.delivered(Instant::now(), &pending_text);
+                }
+                // Preserve this site's existing ignored callback result.
+                let _keep_going = on_token(last_id, &pending_text);
             }
         }
 
@@ -1282,6 +1418,524 @@ fn matches_any_stop_suffix(text: &str, stop_tokens: &[String]) -> Option<usize> 
 
 #[cfg(test)]
 mod prefix_cache_integration_tests {
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; observes real streaming hooks"]
+    #[cfg(feature = "fixture-diagnostics")]
+    fn fixture_model_observation() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::fixture_diagnostics::{CaptureLimits, ModelOutcome};
+
+        let path = std::env::var("MIVI_TEST_MODEL")?;
+        let mut model = Model::load_with_ctx(std::path::Path::new(&path), Some(512))?;
+        model.sampler.config.temperature = 0.0;
+        model.sampler.set_seed(7);
+        model
+            .start_fixture_capture(CaptureLimits {
+                text_bytes: 4096,
+                token_ids: 32,
+            })
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let mut delivered = String::new();
+        model.generate_streaming("Return the word hello.", 16, |_, text| {
+            delivered.push_str(text);
+            true
+        })?;
+        assert!(
+            !delivered.is_empty(),
+            "observation fixture did not exercise decoded output"
+        );
+        let capture = model
+            .take_fixture_capture()
+            .ok_or("missing fixture capture")?;
+        assert!(
+            !capture.raw_decoded.text.is_empty(),
+            "raw observation missing"
+        );
+        assert!(
+            capture.delivered.text == delivered,
+            "delivered observation mismatch"
+        );
+        assert_eq!(capture.outcome, Some(ModelOutcome::Complete));
+        assert!(model.take_fixture_capture().is_none());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; verifies bounded real-model lifecycle and parity"]
+    #[cfg(feature = "fixture-diagnostics")]
+    fn fixture_model_parity_and_lifecycle() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::fixture_diagnostics::{CaptureLimits, ModelOutcome, StageOutcome};
+
+        const PROMPT: &str = "Return the word hello.";
+        const BUDGET: usize = 4;
+        #[derive(Clone, Copy)]
+        enum Gate {
+            Initial,
+            AfterPrefillUnit,
+            AfterDelivery,
+        }
+
+        // The worker cannot physically return until the test releases this gate.
+        // Count only the existing cancellation callback evaluations.
+        fn gated_cancel(model: &mut Model, gate: Gate) -> Result<(String, String, usize, u64)> {
+            use std::sync::mpsc::{channel, sync_channel, TryRecvError};
+
+            let (entered_tx, entered_rx) = channel();
+            let (cancel_tx, cancel_rx) = sync_channel(0);
+            let (returned_tx, returned_rx) = channel();
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(move || {
+                    let delivered_once = std::cell::Cell::new(false);
+                    let mut delivered = String::new();
+                    let mut checks = 0;
+                    let result = model.generate_streaming_with_cancel(
+                        PROMPT,
+                        BUDGET,
+                        |_, text| {
+                            delivered.push_str(text);
+                            delivered_once.set(true);
+                            true
+                        },
+                        || {
+                            checks += 1;
+                            let at_gate = match gate {
+                                Gate::Initial => checks == 1,
+                                Gate::AfterPrefillUnit => checks == 3,
+                                Gate::AfterDelivery => delivered_once.get(),
+                            };
+                            if at_gate {
+                                entered_tx.send(()).expect("gate receiver disconnected");
+                                cancel_rx
+                                    .recv_timeout(Duration::from_secs(120))
+                                    .expect("cancellation gate disconnected or timed out")
+                            } else {
+                                false
+                            }
+                        },
+                    );
+                    returned_tx.send(()).expect("return receiver disconnected");
+                    result.map(|output| (output, delivered, checks, model.sampler.rng_state()))
+                });
+                entered_rx
+                    .recv_timeout(Duration::from_secs(120))
+                    .expect("bounded cancellation gate was not reached");
+                assert!(
+                    matches!(returned_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "generation returned before gate release"
+                );
+                cancel_tx
+                    .send(true)
+                    .expect("generation left cancellation gate");
+                let result = worker.join().expect("generation worker panicked");
+                assert!(
+                    returned_rx.try_recv().is_ok(),
+                    "physical return was not signalled"
+                );
+                result
+            })
+        }
+
+        let limits = CaptureLimits {
+            text_bytes: 4096,
+            token_ids: 32,
+        };
+        let arm = |model: &mut Model| {
+            model
+                .start_fixture_capture(limits)
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+        };
+        let strategies = [
+            PrefillStrategy::Token,
+            PrefillStrategy::Chunked { tile_tokens: 2 },
+        ];
+        let gates = [Gate::Initial, Gate::AfterPrefillUnit, Gate::AfterDelivery];
+        let path = std::env::var("MIVI_TEST_MODEL")?;
+
+        // Drop the entire unarmed model before loading the observed one.
+        let (
+            baseline_output,
+            baseline_delivered,
+            baseline_chunks,
+            baseline_ids,
+            baseline_rng,
+            baseline_cancelled,
+        ) = {
+            let mut model = Model::load_with_ctx(std::path::Path::new(&path), Some(512))?;
+            model.set_prefill_strategy(PrefillStrategy::Token)?;
+            model.sampler.config.temperature = 0.0;
+            model.sampler.set_seed(7);
+            assert!(model.fixture_recorder.is_none());
+            let mut delivered = String::new();
+            let mut chunks = Vec::new();
+            let mut ids = Vec::new();
+            let output = model.generate_streaming(PROMPT, BUDGET, |id, text| {
+                delivered.push_str(text);
+                chunks.push(text.to_owned());
+                ids.push(id);
+                true
+            })?;
+            assert!(
+                !delivered.is_empty(),
+                "parity fixture did not exercise delivery"
+            );
+            let rng = model.sampler.rng_state();
+            let mut cancelled = Vec::new();
+            for strategy in strategies {
+                model.set_prefill_strategy(strategy)?;
+                for gate in gates {
+                    model.prefix_cache.clear();
+                    model.sampler.set_seed(7);
+                    cancelled.push(gated_cancel(&mut model, gate)?);
+                    assert!(model.fixture_recorder.is_none());
+                    assert!(model.take_fixture_capture().is_none());
+                }
+            }
+            (output, delivered, chunks, ids, rng, cancelled)
+        };
+
+        let mut model = Model::load_with_ctx(std::path::Path::new(&path), Some(512))?;
+        model.set_prefill_strategy(PrefillStrategy::Token)?;
+        model.sampler.config.temperature = 0.0;
+        model.sampler.set_seed(7);
+        assert!(model.fixture_recorder.is_none());
+        assert!(model
+            .start_fixture_capture(CaptureLimits {
+                text_bytes: 0,
+                token_ids: 32
+            })
+            .is_err());
+        assert!(model.fixture_recorder.is_none());
+        arm(&mut model)?;
+        assert!(model.start_fixture_capture(limits).is_err());
+        let mut delivered = String::new();
+        let mut ids = Vec::new();
+        let output = model.generate_streaming(PROMPT, BUDGET, |id, text| {
+            delivered.push_str(text);
+            ids.push(id);
+            true
+        })?;
+        assert!(
+            output == baseline_output,
+            "observer changed generated output"
+        );
+        assert!(
+            delivered == baseline_delivered,
+            "observer changed delivered output"
+        );
+        assert!(ids == baseline_ids, "observer changed delivery token IDs");
+        assert_eq!(model.sampler.rng_state(), baseline_rng);
+        let capture = model
+            .take_fixture_capture()
+            .ok_or("missing parity capture")?;
+        assert!(
+            capture.delivered.text == delivered,
+            "delivery hook mismatch"
+        );
+        assert!(
+            !capture.raw_decoded.text.is_empty(),
+            "raw hook was not exercised"
+        );
+        assert_eq!(capture.outcome, Some(ModelOutcome::Complete));
+        assert_eq!(capture.prefill_outcome, Some(StageOutcome::Complete));
+        assert_eq!(capture.processed_tokens, capture.prompt_tokens);
+        assert_eq!(capture.reused_tokens, Some(0));
+        assert!(
+            capture.tokenization.is_some() && capture.prefill.is_some() && capture.decode.is_some()
+        );
+        assert!(capture.first_raw.is_some() && capture.first_delivered.is_some());
+        assert!(capture.first_raw <= capture.first_delivered);
+        assert!(model.take_fixture_capture().is_none());
+        let generated_ids = capture.generated_ids.ids;
+        let eos = model
+            .gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(GgufValue::as_usize)
+            .unwrap_or(EOS_TOKEN_ID as usize) as u32;
+        assert!(
+            generated_ids.iter().all(|&id| id != eos
+                && Some(id) != model.tokenizer.vocab().get_id("<|im_end|>")
+                && Some(id) != model.tokenizer.vocab().get_id("<|endoftext|>")),
+            "termination ID was captured"
+        );
+
+        let mut baseline_cases = baseline_cancelled.into_iter();
+        for strategy in strategies {
+            model.set_prefill_strategy(strategy)?;
+            for gate in gates {
+                model.prefix_cache.clear();
+                model.sampler.set_seed(7);
+                arm(&mut model)?;
+                let actual = gated_cancel(&mut model, gate)?;
+                let expected = baseline_cases
+                    .next()
+                    .ok_or("missing baseline cancellation case")?;
+                assert!(
+                    actual == expected,
+                    "observer changed gated cancellation behavior"
+                );
+                let capture = model
+                    .take_fixture_capture()
+                    .ok_or("missing cancellation capture")?;
+                assert_eq!(capture.outcome, Some(ModelOutcome::Cancelled));
+                assert!(capture.tokenization.is_some());
+                assert!(
+                    capture.delivered.text == actual.1,
+                    "cancelled delivery hook mismatch"
+                );
+                match gate {
+                    Gate::Initial => {
+                        assert_eq!(actual.2, 1);
+                        assert_eq!(capture.prefill, None);
+                        assert_eq!(capture.decode, None);
+                        assert_eq!(capture.processed_tokens, None);
+                    }
+                    Gate::AfterPrefillUnit => {
+                        assert_eq!(actual.2, 3);
+                        assert_eq!(capture.prefill_outcome, Some(StageOutcome::Cancelled));
+                        let completed = match strategy {
+                            PrefillStrategy::Token => 1,
+                            PrefillStrategy::Chunked { tile_tokens } => tile_tokens,
+                        };
+                        assert_eq!(capture.processed_tokens, Some(completed));
+                        assert!(capture.prompt_tokens.unwrap() > completed);
+                        assert_eq!(capture.reused_tokens, Some(0));
+                        assert_eq!(capture.decode, None);
+                        assert!(capture.generated_ids.ids.is_empty());
+                    }
+                    Gate::AfterDelivery => {
+                        assert_eq!(capture.prefill_outcome, Some(StageOutcome::Complete));
+                        assert_eq!(capture.processed_tokens, capture.prompt_tokens);
+                        assert!(capture.decode.is_some());
+                        assert!(!capture.generated_ids.ids.is_empty());
+                        assert!(
+                            !actual.1.is_empty(),
+                            "decode cancellation gate did not exercise delivery"
+                        );
+                    }
+                }
+            }
+        }
+
+        // The remaining probes reuse the observed model, clearing its prefix cache.
+        model.set_prefill_strategy(PrefillStrategy::Token)?;
+        arm(&mut model)?;
+        let mut checks = 0;
+        let empty = model.generate_streaming_with_cancel(
+            "",
+            1,
+            |_, _| panic!("empty encoding delivered text"),
+            || {
+                checks += 1;
+                true
+            },
+        )?;
+        assert!(empty.is_empty());
+        assert_eq!(checks, 0);
+        let empty = model
+            .take_fixture_capture()
+            .ok_or("missing empty encoding capture")?;
+        assert!(empty.tokenization.is_some());
+        assert_eq!(empty.outcome, Some(ModelOutcome::Complete));
+        assert_eq!(empty.prefill, None);
+        assert_eq!(empty.decode, None);
+        assert_eq!(empty.processed_tokens, None);
+        assert_eq!(empty.first_raw, None);
+        assert_eq!(empty.first_delivered, None);
+        assert!(empty.generated_ids.ids.is_empty());
+
+        let context_limit = model.config.max_seq_len;
+        model.config.max_seq_len = 1;
+        arm(&mut model)?;
+        let result = model.generate_streaming(PROMPT, 1, |_, _| true);
+        assert!(matches!(result, Err(ModelError::ContextOverflow { .. })));
+        model.config.max_seq_len = context_limit;
+        let error = model
+            .take_fixture_capture()
+            .ok_or("missing context error capture")?;
+        assert_eq!(error.outcome, Some(ModelOutcome::ModelError));
+        assert!(error.tokenization.is_some());
+        assert_eq!(error.prefill, None);
+        assert_eq!(error.decode, None);
+
+        let output_norm = model.weights.output_norm.take();
+        model.weights.output_norm = Some(Box::default());
+        for strategy in strategies {
+            model.prefix_cache.clear();
+            model.set_prefill_strategy(strategy)?;
+            arm(&mut model)?;
+            let result = model.generate_streaming(PROMPT, 1, |_, _| true);
+            assert!(matches!(result, Err(ModelError::DimMismatch(_))));
+            let error = model
+                .take_fixture_capture()
+                .ok_or("missing prefill error capture")?;
+            assert_eq!(error.outcome, Some(ModelOutcome::ModelError));
+            assert_eq!(error.prefill_outcome, Some(StageOutcome::ModelError));
+            assert!(error.prefill.is_some());
+            let prompt_tokens = error.prompt_tokens.ok_or("missing prefill token count")?;
+            let completed = match strategy {
+                PrefillStrategy::Token => prompt_tokens - 1,
+                PrefillStrategy::Chunked { tile_tokens } => {
+                    ((prompt_tokens - 1) / tile_tokens) * tile_tokens
+                }
+            };
+            assert_eq!(error.processed_tokens, Some(completed));
+            assert_eq!(error.reused_tokens, Some(0));
+            assert_eq!(error.decode, None);
+            assert!(error.generated_ids.ids.is_empty());
+        }
+        model.weights.output_norm = output_norm;
+        model.set_prefill_strategy(PrefillStrategy::Token)?;
+        model.prefix_cache.clear();
+        model.sampler.set_seed(7);
+        arm(&mut model)?;
+        let mut delivered = String::new();
+        model.generate_streaming(PROMPT, 1, |_, text| {
+            delivered.push_str(text);
+            false
+        })?;
+        let stopped = model
+            .take_fixture_capture()
+            .ok_or("missing delivery stop capture")?;
+        assert_eq!(stopped.outcome, Some(ModelOutcome::DeliveryStopped));
+        assert!(
+            stopped.delivered.text == delivered,
+            "delivery stop hook mismatch"
+        );
+        assert!(
+            !delivered.is_empty(),
+            "one-token delivery fixture was unexercised"
+        );
+
+        // A complete stop trims raw bytes; an incomplete stop prefix is emitted
+        // only at the existing final pending-text callback, whose false is ignored.
+        let first_chunk = baseline_chunks
+            .first()
+            .ok_or("missing first delivery chunk")?;
+        model.prefix_cache.clear();
+        model.sampler.set_seed(7);
+        model.sampler.config.stop_tokens = vec![first_chunk.clone()];
+        arm(&mut model)?;
+        let output =
+            model.generate_streaming(PROMPT, 1, |_, _| panic!("complete stop delivered text"))?;
+        let stopped = model
+            .take_fixture_capture()
+            .ok_or("missing text stop capture")?;
+        assert!(output.is_empty());
+        assert!(
+            stopped.raw_decoded.text == *first_chunk,
+            "raw stop hook mismatch"
+        );
+        assert!(stopped.delivered.text.is_empty());
+        assert_eq!(stopped.outcome, Some(ModelOutcome::Complete));
+        assert_eq!(stopped.generated_ids.observed_tokens, 1);
+        assert!(stopped.first_raw.is_some());
+        assert_eq!(stopped.first_delivered, None);
+
+        if let Some((keep, _)) = first_chunk
+            .char_indices()
+            .last()
+            .filter(|(keep, _)| *keep > 0)
+        {
+            model.prefix_cache.clear();
+            model.sampler.set_seed(7);
+            model.sampler.config.stop_tokens = vec![first_chunk[keep..].to_owned()];
+            arm(&mut model)?;
+            let mut calls = 0;
+            let output = model.generate_streaming(PROMPT, 1, |_, text| {
+                calls += 1;
+                assert!(
+                    text == &first_chunk[..keep],
+                    "matched-stop delivery mismatch"
+                );
+                false
+            })?;
+            let stopped = model
+                .take_fixture_capture()
+                .ok_or("missing matched-stop delivery capture")?;
+            assert!(
+                output == first_chunk[..keep],
+                "ignored stop callback changed output"
+            );
+            assert!(
+                stopped.raw_decoded.text == *first_chunk,
+                "matched-stop raw mismatch"
+            );
+            assert!(
+                stopped.delivered.text == first_chunk[..keep],
+                "matched-stop hook mismatch"
+            );
+            assert_eq!(stopped.outcome, Some(ModelOutcome::DeliveryStopped));
+            assert_eq!(calls, 1);
+            eprintln!("[fixture] matched-stop callback with retained text: exercised");
+        } else {
+            eprintln!("[fixture] matched-stop callback with retained text: unexercised (single-character first chunk)");
+        }
+
+        model.prefix_cache.clear();
+        model.sampler.set_seed(7);
+        model.sampler.config.stop_tokens = vec![format!("{first_chunk}\u{10ffff}")];
+        arm(&mut model)?;
+        let mut calls = 0;
+        let output = model.generate_streaming(PROMPT, 1, |_, text| {
+            calls += 1;
+            assert!(text == first_chunk, "pending flush delivery mismatch");
+            false
+        })?;
+        let flushed = model
+            .take_fixture_capture()
+            .ok_or("missing pending flush capture")?;
+        assert!(
+            output == *first_chunk,
+            "ignored final callback changed output"
+        );
+        assert!(
+            flushed.raw_decoded.text == *first_chunk,
+            "flush raw hook mismatch"
+        );
+        assert!(
+            flushed.delivered.text == *first_chunk,
+            "flush delivery hook mismatch"
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(flushed.generated_ids.observed_tokens, 1);
+        assert_eq!(flushed.outcome, Some(ModelOutcome::DeliveryStopped));
+
+        // Use an already observed later token as EOS so the real termination
+        // branch is exercised without increasing the generation budget.
+        let (stop_at, &termination_id) = generated_ids
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, id)| **id != generated_ids[0])
+            .ok_or("bounded EOS fixture lacks a distinct later token")?;
+        model.prefix_cache.clear();
+        model.sampler.set_seed(7);
+        model.sampler.config.stop_tokens.clear();
+        model.gguf.metadata.insert(
+            "tokenizer.ggml.eos_token_id".to_owned(),
+            GgufValue::U32(termination_id),
+        );
+        arm(&mut model)?;
+        model.generate_streaming(PROMPT, BUDGET, |_, _| true)?;
+        let eos_capture = model.take_fixture_capture().ok_or("missing EOS capture")?;
+        assert_eq!(eos_capture.generated_ids.observed_tokens, stop_at);
+        assert!(
+            eos_capture.generated_ids.ids == generated_ids[..stop_at],
+            "EOS branch changed preceding token IDs"
+        );
+        assert!(
+            eos_capture
+                .generated_ids
+                .ids
+                .iter()
+                .all(|&id| id != termination_id),
+            "EOS ID was captured"
+        );
+        assert_eq!(eos_capture.outcome, Some(ModelOutcome::Complete));
+        assert!(model.take_fixture_capture().is_none());
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires MIVI_TEST_MODEL; compares profiling on/off"]
     fn attention_tile_profile_is_opt_in_and_resets() {
