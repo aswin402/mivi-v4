@@ -14,6 +14,9 @@ pub mod types;
 pub mod ui;
 pub mod watchdog;
 
+#[cfg(feature = "fixture-diagnostics")]
+mod fixture_diagnostics;
+
 pub use auth::require_api_key;
 pub use config::{ServerConfig, DEFAULT_FIRST_TOKEN_TIMEOUT_SECS, DEFAULT_REQUEST_TIMEOUT_SECS};
 pub use engine_actor::{

@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description = "OpenAI-compatible HTTP server with SSE streaming, grammar-constrained decoding, and Mivi API endpoints"
 
+[features]
+fixture-diagnostics = ["mivi-model/fixture-diagnostics"]
+
 [dependencies]
 mivi-core.workspace = true
 mivi-model.workspace = true

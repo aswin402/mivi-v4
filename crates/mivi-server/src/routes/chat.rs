@@ -130,13 +130,19 @@ pub async fn chat_completions(
         .metrics
         .record_inference_accepted(slot_wait_started.elapsed());
     let completion_id = format!("{}{}", mivi_core::CHATCMPL_ID_PREFIX, uuid::Uuid::new_v4());
-    let last_user_prompt = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role.eq_ignore_ascii_case("user") || m.role.eq_ignore_ascii_case("developer"))
-        .and_then(|m| m.content.as_deref())
-        .map(|s| crate::logging::summarize_prompt(s, 140));
+    let fixture_capture_active = state.engine.fixture_capture_active();
+    let last_user_prompt = if fixture_capture_active {
+        None
+    } else {
+        req.messages
+            .iter()
+            .rev()
+            .find(|m| {
+                m.role.eq_ignore_ascii_case("user") || m.role.eq_ignore_ascii_case("developer")
+            })
+            .and_then(|m| m.content.as_deref())
+            .map(|s| crate::logging::summarize_prompt(s, 140))
+    };
 
     let model_name = state.model_name.clone();
 
@@ -194,7 +200,9 @@ pub async fn chat_completions(
         };
 
     if let Some(prompt_text) = &last_user_prompt {
-        crate::logging::print_incoming_prompt(prompt_text, admitted_prompt_tokens, false);
+        log_unless_fixture_capture(fixture_capture_active, || {
+            crate::logging::print_incoming_prompt(prompt_text, admitted_prompt_tokens, false);
+        });
     }
 
     if is_streaming {
@@ -218,7 +226,11 @@ pub async fn chat_completions(
         };
         let mut resp = handle_chat_streaming(ctx);
         let log_meta = crate::logging::LogMetadata {
-            prompt_summary: last_user_prompt,
+            prompt_summary: if fixture_capture_active {
+                None
+            } else {
+                last_user_prompt
+            },
             is_streaming: true,
             stream_metrics: Some(state.metrics.clone()),
             ..Default::default()
@@ -279,6 +291,12 @@ struct ChatBlockingContext<'a> {
 }
 
 pub const THINKING_INIT_MSG: &str = "Generating completion with Mivi engine...";
+
+fn log_unless_fixture_capture(active: bool, log: impl FnOnce()) {
+    if !active {
+        log();
+    }
+}
 
 fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
     let (tx, rx) =
@@ -468,7 +486,9 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                     }
                                     Some(Err(err_msg)) => {
                                         stream_failed = true;
-                                        tracing::error!("Inference stream error: {}", err_msg);
+                                        log_unless_fixture_capture(engine.fixture_capture_active(), || {
+                                            tracing::error!("Inference stream error: {}", err_msg);
+                                        });
                                         if tx
                                             .send(Ok(create_error_chunk_event(
                                                 &cid,
@@ -565,7 +585,9 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                             &tool_calls,
                             tool_definitions.as_deref().unwrap_or_default(),
                         ) {
-                            tracing::error!(%error, "Model generated invalid tool call");
+                            log_unless_fixture_capture(engine.fixture_capture_active(), || {
+                                tracing::error!(%error, "Model generated invalid tool call");
+                            });
                             metrics.record_inference_error();
                             let _ = tx
                                 .send(Ok(create_error_chunk_event(&cid, &mname, &error)))
@@ -593,15 +615,17 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                                 return "error";
                             }
                         }
-                        crate::logging::print_completion_response_box(
-                            thinking.as_deref(),
-                            if tc_names.is_empty() {
-                                None
-                            } else {
-                                Some(&tc_names)
-                            },
-                            Some(&clean_reply),
-                        );
+                        log_unless_fixture_capture(engine.fixture_capture_active(), || {
+                            crate::logging::print_completion_response_box(
+                                thinking.as_deref(),
+                                if tc_names.is_empty() {
+                                    None
+                                } else {
+                                    Some(&tc_names)
+                                },
+                                Some(&clean_reply),
+                            );
+                        });
                         return if tool_calls_enabled && !tc_names.is_empty() {
                             "tool_calls"
                         } else {
@@ -619,7 +643,9 @@ fn handle_chat_streaming(ctx: ChatStreamContext) -> Response {
                 Err(e) => {
                     metrics.record_generation(generation_started.elapsed());
                     metrics.record_inference_error();
-                    tracing::error!("Failed to start stream: {}", e);
+                    log_unless_fixture_capture(engine.fixture_capture_active(), || {
+                        tracing::error!("Failed to start stream: {}", e);
+                    });
                     let _ = tx
                         .send(Ok(create_error_chunk_event(
                             &cid,
@@ -934,7 +960,7 @@ fn partial_delimiter_suffix_len(text: &str, delimiter: &str) -> usize {
 
 #[cfg(test)]
 mod streaming_tests {
-    use super::IncrementalToolText;
+    use super::{log_unless_fixture_capture, IncrementalToolText};
     use crate::routes::{validate_context_budget, ContextBudgetError};
     use mivi_tools::DelimitedPythonToolCallCodec;
 
@@ -979,5 +1005,17 @@ mod streaming_tests {
 
         assert_eq!(stream.push("plain"), Some("plain".to_string()));
         assert_eq!(stream.finish(), None);
+    }
+
+    #[test]
+    fn fixture_logging_helper_preserves_normal_logs_and_suppresses_payload_markers() {
+        let mut emitted = String::new();
+        log_unless_fixture_capture(false, || emitted.push_str("normal completion marker"));
+        assert_eq!(emitted, "normal completion marker");
+
+        log_unless_fixture_capture(true, || {
+            emitted.push_str("SYNTHETIC_CAPTURED_PROMPT_AND_COMPLETION_MARKER");
+        });
+        assert_eq!(emitted, "normal completion marker");
     }
 }

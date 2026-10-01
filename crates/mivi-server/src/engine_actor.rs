@@ -62,6 +62,8 @@ pub struct EngineHandle {
     has_model: bool,
     stream_buffer_capacity: usize,
     model_metadata: Option<EngineModelMetadata>,
+    #[cfg(feature = "fixture-diagnostics")]
+    fixture_session: Option<crate::fixture_diagnostics::FixtureSession>,
 }
 
 /// Metadata exposed by compatibility APIs for a loaded GGUF model.
@@ -227,6 +229,8 @@ impl EngineHandle {
             has_model,
             stream_buffer_capacity: stream_buffer_capacity.max(1),
             model_metadata,
+            #[cfg(feature = "fixture-diagnostics")]
+            fixture_session: None,
         }
     }
 
@@ -238,6 +242,18 @@ impl EngineHandle {
     #[inline]
     pub fn model_metadata(&self) -> Option<&EngineModelMetadata> {
         self.model_metadata.as_ref()
+    }
+
+    /// Whether this handle belongs to an explicitly armed private fixture session.
+    pub(crate) fn fixture_capture_active(&self) -> bool {
+        #[cfg(feature = "fixture-diagnostics")]
+        {
+            self.fixture_session
+                .as_ref()
+                .is_some_and(crate::fixture_diagnostics::FixtureSession::is_active)
+        }
+        #[cfg(not(feature = "fixture-diagnostics"))]
+        false
     }
 
     #[inline]
@@ -402,10 +418,56 @@ impl EngineActor {
     }
 
     fn try_spawn_with_mode(
-        mut model: Option<mivi_model::Model>,
+        model: Option<mivi_model::Model>,
         config: &ServerConfig,
         mock_mode: bool,
     ) -> std::io::Result<EngineHandle> {
+        Self::try_spawn_inner(
+            model,
+            config,
+            mock_mode,
+            #[cfg(feature = "fixture-diagnostics")]
+            None,
+            #[cfg(feature = "fixture-diagnostics")]
+            None,
+        )
+        .map(|(handle, _join)| handle)
+    }
+
+    #[cfg(feature = "fixture-diagnostics")]
+    #[allow(dead_code)]
+    pub(crate) fn try_spawn_fixture(
+        model: mivi_model::Model,
+        config: &ServerConfig,
+        session: crate::fixture_diagnostics::FixtureSession,
+    ) -> std::io::Result<crate::fixture_diagnostics::FixtureEngine> {
+        let (completion_tx, completion) = tokio::sync::oneshot::channel();
+        let (handle, join_handle) = Self::try_spawn_inner(
+            Some(model),
+            config,
+            false,
+            Some(session.clone()),
+            Some(completion_tx),
+        )?;
+        Ok(crate::fixture_diagnostics::FixtureEngine {
+            handle: Some(handle),
+            join_handle: Some(join_handle),
+            completion,
+            session,
+        })
+    }
+
+    fn try_spawn_inner(
+        mut model: Option<mivi_model::Model>,
+        config: &ServerConfig,
+        mock_mode: bool,
+        #[cfg(feature = "fixture-diagnostics")] session: Option<
+            crate::fixture_diagnostics::FixtureSession,
+        >,
+        #[cfg(feature = "fixture-diagnostics")] completion_tx: Option<
+            tokio::sync::oneshot::Sender<()>,
+        >,
+    ) -> std::io::Result<(EngineHandle, std::thread::JoinHandle<()>)> {
         config
             .prefill_strategy
             .validate()
@@ -422,12 +484,25 @@ impl EngineActor {
         let has_model = model.is_some() || mock_mode;
         let stream_buffer_capacity = channel_capacity;
         let model_metadata = model.as_ref().map(EngineModelMetadata::from_model);
+        #[cfg(feature = "fixture-diagnostics")]
+        let fixture_descriptor = model
+            .as_ref()
+            .zip(session.as_ref())
+            .map(|(model, session)| fixture_descriptor(model, session.text_limit()));
+        #[cfg(feature = "fixture-diagnostics")]
+        let fixture_config = config.clone();
+        #[cfg(feature = "fixture-diagnostics")]
+        let actor_session = session.clone();
 
-        std::thread::Builder::new()
+        let join_handle = std::thread::Builder::new()
             .name(ENGINE_ACTOR_THREAD_NAME.to_string())
             .spawn(move || {
                 let mut rx = rx;
                 while let Some(cmd) = rx.blocking_recv() {
+                    #[cfg(feature = "fixture-diagnostics")]
+                    let fixture_sequence = actor_session
+                        .as_ref()
+                        .and_then(|active| active.armed_sequence());
                     let res =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
                             EngineCommand::Generate {
@@ -447,7 +522,7 @@ impl EngineActor {
                                 responder,
                                 cancellation,
                             } => {
-                                handle_generate_stream(
+                                handle_generate_stream_with_fixture(
                                     &mut model,
                                     mock_mode,
                                     prompt,
@@ -455,6 +530,14 @@ impl EngineActor {
                                     options,
                                     responder,
                                     cancellation,
+                                    #[cfg(feature = "fixture-diagnostics")]
+                                    fixture_context(
+                                        actor_session.as_ref(),
+                                        fixture_descriptor.as_ref(),
+                                        fixture_sequence,
+                                        &fixture_config,
+                                        max_tokens,
+                                    ),
                                 );
                             }
                             EngineCommand::Encode { text, responder } => {
@@ -462,20 +545,54 @@ impl EngineActor {
                             }
                         }));
                     if let Err(panic_err) = res {
+                        #[cfg(feature = "fixture-diagnostics")]
+                        if let (Some(session), Some(sequence)) =
+                            (actor_session.as_ref(), fixture_sequence)
+                        {
+                            if let Some(model) = model.as_mut() {
+                                let _ = model.take_fixture_capture();
+                            }
+                            session.finish_unobserved(sequence);
+                            tracing::error!("Engine actor caught panic during fixture command");
+                        } else {
+                            tracing::error!(
+                                "Engine actor caught panic during command execution: {:?}",
+                                panic_err
+                            );
+                        }
+                        #[cfg(not(feature = "fixture-diagnostics"))]
                         tracing::error!(
                             "Engine actor caught panic during command execution: {:?}",
                             panic_err
                         );
                     }
                 }
+                drop(model);
+                drop(rx);
+                #[cfg(feature = "fixture-diagnostics")]
+                {
+                    drop(actor_session);
+                }
+                #[cfg(feature = "fixture-diagnostics")]
+                if let Some(completion_tx) = completion_tx {
+                    let _ = completion_tx.send(());
+                }
             })?;
 
-        Ok(EngineHandle::with_capacity_and_metadata(
+        #[allow(unused_mut)]
+        let mut handle = EngineHandle::with_capacity_and_metadata(
             tx,
             has_model,
             stream_buffer_capacity,
             model_metadata,
-        ))
+        );
+        #[cfg(feature = "fixture-diagnostics")]
+        {
+            handle.fixture_session = session.clone();
+            Ok((handle, join_handle))
+        }
+        #[cfg(not(feature = "fixture-diagnostics"))]
+        Ok((handle, join_handle))
     }
 
     /// Spawn the engine actor with a custom ServerConfig. Panics on OS thread spawn failure.
@@ -541,7 +658,176 @@ fn handle_generate(
     }
 }
 
-fn handle_generate_stream(
+#[cfg(feature = "fixture-diagnostics")]
+struct FixtureCaptureContext {
+    session: crate::fixture_diagnostics::FixtureSession,
+    sequence: usize,
+    descriptor: serde_json::Value,
+    profile_source: &'static str,
+    max_tokens: usize,
+    prefill_strategy: mivi_model::PrefillStrategy,
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+fn fixture_context(
+    session: Option<&crate::fixture_diagnostics::FixtureSession>,
+    descriptor: Option<&serde_json::Value>,
+    sequence: Option<usize>,
+    config: &ServerConfig,
+    max_tokens: usize,
+) -> Option<FixtureCaptureContext> {
+    Some(FixtureCaptureContext {
+        session: session?.clone(),
+        sequence: sequence?,
+        descriptor: descriptor?.clone(),
+        profile_source: if config.model_profile.is_some() {
+            "explicit"
+        } else {
+            "metadata"
+        },
+        max_tokens,
+        prefill_strategy: config.prefill_strategy,
+    })
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+#[allow(clippy::too_many_arguments)]
+fn handle_generate_stream_with_fixture(
+    model: &mut Option<mivi_model::Model>,
+    mock_mode: bool,
+    prompt: String,
+    max_tokens: usize,
+    options: GenerationOptions,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
+    fixture: Option<FixtureCaptureContext>,
+) {
+    let mut record = None;
+    handle_generate_stream_impl(
+        model,
+        mock_mode,
+        prompt,
+        max_tokens,
+        options,
+        responder,
+        cancellation.clone(),
+        &mut record,
+        fixture.as_ref(),
+    );
+    let Some(mut record) = record else {
+        if let Some(fixture) = fixture.as_ref() {
+            fixture.session.finish_unobserved(fixture.sequence);
+        }
+        return;
+    };
+    if let Some(model) = model.as_mut() {
+        record.model = model.take_fixture_capture();
+    }
+    record.engine_terminal = if record.model.is_none() {
+        crate::fixture_diagnostics::EngineTerminal::Unobserved
+    } else if cancellation.is_cancelled() {
+        crate::fixture_diagnostics::EngineTerminal::Cancelled
+    } else {
+        match record.model.as_ref().and_then(|capture| capture.outcome) {
+            Some(mivi_model::fixture_diagnostics::ModelOutcome::Complete) => {
+                crate::fixture_diagnostics::EngineTerminal::Returned
+            }
+            Some(mivi_model::fixture_diagnostics::ModelOutcome::Cancelled) => {
+                crate::fixture_diagnostics::EngineTerminal::Cancelled
+            }
+            Some(mivi_model::fixture_diagnostics::ModelOutcome::DeliveryStopped) => {
+                crate::fixture_diagnostics::EngineTerminal::ReceiverClosed
+            }
+            Some(mivi_model::fixture_diagnostics::ModelOutcome::ModelError) => {
+                crate::fixture_diagnostics::EngineTerminal::ModelError
+            }
+            None => crate::fixture_diagnostics::EngineTerminal::NotStarted,
+        }
+    };
+    if record.model.is_none() {
+        record.capture_incomplete = true;
+        fixture.as_ref().unwrap().session.mark_incomplete();
+    }
+    fixture.as_ref().unwrap().session.finish_engine(record);
+}
+
+#[cfg(not(feature = "fixture-diagnostics"))]
+fn handle_generate_stream_with_fixture(
+    model: &mut Option<mivi_model::Model>,
+    mock_mode: bool,
+    prompt: String,
+    max_tokens: usize,
+    options: GenerationOptions,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
+) {
+    handle_generate_stream_impl(
+        model,
+        mock_mode,
+        prompt,
+        max_tokens,
+        options,
+        responder,
+        cancellation,
+    );
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+#[allow(clippy::too_many_arguments)]
+fn handle_generate_stream_impl(
+    model: &mut Option<mivi_model::Model>,
+    mock_mode: bool,
+    prompt: String,
+    max_tokens: usize,
+    options: GenerationOptions,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
+    record: &mut Option<crate::fixture_diagnostics::FixtureRecord>,
+    fixture: Option<&FixtureCaptureContext>,
+) {
+    if let Some(ref mut m) = model {
+        let checkpoint = SamplingCheckpoint::capture(m, options.seed);
+        apply_generation_options(m, &options);
+        if let Some(fixture) = fixture {
+            let forced_prefix = options
+                .forced_output_prefix
+                .as_deref()
+                .filter(|prefix| !prefix.is_empty())
+                .unwrap_or_default();
+            let settings = effective_fixture_settings(m, &options, fixture);
+            *record = fixture.session.begin(
+                fixture.sequence,
+                &prompt,
+                forced_prefix,
+                settings,
+                fixture.descriptor.clone(),
+            );
+            if record.is_some()
+                && m.start_fixture_capture(fixture.session.capture_limits())
+                    .is_err()
+            {
+                if let Some(record) = record.as_mut() {
+                    record.capture_incomplete = true;
+                }
+                fixture.session.mark_incomplete();
+            }
+        }
+        handle_generate_stream_applied(
+            m,
+            prompt,
+            max_tokens,
+            options,
+            responder,
+            cancellation,
+            checkpoint,
+        );
+    } else {
+        handle_generate_stream_no_model(mock_mode, prompt, options, responder, cancellation);
+    }
+}
+
+#[cfg(not(feature = "fixture-diagnostics"))]
+fn handle_generate_stream_impl(
     model: &mut Option<mivi_model::Model>,
     mock_mode: bool,
     prompt: String,
@@ -553,37 +839,68 @@ fn handle_generate_stream(
     if let Some(ref mut m) = model {
         let checkpoint = SamplingCheckpoint::capture(m, options.seed);
         apply_generation_options(m, &options);
+        handle_generate_stream_applied(
+            m,
+            prompt,
+            max_tokens,
+            options,
+            responder,
+            cancellation,
+            checkpoint,
+        );
+    } else {
+        handle_generate_stream_no_model(mock_mode, prompt, options, responder, cancellation);
+    }
+}
 
-        let forced_prefix = options
-            .forced_output_prefix
-            .as_deref()
-            .filter(|prefix| !prefix.is_empty());
-        let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
-        let res = if options.response_mode == ResponseMode::JsonObject {
-            Err("json_object response format is not supported for streaming".to_string())
-        } else {
-            let callback = match model_stream_callback(&responder, &cancellation, forced_prefix) {
-                Ok(callback) => callback,
-                Err(()) => {
-                    checkpoint.restore(m);
-                    return;
-                }
-            };
-            m.generate_streaming_with_cancel(&model_prompt, max_tokens, callback, || {
+fn handle_generate_stream_applied(
+    model: &mut mivi_model::Model,
+    prompt: String,
+    max_tokens: usize,
+    options: GenerationOptions,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
+    checkpoint: SamplingCheckpoint,
+) {
+    let forced_prefix = options
+        .forced_output_prefix
+        .as_deref()
+        .filter(|prefix| !prefix.is_empty());
+    let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
+    let res = if options.response_mode == ResponseMode::JsonObject {
+        Err("json_object response format is not supported for streaming".to_string())
+    } else {
+        let callback = match model_stream_callback(&responder, &cancellation, forced_prefix) {
+            Ok(callback) => callback,
+            Err(()) => {
+                checkpoint.restore(model);
+                return;
+            }
+        };
+        model
+            .generate_streaming_with_cancel(&model_prompt, max_tokens, callback, || {
                 cancellation.is_cancelled()
             })
             .map(|_| ())
             .map_err(|e| e.to_string())
-        };
+    };
 
-        if let Err(e) = res {
-            if !cancellation.is_cancelled() {
-                let _ = responder.blocking_send(Err(e));
-            }
+    if let Err(error) = res {
+        if !cancellation.is_cancelled() {
+            let _ = responder.blocking_send(Err(error));
         }
+    }
+    checkpoint.restore(model);
+}
 
-        checkpoint.restore(m);
-    } else if mock_mode {
+fn handle_generate_stream_no_model(
+    mock_mode: bool,
+    prompt: String,
+    _options: GenerationOptions,
+    responder: mpsc::Sender<std::result::Result<String, String>>,
+    cancellation: GenerationCancellation,
+) {
+    if mock_mode {
         for &chunk in MOCK_STREAM_CHUNKS {
             if cancellation.is_cancelled()
                 || responder.blocking_send(Ok(chunk.to_string())).is_err()
@@ -594,6 +911,106 @@ fn handle_generate_stream(
     } else if !cancellation.is_cancelled() {
         let _ = responder.blocking_send(Err(ERR_NO_MODEL.to_string()));
     }
+    let _ = prompt;
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+fn effective_fixture_settings(
+    model: &mivi_model::Model,
+    options: &GenerationOptions,
+    fixture: &FixtureCaptureContext,
+) -> serde_json::Value {
+    let config = &model.sampler.config;
+    let stop_tokens: Vec<_> = config
+        .stop_tokens
+        .iter()
+        .take(16)
+        .map(|token| bounded_fixture_label(token, 256))
+        .collect();
+    let rayon_threads = std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let prefill = match fixture.prefill_strategy {
+        mivi_model::PrefillStrategy::Token => serde_json::json!({"kind": "token"}),
+        mivi_model::PrefillStrategy::Chunked { tile_tokens } => {
+            serde_json::json!({"kind": "chunked", "tile_tokens": tile_tokens})
+        }
+    };
+    serde_json::json!({
+        "sampler": {
+            "temperature": config.temperature,
+            "top_p": config.top_p,
+            "top_k": config.top_k,
+            "min_p": config.min_p,
+            "repetition_penalty": config.repetition_penalty,
+            "presence_penalty": config.presence_penalty,
+            "frequency_penalty": config.frequency_penalty,
+            "seed": options.seed.or(config.seed),
+            "stop_tokens": stop_tokens,
+            "stop_tokens_clipped": config.stop_tokens.len() > 16
+        },
+        "prefill_strategy": prefill,
+        "thread_settings": {"rayon_num_threads_configured": rayon_threads},
+        "max_tokens": fixture.max_tokens,
+        "profile_source": fixture.profile_source
+    })
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+fn bounded_fixture_label(value: &str, cap: usize) -> serde_json::Value {
+    let mut end = value.len().min(cap);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({"value": &value[..end], "clipped": end < value.len()})
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+fn fixture_descriptor(model: &mivi_model::Model, cap: usize) -> serde_json::Value {
+    let family = model
+        .gguf
+        .metadata
+        .get("general.architecture")
+        .and_then(mivi_model::GgufValue::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let has_ssm = model
+                .config
+                .block_types
+                .contains(&mivi_model::BlockType::SSM);
+            let has_attention = model
+                .config
+                .block_types
+                .contains(&mivi_model::BlockType::Attention);
+            match (has_ssm, has_attention) {
+                (true, true) => Some("hybrid"),
+                (true, false) => Some("ssm"),
+                (false, true) => Some("attention"),
+                (false, false) => None,
+            }
+        })
+        .unwrap_or("unknown");
+    let mut counts = std::collections::BTreeMap::<String, u64>::new();
+    for tensor in model.gguf.tensors.values() {
+        let Some(count) = tensor_element_count(&tensor.dims) else {
+            continue;
+        };
+        let label = format!("{:?}", tensor.ggml_type);
+        let total = counts.entry(label).or_default();
+        *total = total.saturating_add(count);
+    }
+    let quantization = counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(label, _)| label)
+        .unwrap_or_else(|| "unknown".to_string());
+    serde_json::json!({
+        "model_config_name": bounded_fixture_label(&model.config.name, cap),
+        "family": bounded_fixture_label(family, cap),
+        "quantization": bounded_fixture_label(&quantization, cap),
+        "gguf_size_bytes": model.gguf.mmap.len(),
+        "context_limit": model.config.max_seq_len
+    })
 }
 
 fn model_stream_callback<'a>(
@@ -814,6 +1231,56 @@ mod tests {
         assert!(!second.is_cancelled());
         first.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn fixture_capture_predicate_is_off_for_default_handles() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let handle = EngineHandle::new(sender, false);
+        assert!(!handle.fixture_capture_active());
+    }
+
+    #[cfg(feature = "fixture-diagnostics")]
+    #[test]
+    fn fixture_capture_predicate_requires_an_armed_session() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut handle = EngineHandle::new(sender, false);
+        assert!(!handle.fixture_capture_active());
+
+        let session = crate::fixture_diagnostics::FixtureSession::new(
+            crate::fixture_diagnostics::FixtureLimits::default(),
+        )
+        .unwrap();
+        session.arm("fixture").unwrap();
+        handle.fixture_session = Some(session);
+        assert!(handle.fixture_capture_active());
+    }
+
+    #[cfg(feature = "fixture-diagnostics")]
+    #[tokio::test]
+    async fn owned_fixture_actor_drops_receiver_before_completion_and_joins() {
+        let session = crate::fixture_diagnostics::FixtureSession::new(
+            crate::fixture_diagnostics::FixtureLimits::default(),
+        )
+        .unwrap();
+        let (completion_tx, completion) = tokio::sync::oneshot::channel();
+        let (handle, join_handle) = EngineActor::try_spawn_inner(
+            None,
+            &ServerConfig::default(),
+            false,
+            Some(session.clone()),
+            Some(completion_tx),
+        )
+        .unwrap();
+        let mut fixture = crate::fixture_diagnostics::FixtureEngine {
+            handle: Some(handle),
+            join_handle: Some(join_handle),
+            completion,
+            session,
+        };
+        drop(fixture.take_handle());
+        fixture.wait_and_join(Duration::from_secs(2)).await.unwrap();
+        assert!(fixture.join_handle.is_none());
     }
 
     #[test]
