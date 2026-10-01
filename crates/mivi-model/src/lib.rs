@@ -3,6 +3,8 @@
 pub mod config;
 pub mod expert_cache;
 pub mod ffn;
+#[cfg(feature = "fixture-diagnostics")]
+pub mod fixture_diagnostics;
 pub mod gguf;
 pub mod grammar;
 pub mod loader;

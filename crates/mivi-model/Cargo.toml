@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description = "GGUF parser, hybrid LFM architecture (SSM+GQA), LoRA adapters, forward pass, and sampling"
 
+[features]
+fixture-diagnostics = []
+
 [dependencies]
 mivi-core.workspace = true
 mivi-quant.workspace = true
