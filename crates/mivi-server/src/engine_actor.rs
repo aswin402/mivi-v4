@@ -559,16 +559,16 @@ fn handle_generate_stream(
             .as_deref()
             .filter(|prefix| !prefix.is_empty());
         let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
-        let callback = match model_stream_callback(&responder, &cancellation, forced_prefix) {
-            Ok(callback) => callback,
-            Err(()) => {
-                checkpoint.restore(m);
-                return;
-            }
-        };
         let res = if options.response_mode == ResponseMode::JsonObject {
             Err("json_object response format is not supported for streaming".to_string())
         } else {
+            let callback = match model_stream_callback(&responder, &cancellation, forced_prefix) {
+                Ok(callback) => callback,
+                Err(()) => {
+                    checkpoint.restore(m);
+                    return;
+                }
+            };
             m.generate_streaming_with_cancel(&model_prompt, max_tokens, callback, || {
                 cancellation.is_cancelled()
             })
@@ -601,12 +601,26 @@ fn model_stream_callback<'a>(
     cancellation: &'a GenerationCancellation,
     prefix: Option<&'a str>,
 ) -> Result<impl FnMut(u32, &str) -> bool + 'a, ()> {
-    if cancellation.is_cancelled() || responder.is_closed() {
+    model_stream_callback_with(
+        cancellation,
+        prefix,
+        || responder.is_closed(),
+        |output| responder.blocking_send(Ok(output)).is_ok(),
+    )
+}
+
+fn model_stream_callback_with<'a>(
+    cancellation: &'a GenerationCancellation,
+    prefix: Option<&'a str>,
+    is_closed: impl Fn() -> bool + 'a,
+    mut send: impl FnMut(String) -> bool + 'a,
+) -> Result<impl FnMut(u32, &str) -> bool + 'a, ()> {
+    if cancellation.is_cancelled() || is_closed() {
         return Err(());
     }
     let mut pending_prefix = prefix.filter(|prefix| !prefix.is_empty());
     Ok(move |_: u32, text: &str| {
-        if cancellation.is_cancelled() || responder.is_closed() {
+        if cancellation.is_cancelled() || is_closed() {
             return false;
         }
         if text.is_empty() {
@@ -621,9 +635,7 @@ fn model_stream_callback<'a>(
             }
             None => text.to_string(),
         };
-        !cancellation.is_cancelled()
-            && responder.blocking_send(Ok(output)).is_ok()
-            && !cancellation.is_cancelled()
+        !cancellation.is_cancelled() && send(output) && !cancellation.is_cancelled()
     })
 }
 
@@ -924,17 +936,27 @@ mod tests {
     #[test]
     fn capacity_one_applies_backpressure_and_preserves_chunk_order() {
         let (sender, receiver) = mpsc::channel(1);
+        let capacity_probe = sender.clone();
         let cancellation = GenerationCancellation::new();
         let (first_sent_tx, first_sent_rx) = std_mpsc::sync_channel(1);
-        let (second_started_tx, second_started_rx) = std_mpsc::sync_channel(1);
+        let (second_delivery_tx, second_delivery_rx) = std_mpsc::sync_channel(1);
         let (second_result_tx, second_result_rx) = std_mpsc::sync_channel(1);
         let (finished_tx, finished_rx) = std_mpsc::channel();
         let join_handle = std::thread::spawn(move || {
-            let mut callback = model_stream_callback(&sender, &cancellation, Some("prefix:"))
-                .expect("callback construction succeeds");
+            let mut callback = model_stream_callback_with(
+                &cancellation,
+                Some("prefix:"),
+                || sender.is_closed(),
+                |output| {
+                    if output == "second" {
+                        let _ = second_delivery_tx.send(());
+                    }
+                    sender.blocking_send(Ok(output)).is_ok()
+                },
+            )
+            .expect("callback construction succeeds");
             let first_result = callback(0, "first");
             let _ = first_sent_tx.send(first_result);
-            let _ = second_started_tx.send(());
             let second_result = callback(0, "second");
             let _ = second_result_tx.send(second_result);
             let _ = finished_tx.send(());
@@ -951,9 +973,14 @@ mod tests {
             Ok(true)
         );
         assert_eq!(
-            second_started_rx.recv_timeout(CALLBACK_WORKER_TIMEOUT),
+            second_delivery_rx.recv_timeout(CALLBACK_WORKER_TIMEOUT),
             Ok(())
         );
+        assert!(matches!(
+            capacity_probe.try_reserve(),
+            Err(mpsc::error::TrySendError::Full(()))
+        ));
+        drop(capacity_probe);
         assert_eq!(
             worker.receiver.blocking_recv(),
             Some(Ok("prefix:first".to_string()))
@@ -970,31 +997,44 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_after_blocked_send_stops_following_callbacks() {
+    fn cancellation_during_in_progress_delivery_stops_following_callbacks() {
         let (sender, receiver) = mpsc::channel(1);
         let cancellation = GenerationCancellation::new();
         let (first_sent_tx, first_sent_rx) = std_mpsc::sync_channel(1);
-        let (second_started_tx, second_started_rx) = std_mpsc::sync_channel(1);
+        let (delivery_started_tx, delivery_started_rx) = std_mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std_mpsc::sync_channel(1);
         let (results_tx, results_rx) = std_mpsc::sync_channel(1);
         let (finished_tx, finished_rx) = std_mpsc::channel();
         let worker_cancellation = cancellation.clone();
         let join_handle = std::thread::spawn(move || {
-            let mut callback =
-                model_stream_callback(&sender, &worker_cancellation, Some("prefix:"))
-                    .expect("callback construction succeeds");
+            let mut callback = model_stream_callback_with(
+                &worker_cancellation,
+                Some("prefix:"),
+                || false,
+                |output| {
+                    if output == "prefix:first" {
+                        sender.blocking_send(Ok(output)).is_ok()
+                    } else {
+                        let _ = delivery_started_tx.send(());
+                        release_rx.recv_timeout(CALLBACK_WORKER_TIMEOUT).is_ok()
+                    }
+                },
+            )
+            .expect("callback construction succeeds");
             let first_result = callback(0, "first");
             let _ = first_sent_tx.send(first_result);
-            let _ = second_started_tx.send(());
-            let blocked_result = callback(0, "second");
+            let in_progress_result = callback(0, "second");
             let after_cancel_result = callback(0, "third");
-            let _ = results_tx.send((blocked_result, after_cancel_result));
+            let _ = results_tx.send((in_progress_result, after_cancel_result));
+            drop(callback);
+            drop(sender);
             let _ = finished_tx.send(());
         });
         let mut worker = CallbackWorker {
             receiver,
             join_handle: Some(join_handle),
             finished: finished_rx,
-            release: None,
+            release: Some(release_tx),
         };
 
         assert_eq!(
@@ -1002,10 +1042,11 @@ mod tests {
             Ok(true)
         );
         assert_eq!(
-            second_started_rx.recv_timeout(CALLBACK_WORKER_TIMEOUT),
+            delivery_started_rx.recv_timeout(CALLBACK_WORKER_TIMEOUT),
             Ok(())
         );
         cancellation.cancel();
+        worker.release.take().unwrap().send(()).unwrap();
         assert_eq!(
             worker.receiver.blocking_recv(),
             Some(Ok("prefix:first".to_string()))
@@ -1015,13 +1056,9 @@ mod tests {
             Ok((false, false))
         );
         assert_eq!(
-            worker.receiver.blocking_recv(),
-            Some(Ok("second".to_string()))
-        );
-        assert!(matches!(
             worker.receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
-        ));
+        );
         worker.join();
     }
 
