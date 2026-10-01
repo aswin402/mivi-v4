@@ -1,6 +1,6 @@
 # Fixture-Only Generation Diagnostics
 
-Status: conversational design approved; written spec awaiting user review.
+Status: written spec approved; implementation plan prepared; execution pending.
 No implementation, tests, version bump, or publication for this feature yet.
 Baseline: published v0.2.61, commit `8f7ae0d`.
 
