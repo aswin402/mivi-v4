@@ -96,7 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check and `git diff --check` passed; normal dependencies are unchanged. Cargo
   jobs and test threads were one, inference/Rayon threads were two. No full-
   workspace check, test, or server build was run. Independent final review
-  approved publication after the test-bound correction; publication is pending.
+  approved publication after the test-bound correction. Published to GitHub
+  `main`; the pushed release head was verified against the local commit.
 
 ## [v0.2.59] - 2026-10-01
 

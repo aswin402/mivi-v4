@@ -1,6 +1,7 @@
 # Group-32 Activation Packing Experiment
 
-Status: implemented, measured, and independently reviewed; publication pending.
+Status: completed as v0.2.60; implemented, measured, independently reviewed,
+and published to GitHub main with matching local/remote release heads.
 
 ## Goal and evidence
 
