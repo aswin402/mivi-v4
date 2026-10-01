@@ -1,6 +1,6 @@
 # Group-32 Activation Packing Experiment
 
-Status: written specification approved by the user; implementation pending.
+Status: implemented and measured; final review and publication pending.
 
 ## Goal and evidence
 

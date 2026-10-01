@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.60] - 2026-10-01
+
+### Group-Size Comparison for Test-Only Packed Prefill Diagnostics
+
+#### Ideas, Inspirations & Sources
+
+- Compare group-32 and group-256 activation packing while retaining the existing
+  Q4_K weight bytes and production inference path. GGML Q4_K/Q8_K layouts and
+  dot products are a reference point, not a claim that this experimental
+  activation codec is bit-identical:
+  [GGML block definitions](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-common.h)
+  and [GGML quantization source](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+- Mixed-precision sensitivity is empirical. [Dettmers et al., LLM.int8()](https://arxiv.org/abs/2208.07339)
+  motivates investigating activation outliers, but this experiment does not
+  implement its feature-wise outlier decomposition or import its quality claims.
+
+#### Measured Results and Scope
+
+- The 1.2B Q4_K_M capped capture used 16 raw prompt tokens (32-token ceiling),
+  128 rows per projection, group=32, and the scalar kernel. It sampled 40 Q4
+  projections and counted 8 unsupported FFN projections. Sampled projection
+  relative L2 ranged from 0.003657 to 0.013003; max absolute error ranged from
+  0.000107 to 0.009445. The production walker control was exactly zero error.
+  A separate complete-row, layer-12 down-only residual perturbation measured
+  relative L2 0.004483 and max absolute 0.025347, with greedy token 509 unchanged;
+  it is not part of the capped projection samples.
+- Complete-row traces used the same default raw tool-request fixture per model
+  across both codecs. The 1.2B fixture had 26 tokens and the 2.6B fixture 23.
+  Baseline/production, per-layer recompute, and recompute/production controls
+  matched exactly. Measurements were finite and ordered; final-observer/walker
+  residual agreement was checked, while only the non-packed controls are stated
+  to match production.
+  Greedy next-token IDs were unchanged in all 16 codec/mode measurements.
+- Packed/total non-packed FFN projection coverage was identical for both codecs:
+
+  | Model | Down | Gate | Up | Full FFN |
+  |---|---:|---:|---:|---:|
+  | 1.2B | 8/8 | 16/32 | 16/32 | 40/8 |
+  | 2.6B | 16/14 | 30/60 | 30/60 | 76/14 |
+
+  Non-packed counts include deliberately unselected projections, including
+  eligible Q4_K weights, as well as unsupported formats; they are not counts
+  of unsupported projections alone.
+- Final logit relative L2 percentages / max absolute errors and largest
+  residual-relative-error increase by mode:
+
+  | Model | Group | Kernel | Down L2 / max abs (growth) | Gate L2 / max abs (growth) | Up L2 / max abs (growth) | Full FFN L2 / max abs (growth) |
+  |---|---:|---|---:|---:|---:|---:|
+  | 1.2B | 256 | runtime AVX2 tiled | 6.1920% / 0.809669 (2.7227 pp) | 5.9338% / 0.741239 (2.1208 pp) | 5.6856% / 1.127241 (5.2765 pp) | 24.4887% / 2.008592 (10.8271 pp) |
+  | 1.2B | 32 | scalar | 7.9674% / 1.026320 (2.8357 pp) | 11.6445% / 1.514009 (4.4457 pp) | 9.6461% / 0.928469 (3.1632 pp) | 8.8656% / 0.894294 (4.6450 pp) |
+  | 2.6B | 256 | runtime AVX2 tiled | 3.7911% / 0.570700 (0.8560 pp) | 2.0298% / 0.348042 (0.4749 pp) | 2.7732% / 0.445877 (0.6315 pp) | 4.6426% / 0.841252 (1.1137 pp) |
+  | 2.6B | 32 | scalar | 1.4712% / 0.259859 (0.4260 pp) | 1.4896% / 0.218034 (0.2496 pp) | 2.1760% / 0.222596 (0.2730 pp) | 2.8133% / 0.446167 (0.6881 pp) |
+
+- Results are mixed: on the 1.2B fixture, group-32 relative L2 is higher for
+  isolated down, gate, and up modes, and lower for full FFN. On the 2.6B
+  fixture, all four group-32 measurements are lower. These are repeated modes
+  on one shared short raw fixture per model, not independent fixtures or a
+  general quality conclusion. There is no packed-model acceptance threshold,
+  speedup claim, generated-tool/agent result, causal layer-defect claim, or
+  production rollout. Scalar group-32 accuracy results are not performance data.
+- Greedy IDs remained `509` (1.2B) and `124902` (2.6B) in every mode. Largest
+  residual-relative-error growth occurred at layer 15 (SSM-labelled) for every
+  1.2B mode; for 2.6B group-256 it was gate at layer 2 and the other modes at
+  layer 13, while group-32 up peaked at layer 2 and the other modes at layer 13.
+  These are relative-error increases with changing denominators, not causal
+  layer-defect evidence.
+
+#### Added
+
+- A private group-32 activation codec, scalar affine Q4_K dot product,
+  transactional checked batched matmul, strict codec selector, and configured
+  test diagnostics. The selector accepts only `256` or `32` (including rejecting
+  whitespace variants). No production exports, normal dependencies, or unsafe
+  code were added; production inference remains unchanged.
+- Task 3's original test-first chronology deviation was disclosed and the user
+  approved continuing. The original sequence is not described as test-first;
+  the later retrospective wrong-selector mutation check does not alter it.
+- Production inference code was unchanged. No server binary rebuild is claimed;
+  the existing server executable remains v0.2.51.
+- Verification: scoped `mivi-quant` library tests passed (49 passed, 5 ignored);
+  scoped Clippy passed with the existing style-lint allowances; package format
+  check and `git diff --check` passed; normal dependencies are unchanged. Cargo
+  jobs and test threads were one, inference/Rayon threads were two. No full-
+  workspace check, test, or server build was run. Independent controller review
+  and publication remain pending.
+
 ## [v0.2.59] - 2026-10-01
 
 ### Isolated Gate/Up Packing Sensitivity (Test-Only)

@@ -65,7 +65,7 @@ No group-32 SIMD implementation is included. Group-256 dispatch continues to use
 
 **Produces:** `Group32Activation::{pack,reconstructed,dot}` and format constants above.
 
-- [ ] Write the tests first, with zero-output codec/dot stubs so they compile and fail assertions. Include the following distinguishing fixture:
+- [x] Write the tests first, with zero-output codec/dot stubs so they compile and fail assertions. Include the following distinguishing fixture:
 
 ```rust
 #[test]
@@ -84,9 +84,9 @@ fn group32_pack_limits_cross_group_outlier_error() {
 }
 ```
 
-- [ ] Add codec tests for zeros, opposite signed maxima in separate groups, rounding ties, tiny finite inputs, malformed lengths, NaN/infinity, and scale underflow. Tie fixture: set each group maximum to `-127.0`, then values `0.5, 1.5, -0.5, -1.5`; expect integers `0, 2, 0, -2` with scale `1.0`. Underflow fixture: `[f32::from_bits(1); Q4_K_BLOCK_SIZE]` must return `ScaleUnderflow`. A block of all zeros must reconstruct zeros with all sums/scales zero.
-- [ ] Run `RAYON_NUM_THREADS=2 cargo test -p mivi-quant --offline --lib --jobs 1 group32 -- --test-threads=1`. Confirm assertion failures caused by the stubs, not import/type mistakes.
-- [ ] Implement the codec using per-group signed maximum and the original rounding convention:
+- [x] Add codec tests for zeros, opposite signed maxima in separate groups, rounding ties, tiny finite inputs, malformed lengths, NaN/infinity, and scale underflow. Tie fixture: set each group maximum to `-127.0`, then values `0.5, 1.5, -0.5, -1.5`; expect integers `0, 2, 0, -2` with scale `1.0`. Underflow fixture: `[f32::from_bits(1); Q4_K_BLOCK_SIZE]` must return `ScaleUnderflow`. A block of all zeros must reconstruct zeros with all sums/scales zero.
+- [x] Run `RAYON_NUM_THREADS=2 cargo test -p mivi-quant --offline --lib --jobs 1 group32 -- --test-threads=1`. Confirm assertion failures caused by the stubs, not import/type mistakes.
+- [x] Implement the codec using per-group signed maximum and the original rounding convention:
 
 ```rust
 pub(super) fn pack(input: &[f32]) -> Result<Self, PackedError> {
@@ -125,8 +125,8 @@ pub(super) fn reconstructed(&self) -> [f32; Q4_K_BLOCK_SIZE] {
 
 Add a compile-time assertion that the Q4_K block is divisible by `GROUP_WIDTH` and `GROUPS == 8`. These constants describe Q4_K, not model dimensions.
 
-- [ ] Write a failing dot test before the dot body. Decode fixture weights independently with `dequantize_q4_k_m`; reconstruct activations with `reconstructed`; accumulate `sum(f64(weight) * f64(activation))`. Run seeds `0, 1, 47, 255` and signs/zeros/outlier groups. Reject a zero dot stub with a known nonzero fixture.
-- [ ] Implement the scalar dot, retaining each group's own activation scale and affine minimum correction:
+- [x] Write a failing dot test before the dot body. Decode fixture weights independently with `dequantize_q4_k_m`; reconstruct activations with `reconstructed`; accumulate `sum(f64(weight) * f64(activation))`. Run seeds `0, 1, 47, 255` and signs/zeros/outlier groups. Reject a zero dot stub with a known nonzero fixture.
+- [x] Implement the scalar dot, retaining each group's own activation scale and affine minimum correction:
 
 ```rust
 pub(super) fn dot(&self, weight: &PackedWeights<'_>) -> f32 {
@@ -148,9 +148,9 @@ pub(super) fn dot(&self, weight: &PackedWeights<'_>) -> f32 {
 }
 ```
 
-- [ ] Test a rounding-aware bound rather than universal absolute tolerance. Compute the F64 sum of absolute affine components using unpacked nibbles, weight scale/min/submetadata, group scale, and signed activation magnitudes. Use `gamma = 64*eps/(1-64*eps)` for the documented conservative F32 operation budget; permit `gamma * component_energy + 64.0 * f64::from(f32::from_bits(1))` for arithmetic rounding and subnormal absolute error. Separately quantify original-activation packing error with per-group `0.501 * abs(scale)` plus F32 reconstruction allowance. Never turn this arithmetic bound into a model-quality threshold.
-- [ ] Rerun the scoped group tests; require zero failures. Obtain an independent read-only review of codec grouping, nibble mapping, sums, minimum correction, and reference/bound independence. Fix substantive findings with failing regressions.
-- [ ] Commit only the new module and registration with `git commit -m 'test: add group-32 activation codec and scalar dot'` after explicit staging. No patch release yet.
+- [x] Test a rounding-aware bound rather than universal absolute tolerance. Compute the F64 sum of absolute affine components using unpacked nibbles, weight scale/min/submetadata, group scale, and signed activation magnitudes. Use `gamma = 64*eps/(1-64*eps)` for the documented conservative F32 operation budget; permit `gamma * component_energy + 64.0 * f64::from(f32::from_bits(1))` for arithmetic rounding and subnormal absolute error. Separately quantify original-activation packing error with per-group `0.501 * abs(scale)` plus F32 reconstruction allowance. Never turn this arithmetic bound into a model-quality threshold.
+- [x] Rerun the scoped group tests; require zero failures. Obtain an independent read-only review of codec grouping, nibble mapping, sums, minimum correction, and reference/bound independence. Fix substantive findings with failing regressions.
+- [x] Commit only the new module and registration with `git commit -m 'test: add group-32 activation codec and scalar dot'` after explicit staging. No patch release yet.
 
 ## Task 2: Checked batched matmul
 
@@ -160,8 +160,8 @@ pub(super) fn dot(&self, weight: &PackedWeights<'_>) -> f32 {
 
 **Produces:** `group32::packed_matmul` with the six-argument signature defined above, transactional output writes, unchanged output tails.
 
-- [ ] Write failing matmul tests against a zero-output stub. Use `(rows,batch,cols)` of `(3,2,512)`, `(1,1,256)`, `(257,3,256)`, and zero-work shapes `(0,3,256)`, `(3,0,256)`, `(3,2,0)`. Fill outputs with a sentinel plus one tail value. Independent expectations decode each full weight row and reconstructed activation block, and accumulate in F64. Test all-zero input produces zero outputs while the tail stays sentinel.
-- [ ] Write rejection-before-mutation tests using the concrete pattern:
+- [x] Write failing matmul tests against a zero-output stub. Use `(rows,batch,cols)` of `(3,2,512)`, `(1,1,256)`, `(257,3,256)`, and zero-work shapes `(0,3,256)`, `(3,0,256)`, `(3,2,0)`. Fill outputs with a sentinel plus one tail value. Independent expectations decode each full weight row and reconstructed activation block, and accumulate in F64. Test all-zero input produces zero outputs while the tail stays sentinel.
+- [x] Write rejection-before-mutation tests using the concrete pattern:
 
 ```rust
 #[test]
@@ -177,9 +177,9 @@ fn group32_matmul_rejects_before_output_write() {
 
 Add short output/weights/input, misaligned columns, checked-product overflow, late-block infinity/underflow, non-finite decoded weight scale/min, and non-finite derived output cases. Add private `PackedError::NonFiniteWeight` (message: `packed weights require finite scales`) and `PackedError::NonFiniteOutput` (message: `packed projection produced non-finite output`) variants; do not mislabel them as non-finite activations.
 
-- [ ] Run the exact Task 1 scoped test command and observe assertion failures for missing matmul behavior.
-- [ ] Implement the checked wrapper. Calculate `blocks`, checked `row_bytes`, then call `validate_matmul_args`. Return after validation for zero batch/rows. For nonzero work, validate only the used weight prefix's scale/min headers, pack only the used input prefix, and compute into a temporary row-major result. This guarantees invalid data never writes public output.
-- [ ] Use the following row kernel and existing Rayon scheduling pattern:
+- [x] Run the exact Task 1 scoped test command and observe assertion failures for missing matmul behavior.
+- [x] Implement the checked wrapper. Calculate `blocks`, checked `row_bytes`, then call `validate_matmul_args`. Return after validation for zero batch/rows. For nonzero work, validate only the used weight prefix's scale/min headers, pack only the used input prefix, and compute into a temporary row-major result. This guarantees invalid data never writes public output.
+- [x] Use the following row kernel and existing Rayon scheduling pattern:
 
 ```rust
 let compute = |row: usize, output: &mut [f32]| {
@@ -210,8 +210,8 @@ for row in 0..rows {
 }
 ```
 
-- [ ] Rerun group tests and `RAYON_NUM_THREADS=2 cargo test -p mivi-quant --offline --lib --jobs 1 -- --test-threads=1`. Request independent review of validation, checked offsets, transactional writes, prefixes/tails, and parallel result layout.
-- [ ] Commit only Task 2 files with `git commit -m 'test: add checked group-32 batched projection'`. No patch release yet.
+- [x] Rerun group tests and `RAYON_NUM_THREADS=2 cargo test -p mivi-quant --offline --lib --jobs 1 -- --test-threads=1`. Request independent review of validation, checked offsets, transactional writes, prefixes/tails, and parallel result layout.
+- [x] Commit only Task 2 files with `git commit -m 'test: add checked group-32 batched projection'`. No patch release yet.
 
 ## Task 3: Private codec dispatch and diagnostic integration
 
@@ -221,7 +221,7 @@ for row in 0..rows {
 
 **Produces:** Private `ActivationCodec::{Group256,Group32}` with `parse`, `from_env`, `label`, `project`, and `reconstruct`; typed selector passed through diagnostic functions without reading environment variables inside numerical loops.
 
-- [ ] Write failing parser/dispatcher tests before the selector implementation:
+- [ ] Write failing parser/dispatcher tests before the selector implementation: (Original chronology was not met; user approved the disclosed retrospective-check deviation.)
 
 ```rust
 #[test]
@@ -236,7 +236,7 @@ fn activation_codec_rejects_unsupported_settings() {
 
 Use direct parsing, not environment mutation, in unit tests. Dispatch tests compare actual matrices against the corresponding existing/new wrapper; reconstruction tests compare actual arrays against each codec's packing result. Both codecs must preserve nonzero F32 fallback and one-packed/two-non-packed gate/up isolation outputs.
 
-- [ ] Implement the private selector with these exact interfaces:
+- [x] Implement the private selector with these exact interfaces:
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,7 +281,7 @@ impl ActivationCodec {
 }
 ```
 
-- [ ] Add `codec: ActivationCodec` to `walk`, `walk_observed`, `replay`, cumulative `project`, public-to-parent `recompute`, `FfnProjections::recompute`, and `activation_stats`. Read `ActivationCodec::from_env()` once at each ignored diagnostic entry point. Existing unit tests pass `Group256` explicitly unless looping over both codecs. Preserve separate `packed: bool` in `project` and `FfnPacking` masks; replace only its eligible branch with `codec.project(...)`.
+- [x] Add `codec: ActivationCodec` to `walk`, `walk_observed`, `replay`, cumulative `project`, public-to-parent `recompute`, `FfnProjections::recompute`, and `activation_stats`. Read `ActivationCodec::from_env()` once at each ignored diagnostic entry point. Existing unit tests pass `Group256` explicitly unless looping over both codecs. Preserve separate `packed: bool` in `project` and `FfnPacking` masks; replace only its eligible branch with `codec.project(...)`.
 
 ```rust
 if eligible {
@@ -293,8 +293,8 @@ if eligible {
 ```
 
 The existing input/output finiteness checks and `Ok(eligible)` stay outside this branch. Codec selection must not override the `eligible = packed && supported_shape(...)` mask.
-- [ ] In replay, keep the existing group-256 scalar/tiled equality test and error-bound check intact. When group-32 is selected, compute its sample alongside the existing F32-activation reference, print finite relative-L2/max-absolute errors with codec/kernel labels, and apply the group-specific reconstruction/rounding bound. Do not apply the old single-scale bound to new groups. Keep row caps explicit.
-- [ ] In layer statistics, replace the old single-scale reconstruction with `codec.reconstruct(block)?`; leave reference/error/RMS accumulation unchanged. Label all scalar baseline statistics and mode summaries with the codec. They still include fallback inputs as probes, not claims that those projections packed activations.
+- [x] In replay, keep the existing group-256 scalar/tiled equality test and error-bound check intact. When group-32 is selected, compute its sample alongside the existing F32-activation reference, print finite relative-L2/max-absolute errors with codec/kernel labels, and apply the group-specific reconstruction/rounding bound. Do not apply the old single-scale bound to new groups. Keep row caps explicit.
+- [x] In layer statistics, replace the old single-scale reconstruction with `codec.reconstruct(block)?`; leave reference/error/RMS accumulation unchanged. Label all scalar baseline statistics and mode summaries with the codec. They still include fallback inputs as probes, not claims that those projections packed activations.
 
 ```rust
 for block in input.chunks_exact(Q4_K_BLOCK_SIZE) {
@@ -308,9 +308,9 @@ for block in input.chunks_exact(Q4_K_BLOCK_SIZE) {
     }
 }
 ```
-- [ ] Preserve `SingleDown` by routing its packed projection through the selector. Controls use no packed projection under either codec. Update corpus calls to accept the selector without expanding its default fixtures or forcing that corpus to run in this experiment.
-- [ ] Extend the existing two-row gate/up and mixed-format tests to loop over both codecs, with selected-codec expected outputs, unchanged coverage, fresh SwiGLU, invalid isolation rejection, and preserved down/control behavior. Run targeted selector/cumulative/stat tests, then the scoped quant library tests. Request read-only review of selector propagation and labels before model runs.
-- [ ] Commit Task 3 files with `git commit -m 'test: compare activation codecs in captured FFN diagnostics'`.
+- [x] Preserve `SingleDown` by routing its packed projection through the selector. Controls use no packed projection under either codec. Update corpus calls to accept the selector without expanding its default fixtures or forcing that corpus to run in this experiment.
+- [x] Extend the existing two-row gate/up and mixed-format tests to loop over both codecs, with selected-codec expected outputs, unchanged coverage, fresh SwiGLU, invalid isolation rejection, and preserved down/control behavior. Run targeted selector/cumulative/stat tests, then the scoped quant library tests. Request read-only review of selector propagation and labels before model runs.
+- [x] Commit Task 3 files with `git commit -m 'test: compare activation codecs in captured FFN diagnostics'`.
 
 ## Task 4: Bounded real-model evidence and completed release
 
@@ -320,7 +320,7 @@ for block in input.chunks_exact(Q4_K_BLOCK_SIZE) {
 
 **Produces:** Recorded projection samples and complete-matrix short-prompt model comparisons; reviewed v0.2.60 publication, or an explicit incomplete status if verification fails.
 
-- [ ] Begin with one local GGUF and group-32 captured projections, one token tile, capped projection rows. Exact initial command from workspace root:
+- [x] Begin with one local GGUF and group-32 captured projections, one token tile, capped projection rows. Exact initial command from workspace root:
 
 ```bash
 MIVI_TEST_MODEL=/home/aswin/programming/vscode/myProjects/ai_agent_tools/mivi_v4/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf \
@@ -332,7 +332,7 @@ cargo test -p mivi-quant --offline --release --lib --jobs 1 \
 
 Expect successful finite samples and a production walker control below `1e-3`. The ignored capture test also runs an existing single-down sensitivity case on complete rows; label its result separately from capped projection samples.
 
-- [ ] Run the short default tool-request layer trace with each codec on the first GGUF:
+- [x] Run the short default tool-request layer trace with each codec on the first GGUF:
 
 ```bash
 MIVI_TEST_MODEL=/home/aswin/programming/vscode/myProjects/ai_agent_tools/mivi_v4/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf \
@@ -346,11 +346,11 @@ cargo test -p mivi-quant --offline --release --lib --jobs 1 \
   layerwise_prefill_error_trace -- --ignored --test-threads=1 --nocapture
 ```
 
-- [ ] Repeat the two commands sequentially with the path ending `models/LFM2.5-2.6B-Q4_K_M.gguf`. Never run two model loads or Cargo commands concurrently. Record eight codec/mode cases per model; repeated samples are not independent fixtures. Controls, coverage, observer ordering, finite metrics, and final state must pass. Lower/higher packed errors are measurements, not test acceptance thresholds.
-- [ ] Record original/new relative L2, maximum absolute logit error, greedy token changes, residual growth, controls, packed/non-packed coverage, raw token counts, row caps, scalar/actual-runtime kernel labels, and resource settings. Do not infer a speed improvement from these accuracy runs or promise generated-tool correctness.
+- [x] Repeat the two commands sequentially with the path ending `models/LFM2.5-2.6B-Q4_K_M.gguf`. Never run two model loads or Cargo commands concurrently. Record eight codec/mode cases per model; repeated samples are not independent fixtures. Controls, coverage, observer ordering, finite metrics, and final state must pass. Lower/higher packed errors are measurements, not test acceptance thresholds.
+- [x] Record original/new relative L2, maximum absolute logit error, greedy token changes, residual growth, controls, packed/non-packed coverage, raw token counts, row caps, scalar/actual-runtime kernel labels, and resource settings. Do not infer a speed improvement from these accuracy runs or promise generated-tool correctness.
 - [ ] Independently review changes against the approved spec, fixing important findings via failing regression tests. Self-review documentation for placeholder measurements, contradictory codec/kernel labels, stale selector behavior, and unsupported quality claims.
-- [ ] After successful verification, change workspace version to `0.2.60`; let the next scoped Cargo command refresh workspace package versions in `Cargo.lock`. No other dependency changes. Add a changelog entry with current completion date, actual measurements, limitations, and the GGML/LLM.int8 sources from the spec. README documents `MIVI_TEST_ACTIVATION_GROUP`, scalar limitations, and focused commands. Do not overwrite prior measurements or claim the server binary was rebuilt.
-- [ ] Run final scoped verification (one Cargo command at a time):
+- [x] After successful verification, change workspace version to `0.2.60`; let the next scoped Cargo command refresh workspace package versions in `Cargo.lock`. No other dependency changes. Add a changelog entry with current completion date, actual measurements, limitations, and the GGML/LLM.int8 sources from the spec. README documents `MIVI_TEST_ACTIVATION_GROUP`, scalar limitations, and focused commands. Do not overwrite prior measurements or claim the server binary was rebuilt.
+- [x] Run final scoped verification (one Cargo command at a time):
 
 ```bash
 RAYON_NUM_THREADS=2 cargo test -p mivi-quant --offline --lib --jobs 1 -- --test-threads=1
@@ -374,4 +374,4 @@ Expect zero failed non-ignored library tests, successful scoped Clippy with the 
 - Capped samples, two-model one-prompt comparisons, sequential resources, independent review, release/docs/sources: Task 4.
 - SIMD optimization, full corpus expansion, generated agent answers, and production deployment are intentionally outside this experiment.
 
-Execution status: all implementation tasks pending. No code or version change has been performed by writing this plan.
+Execution status: Tasks 1 and 2 implemented and independently reviewed; Task 3 functionally reviewed, with its disclosed original test-first chronology deviation approved by the user. Retrospective wrong-selector mutation checks failed as expected and restoration passed. Task 4 completed five sequential model runs and scoped verification; workspace version is 0.2.60. Final release reviews and GitHub publication are pending. Production inference remains unchanged.

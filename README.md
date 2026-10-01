@@ -153,7 +153,8 @@ Passing the mathematical error bound does not certify acceptable model quality.
 Replay **captured prefill activations** with a separate memory-only diagnostic:
 
 ```bash
-MIVI_TEST_MODEL=/absolute/path/model.gguf RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
+MIVI_TEST_MODEL=/absolute/path/model.gguf MIVI_TEST_ACTIVATION_GROUP=256 \
+  RAYON_NUM_THREADS=2 MIVI_THREADS=2 \
   cargo test -p mivi-quant --release --lib --jobs 1 captured_prefill_projection_evaluation \
   -- --ignored --test-threads=1 --nocapture
 ```
@@ -163,8 +164,25 @@ This uses a short raw-text prompt, not an agent/chat-template evaluation. Set
 single tile (default 32, maximum 64, including metadata-requested BOS), and
 `MIVI_TEST_MAX_ROWS` for the projection row-prefix cap (default 1,024). Prompt
 text and activations are neither printed nor dumped to disk.
+`MIVI_TEST_ACTIVATION_GROUP` accepts exactly `256` (default) or `32`; other
+values, including whitespace-padded values, are rejected. This selector applies
+to captured-projection, cumulative-prefill, and layer-wise trace diagnostics; it
+does not select a codec for the standalone generated-activation timing benchmark
+above. Group-32 currently uses the scalar affine kernel; it does not use the
+AVX2 tiled path. Group-256 can use the runtime AVX2 tiled kernel when the host
+supports it. These diagnostic accuracy runs do not measure performance.
 GGUFs requesting BOS must provide a valid `u32` BOS ID: this diagnostic rejects
 missing/invalid metadata instead of using production's legacy fallback token ID.
+
+For a bounded group-32 sample, set an explicit token ceiling and row cap:
+
+```bash
+MIVI_TEST_MODEL=/absolute/path/model.gguf MIVI_TEST_ACTIVATION_GROUP=32 \
+  MIVI_TEST_CAPTURE_TOKENS=32 MIVI_TEST_MAX_ROWS=128 \
+  MIVI_THREADS=2 RAYON_NUM_THREADS=2 \
+  cargo test -p mivi-quant --offline --release --lib --jobs 1 \
+  captured_prefill_projection_evaluation -- --ignored --test-threads=1 --nocapture
+```
 
 The baseline tile walker is checked against production chunked-prefill logits.
 Every executed eligible Q4 FFN gate/up/down projection is replayed, with unsupported
@@ -229,7 +247,24 @@ peak/RMS over all token rows, even where weight formats subsequently require a
 fallback. These are codec probes, not evidence that those fallback projections
 actually packed their inputs. Largest relative-error increases localize growth;
 they do not prove a causal layer defect or justify hardcoded layer exclusions.
-The diagnostic performs no packing-policy change or production rollout.
+The diagnostic performs no packing-policy change or production rollout. To
+compare both codecs on the same default raw tool-request fixture, run these
+commands sequentially; clearing capture overrides keeps the prompt and token
+ceiling identical:
+
+```bash
+env -u MIVI_TEST_CAPTURE_PROMPT -u MIVI_TEST_CAPTURE_TOKENS \
+  MIVI_TEST_MODEL=/absolute/path/model.gguf MIVI_TEST_ACTIVATION_GROUP=256 \
+  MIVI_THREADS=2 RAYON_NUM_THREADS=2 \
+  cargo test -p mivi-quant --offline --release --lib --jobs 1 \
+  layerwise_prefill_error_trace -- --ignored --test-threads=1 --nocapture
+
+env -u MIVI_TEST_CAPTURE_PROMPT -u MIVI_TEST_CAPTURE_TOKENS \
+  MIVI_TEST_MODEL=/absolute/path/model.gguf MIVI_TEST_ACTIVATION_GROUP=32 \
+  MIVI_THREADS=2 RAYON_NUM_THREADS=2 \
+  cargo test -p mivi-quant --offline --release --lib --jobs 1 \
+  layerwise_prefill_error_trace -- --ignored --test-threads=1 --nocapture
+```
 
 ### 💾 Memory Footprint
 
