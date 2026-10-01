@@ -1,6 +1,6 @@
 # Deferred Streaming Prefix and First-Output Deadline
 
-Status: minimal approach approved conversationally; written spec awaiting review.
+Status: written spec approved; implementation plan prepared, execution pending.
 
 ## Problem and evidence
 
