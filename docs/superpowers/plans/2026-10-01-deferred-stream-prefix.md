@@ -173,4 +173,9 @@ git diff --check
 - Version, binary, evidence/changelog/sources, resources and publication: Task 2.
 - Raw malformed-output capture remains a separate diagnostic follow-up; no raw-output logging feature is included.
 
-Execution status: Task 1 complete after behavioral RED/GREEN, scoped verification, and two-wave independent spec/quality review with no findings. Task 2 scoped/live verification, v0.2.61 metadata/changelog, final scoped checks, and the fresh root executable are complete. Independent Task 2 re-review approved after evidence-ledger corrections; final whole-change review and publication remain pending. Second-request acceptance demonstrates API inference admission-permit reuse, not physical prefill completion before admission. User `.gitignore` preserved.
+Execution status: Task 1 complete after behavioral RED/GREEN, scoped verification, and two-wave independent spec/quality review with no findings. Task 2 scoped/live verification, v0.2.61 metadata/changelog, final scoped checks, and the fresh root executable are complete. Independent Task 2 re-review and final whole-change review approved; no Critical or Important findings remain. Publication remains pending. Second-request acceptance demonstrates API inference admission-permit reuse, not physical prefill completion before admission. User `.gitignore` preserved.
+
+Optional follow-up from final review: combine cancellation during an actual
+blocked Tokio send and receiver drop into one bounded regression. Current
+coverage tests controlled in-progress delivery cancellation and real channel
+backpressure separately; final review found no release-blocking defect.

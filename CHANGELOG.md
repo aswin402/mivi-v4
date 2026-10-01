@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root `mivi` release executable reports v0.2.61.
 - Cargo jobs and test threads were one, inference/Rayon threads were two;
   no full-workspace checks, tests, or builds were run.
+- Independent task and whole-change reviews approved publication with no
+  Critical or Important findings. Combined actual blocked-send cancellation
+  coverage remains an optional regression follow-up; existing cancellation
+  and real-channel backpressure checks are separate.
 
 #### Changed
 

@@ -2,8 +2,8 @@
 
 Status: implementation, scoped/live verification, v0.2.61 metadata/changelog,
 final scoped checks, and the fresh root executable complete. Independent
-Task 1 and Task 2 reviews approved; final whole-change review and publication
-remain pending.
+Task 1, Task 2, and final whole-change reviews approved; publication remains
+pending. Final review found no Critical or Important issues.
 
 ## Problem and evidence
 
