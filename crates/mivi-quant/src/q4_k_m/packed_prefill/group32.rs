@@ -255,6 +255,61 @@ mod tests {
             .sum()
     }
 
+    fn original_input_reconstruction_bound(
+        input: &[f32; Q4_K_BLOCK_SIZE],
+        activation: &Group32Activation,
+    ) -> [f64; Q4_K_BLOCK_SIZE] {
+        let unit_roundoff = f64::from(f32::EPSILON) / 2.0;
+        // One minimum subnormal safely bounds each operation's absolute rounding
+        // error, including the underflow region where a relative bound is weak.
+        let subnormal_floor = f64::from(f32::from_bits(1));
+        let reconstructed = activation.reconstructed();
+        std::array::from_fn(|i| {
+            let group = i / GROUP_WIDTH;
+            let values = &input[group * GROUP_WIDTH..(group + 1) * GROUP_WIDTH];
+            let maximum =
+                values
+                    .iter()
+                    .copied()
+                    .fold(0.0f32, |m, x| if x.abs() > m.abs() { x } else { m });
+            if maximum == 0.0 {
+                return 0.0;
+            }
+
+            let magnitude = f64::from(maximum.abs());
+            let normalized = input[i] / maximum;
+            let quantized = f64::from(activation.values[i].abs());
+            let ideal_scale_magnitude = magnitude / 127.0;
+
+            // q is rounded from fl(fl(x / m) * -127). Relative to the
+            // ideal integer coordinate, the two F32 operations contribute
+            // 127 times the division error and the multiplication error;
+            // integer rounding contributes at most one half.
+            let division_error =
+                unit_roundoff * (f64::from(input[i]).abs() / magnitude) + subnormal_floor;
+            let multiplication_error =
+                unit_roundoff * 127.0 * f64::from(normalized).abs() + subnormal_floor;
+            let quantization_error =
+                magnitude / 127.0 * (127.0 * division_error + multiplication_error + 0.5);
+
+            // The stored scale rounds -m/127 to F32, then reconstruction
+            // rounds q*scale to F32. Include both errors, including their
+            // absolute subnormal floors.
+            let scale_error = unit_roundoff * ideal_scale_magnitude + subnormal_floor;
+            let scale_rounding_error = quantized * scale_error;
+            let reconstruction_error = unit_roundoff
+                * (quantized * f64::from(activation.scales[group]).abs())
+                + subnormal_floor;
+            let measured_reconstruction_rounding = (f64::from(reconstructed[i])
+                - f64::from(activation.values[i]) * f64::from(activation.scales[group]))
+            .abs();
+
+            quantization_error
+                + scale_rounding_error
+                + reconstruction_error.max(measured_reconstruction_rounding)
+        })
+    }
+
     #[test]
     fn group32_matmul_matches_independent_f64_reference_and_preserves_tail() {
         for (rows, batch, cols) in [(3, 2, 512), (1, 1, 256), (257, 3, 256)] {
@@ -430,6 +485,35 @@ mod tests {
     }
 
     #[test]
+    fn group32_pack_original_input_bound_covers_signed_subnormal_scale_rounding() {
+        for value in [
+            f32::from_bits(100),
+            -f32::from_bits(100),
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            1.25,
+            -3.5,
+            f32::MAX,
+            -f32::MAX,
+        ] {
+            let input = [value; Q4_K_BLOCK_SIZE];
+            let activation = Group32Activation::pack(&input).unwrap();
+            let reconstructed = activation.reconstructed();
+            let bounds = original_input_reconstruction_bound(&input, &activation);
+
+            for i in 0..Q4_K_BLOCK_SIZE {
+                let error = (f64::from(input[i]) - f64::from(reconstructed[i])).abs();
+                assert!(
+                    error <= bounds[i],
+                    "input={:?}, index={i}: error={error:e}, bound={:e}",
+                    input[i].to_bits(),
+                    bounds[i]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn group32_dot_matches_independent_dequantized_reference_and_rounding_bound() {
         for seed in [0, 1, 47, 255] {
             let weights = fixture_weights(1, Q4_K_BLOCK_SIZE, seed);
@@ -463,12 +547,10 @@ mod tests {
                 (f64::from(actual) - expected).abs() <= arithmetic_bound,
                 "seed={seed}: actual={actual}, expected={expected}, bound={arithmetic_bound}"
             );
-            let packing_bound: f64 = (0..Q4_K_BLOCK_SIZE)
-                .map(|i| {
-                    let rounding = 0.501 * f64::from(activation.scales[i / GROUP_WIDTH].abs());
-                    f64::from(decoded[i].abs())
-                        * (rounding + f64::from(reconstructed[i].abs()) * f64::from(f32::EPSILON))
-                })
+            let packing_bound: f64 = original_input_reconstruction_bound(&input, &activation)
+                .iter()
+                .zip(decoded)
+                .map(|(&bound, weight)| bound * f64::from(weight.abs()))
                 .sum();
             let original: f64 = decoded
                 .iter()

@@ -86,7 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the later retrospective wrong-selector mutation check does not alter it.
 - Production inference code was unchanged. No server binary rebuild is claimed;
   the existing server executable remains v0.2.51.
-- Verification: scoped `mivi-quant` library tests passed (49 passed, 5 ignored);
+- Final review identified a unit-test bound that omitted stored F32 scale
+  rounding for accepted subnormal scales. A failing signed-subnormal regression
+  now passes with an allowance covering normalization, integer rounding, scale
+  storage, and reconstruction. Only test assertions changed; the codec and
+  five recorded model runs are unaffected.
+- Verification: scoped `mivi-quant` library tests passed (50 passed, 5 ignored);
   scoped Clippy passed with the existing style-lint allowances; package format
   check and `git diff --check` passed; normal dependencies are unchanged. Cargo
   jobs and test threads were one, inference/Rayon threads were two. No full-
