@@ -55,7 +55,7 @@ only under `fixture-diagnostics`; server session/spawn APIs are `pub(crate)`.
 module types shared with Task 2 and the server. All snapshot fields derive
 Serialize, with no unbounded string errors or filesystem paths.
 
-- [ ] Run the default scoped model baseline, separately from every later Cargo command:
+- [x] Run the default scoped model baseline, separately from every later Cargo command:
 
 ```bash
 RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --jobs 1 -- --test-threads=1
@@ -63,7 +63,7 @@ RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --jobs 1 -- --test-
 
 Require zero failures; record ignored real-model tests and warnings honestly.
 
-- [ ] Add feature/module scaffolding and compile a behavior-preserving collector skeleton. This is explicitly preparatory work, not the behavioral fix. Define the contracts below; implement `push` as a no-op only for the initial compiled RED:
+- [x] Add feature/module scaffolding and compile a behavior-preserving collector skeleton. This is explicitly preparatory work, not the behavioral fix. Define the contracts below; implement `push` as a no-op only for the initial compiled RED:
 
 ```toml
 # mivi-model/Cargo.toml
@@ -142,7 +142,7 @@ pub struct ModelRecorder {
 }
 ```
 
-- [ ] Add and run this compiled behavioral RED. It must fail on the retained-text assertion, not compilation:
+- [x] Add and run this compiled behavioral RED. It must fail on the retained-text assertion, not compilation:
 
 ```rust
 #[test]
@@ -162,7 +162,7 @@ fn fixture_capture_preserves_newline_and_utf8_prefix() {
 RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --features fixture-diagnostics --jobs 1 fixture_capture_preserves -- --test-threads=1
 ```
 
-- [ ] Implement retention as a prefix of the complete observed stream. Once truncated, later smaller chunks must not be appended into the remaining capacity:
+- [x] Implement retention as a prefix of the complete observed stream. Once truncated, later smaller chunks must not be appended into the remaining capacity:
 
 ```rust
 pub fn push(&mut self, chunk: &str) {
@@ -200,7 +200,7 @@ impl CapturedIds {
 }
 ```
 
-- [ ] Add the validated recorder constructor and methods below. Each timing method accepts a supplied `Instant` so unit tests use checked synthetic time, not sleeps:
+- [x] Add the validated recorder constructor and methods below. Each timing method accepts a supplied `Instant` so unit tests use checked synthetic time, not sleeps:
 
 ```rust
 impl ModelRecorder {
@@ -266,7 +266,7 @@ pub fn finish(&mut self, now: Instant, outcome: ModelOutcome) {
 }
 ```
 
-- [ ] Add direct tests: exact newline/whitespace preservation; truncation at
+- [x] Add direct tests: exact newline/whitespace preservation; truncation at
 each boundary of `é`; no appends after a truncated multibyte chunk; IDs in
 order/capped; checked-counter overflow; zero/over-limit configs rejected;
 empty raw/delivered events leave first times absent; explicit instants produce
@@ -287,7 +287,7 @@ assert_eq!(recorder.snapshot.first_delivered, Some(Duration::from_millis(8)));
 assert_eq!(recorder.snapshot.decode, Some(Duration::from_millis(5)));
 ```
 
-- [ ] Require collector GREEN and format; request independent task review. Commit only Task 1 files after findings are resolved:
+- [x] Require collector GREEN and format; request independent task review. Commit only Task 1 files after findings are resolved:
 
 ```bash
 RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --features fixture-diagnostics --jobs 1 fixture_diagnostics -- --test-threads=1
@@ -306,7 +306,7 @@ git commit -m "feat: add bounded fixture diagnostic collectors"
 `take_fixture_capture() -> Option<ModelCapture>`. The observer is request-local;
 no global/thread-local sink. Existing generate signatures remain unchanged.
 
-- [ ] Add a feature-only `fixture_recorder: Option<ModelRecorder>` field,
+- [x] Add a feature-only `fixture_recorder: Option<ModelRecorder>` field,
 initialize it to `None` in the model loader, and implement activation/take:
 
 ```rust
@@ -335,7 +335,7 @@ pub fn take_fixture_capture(&mut self) -> Option<crate::fixture_diagnostics::Mod
 }
 ```
 
-- [ ] Characterize a real-model ignored test with explicit model path and fixed
+- [x] Characterize a real-model ignored test with explicit model path and fixed
 seed. Run unchanged generation with the observer armed but not yet wired;
 assert capture has nonempty raw data whenever the baseline delivered nonempty
 text. This must compile and fail on missing observed data; if the selected
@@ -374,10 +374,10 @@ to `std::io::Error::new(InvalidInput, message)` rather than adding a dependency.
 Run only this ignored observation test for RED and GREEN:
 
 ```bash
-MIVI_TEST_MODEL=models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --features fixture-diagnostics --jobs 1 fixture_model_observation -- --ignored --test-threads=1
+MIVI_TEST_MODEL="$PWD/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-model --offline --lib --features fixture-diagnostics --jobs 1 fixture_model_observation -- --ignored --test-threads=1
 ```
 
-- [ ] Wire `generate_streaming_with_cancel`: begin observation at its entry,
+- [x] Wire `generate_streaming_with_cancel`: begin observation at its entry,
 retain `reset_context` and existing delegation, bind the existing result, and
 finish the observer at actual return. A feature-only local flag records whether
 `should_cancel` ever returned true; wrap that same callback without evaluating
@@ -437,7 +437,7 @@ Cells are not
 timestamps/collectors and do not alter callback evaluation count. The
 feature-enabled, unarmed path uses the same return values with no captures.
 
-- [ ] In `generate_streaming_incremental_with_cancel`, call
+- [x] In `generate_streaming_incremental_with_cancel`, call
 `tokenization_done` after existing encoding/BOS processing. In
 `generate_tokens_incremental_with_cancel`, call `prefill_begin` after effective
 BOS/context validation and before prefix-cache lookup. Bind the existing
@@ -470,7 +470,7 @@ if let Some(recorder) = self.fixture_recorder.as_mut() {
 }
 ```
 
-- [ ] Immediately after decoder `feed`, before `pending_text.push_str` and
+- [x] Immediately after decoder `feed`, before `pending_text.push_str` and
 stop handling, record the raw decoded chunk and that generated token ID.
 Record decoder flush text before existing final stop trimming. Before each
 of the three existing nonempty `on_token` call sites, record delivered text;
@@ -490,7 +490,7 @@ if let Some(recorder) = self.fixture_recorder.as_mut() {
 }
 ```
 
-- [ ] Prove observer-on/off parity with two sequential fresh model loads:
+- [x] Prove observer-on/off parity with two sequential fresh model loads:
 identical prompt, context, strategy, seed, temperature, and budget; equal
 delivered strings, generated output, and post-run sampler RNG state. Test raw
 versus stop-filtered delivered text, flush handling, no token IDs for EOS,
@@ -498,7 +498,7 @@ prefill/decode cancellation, error finalization, empty output, and no active
 observer allocation/timestamps without a session. Use supplied instants for
 collector lifecycle tests and synchronized cancellation gates, not sleeps.
 
-- [ ] Run sequential affected model tests with feature enabled and disabled,
+- [x] Run sequential affected model tests with feature enabled and disabled,
 then scoped Clippy/format. Require no new warnings, review physical boundary
 placement, and independently review before committing model hook files:
 
@@ -523,7 +523,7 @@ submodule, actor wiring, streaming-chat fixture log suppression.
 -> io::Result<FixtureEngine>` is also crate-private. Normal spawn entry points
 continue returning only `EngineHandle` with diagnostics disabled.
 
-- [ ] Add forwarding and private modules:
+- [x] Add forwarding and private modules:
 
 ```toml
 # mivi-server/Cargo.toml
@@ -543,7 +543,7 @@ Before these server edits, record the scoped default server baseline:
 RAYON_NUM_THREADS=2 cargo test -p mivi-server --offline --lib --jobs 1 -- --test-threads=1
 ```
 
-- [ ] Define a validated session config and record contract. Fixture limits
+- [x] Define a validated session config and record contract. Fixture limits
 are bounded infrastructure defaults, not model-specific policy. Harness
 defaults are request count=4, text bytes=65_536, token IDs=256, collector
 capacity=4, stream deadline=120s, physical-generation watchdog=120s. Reject
@@ -591,7 +591,7 @@ pub(crate) struct FixtureRecord {
     pub capture_incomplete: bool,
 }
 #[derive(serde::Serialize)]
-pub(crate) enum EngineTerminal { NotStarted, Returned, Cancelled, ReceiverClosed, ModelError }
+pub(crate) enum EngineTerminal { NotStarted, Unobserved, Returned, Cancelled, ReceiverClosed, ModelError }
 #[derive(serde::Serialize)]
 pub(crate) enum QualityOutcome { NotAssessed, Passed, Failed, ContinuationUnexercised }
 ```
@@ -606,7 +606,7 @@ serialized bytes individually at the text-byte limit. Reject metadata that
 cannot be represented in the bounded fixed schema without marking loss.
 Do not `to_value` a whole GGUF metadata map or arbitrary profile configuration.
 
-- [ ] Implement `FixtureSession::new(FixtureLimits) -> Result<Self, &'static str>`;
+- [x] Implement `FixtureSession::new(FixtureLimits) -> Result<Self, &'static str>`;
 `arm(&self, fixture_id: &str) -> Result<usize, &'static str>`;
 `begin(&self, sequence, prompt, prefix, settings, descriptor) -> Option<FixtureRecord>`;
 `finish_engine(&self, FixtureRecord)`; and
@@ -622,6 +622,15 @@ as an async method bounded by `generation_watchdog`, using a session-owned
 `tokio::sync::Notify`. `finish_engine` and incomplete states call `notify_one`
 after releasing the short request-boundary lock. Register notification before
 checking the record, so completion between checking and awaiting is not lost.
+Retain a bounded initial record at the begin boundary, updated with effective
+settings before generation, for `partial(&self, sequence: usize)
+-> Option<FixtureRecord>`. This request-boundary copy is included in the
+16-slot aggregate budget and removed on finalization. It does not mirror
+model tokens or introduce per-token locks. A watchdog/collector failure
+without a physical-return observation uses `EngineTerminal::Unobserved` and
+`capture_incomplete = true`, not `NotStarted`, `Returned`, or a fabricated
+model outcome. `NotStarted` is reserved for a request known not to have
+entered generation. Do not imply that an unobserved worker has been joined.
 
 The incomplete marker follows this exact non-blocking pattern:
 
@@ -632,7 +641,7 @@ match records.try_lock() {
 }
 ```
 
-- [ ] Extract the existing actor spawn body into one shared private inner
+- [x] Extract the existing actor spawn body into one shared private inner
 constructor returning `(EngineHandle, JoinHandle<()>)`. Default callers
 discard the join handle exactly as today and supply no session. Fixture
 callers retain the join handle and a completion notification. Preserve the
@@ -653,7 +662,7 @@ async yielding after that notification, not an unbounded blocking join.
 A timeout is a verification failure, not permission to
 claim cleanup or kill an unrelated process. No default-runtime API changes.
 
-- [ ] Add `EngineHandle::fixture_capture_active(&self) -> bool` with default
+- [x] Add `EngineHandle::fixture_capture_active(&self) -> bool` with default
 false behavior and a feature-only session check. Use it to suppress only the
 captured fixture's incoming prompt, streaming completion box, prompt-summary
 extension, and errors that interpolate generated text. Preserve error codes,
@@ -670,7 +679,7 @@ Test the predicate for default, feature-without-session, and fixture handles;
 exercise error paths with captured synthetic markers and verify the fixture
 logging helpers emit no marker content.
 
-- [ ] Implement private artifact creation with UUID-named directories under
+- [x] Implement private artifact creation with UUID-named directories under
 the platform temp directory, exclusively created (no `create_dir_all`). Use
 fixed sequence filenames generated internally. No arbitrary caller path:
 
@@ -718,7 +727,7 @@ Do not serialize raw `io::Error` strings that could include paths. If the
 repo's Rust floor lacks `Error::other`, use `Error::new(ErrorKind::Other, error)`
 without changing that floor.
 
-- [ ] Observe a compiled RED for session retention/byte-exact prefix separation
+- [x] Observe a compiled RED for session retention/byte-exact prefix separation
 against preparatory no-op retention, then GREEN. Unit tests assert rendered
 `"prompt\n"`, prefix `"prefix:"`, conditioned `"prompt\nprefix:"`, raw/delivered
 `"body"`, separately collected parser result; failed/model-not-started captures;
@@ -728,7 +737,7 @@ fails; Unix modes are exact; injected write failure preserves model outcome;
 route logging remains enabled without a session. All tests use temporary
 synthetic files, not the project or user directories.
 
-- [ ] Run scoped server baseline/feature diagnostics tests, existing actor,
+- [x] Run scoped server baseline/feature diagnostics tests, existing actor,
 streaming and tool tests; Clippy/format; independent spec/quality review.
 Socket-binding tests require normal escalation if sandbox-denied, not a false
 pass. Explicit Task 3 commit paths exclude all user changes:
@@ -754,7 +763,7 @@ tests if fixture execution reveals defects; root metadata/changelog/spec/plan.
 writer. Add ignored `fixture_diagnostics::fixtures::fixture_generation_capture`
 and `fixture_observer_parity` tests. These are not public commands.
 
-- [ ] Use an exclusively created private temp workspace and `create_new` to
+- [x] Use an exclusively created private temp workspace and `create_new` to
 write `example.rs` with exact bytes:
 
 ```rust
@@ -767,8 +776,8 @@ message, not a skipped-success report. Set context=4096, chunk tile=64,
 request budget=120s, first-output budget=90s, threads=2, concurrency=1 for
 these labelled fixtures; none become new production/model defaults.
 
-- [ ] Build `AppState::with_config("fixture-model", ToolBroker::new(),
-engine.handle.clone(), None, config).with_workspace(workspace)` and call
+- [x] Build `AppState::with_config("fixture-model", ToolBroker::new(),
+engine.handle().ok_or("fixture engine shut down")?.clone(), None, config).with_workspace(workspace)` and call
 `create_router(Arc::new(state))`. Use the actual route via Tower, no listener:
 
 ```rust
@@ -781,7 +790,7 @@ let response = app.clone().oneshot(request).await?;
 assert!(response.status().is_success());
 ```
 
-- [ ] Use this known controlled required-tool payload; aliases/function names
+- [x] Use this known controlled required-tool payload; aliases/function names
 are fixture data, not runtime dispatch logic:
 
 ```rust
@@ -798,7 +807,7 @@ let payload = serde_json::json!({
 });
 ```
 
-- [ ] Add a bounded streaming SSE reader using existing `Body::into_data_stream`
+- [x] Add a bounded streaming SSE reader using existing `Body::into_data_stream`
 and `futures::StreamExt`. Start its monotonic clock before router dispatch;
 carry partial UTF-8/event bytes between frames, parse `data:` events ending
 in blank lines, ignore comments/role-only events, and require `[DONE]` or an
@@ -884,6 +893,7 @@ async fn drain_fixture_sse(
             let data = event.lines().filter_map(|line| line.strip_prefix("data:"))
                 .map(|line| line.strip_prefix(' ').unwrap_or(line)).collect::<Vec<_>>().join("\n");
             if !data.is_empty() {
+                if result.saw_done { return Err("fixture data after DONE"); }
                 if data == "[DONE]" {
                     result.saw_done = true;
                 } else {
@@ -940,16 +950,14 @@ async fn drain_fixture_sse(
                 }
             }
             pending.drain(..end + separator);
-            if result.saw_done {
-                transcript.push(&decoder.flush());
-                result.elapsed = started.elapsed();
-                result.calls.sort_by_key(|call| call.index);
-                return Ok(result);
-            }
         }
     }
     transcript.push(&decoder.flush());
-    Err("fixture stream ended before DONE")
+    if !result.saw_done { return Err("fixture stream ended before DONE"); }
+    if !pending.is_empty() { return Err("fixture incomplete trailing event"); }
+    result.elapsed = started.elapsed();
+    result.calls.sort_by_key(|call| call.index);
+    Ok(result)
 }
 ```
 
@@ -958,8 +966,13 @@ An error record preserves the transcript/engine capture and marks parser or
 retention failure separately; it never prints the failing event. Tool name
 fragments append normally; repeated conflicting IDs are rejected, not guessed.
 These parser limits are fixture infrastructure, not production protocol limits.
+After `[DONE]`, continue polling the bounded body to EOF, permitting comments
+but rejecting further data events. Only then take the final stream metrics.
+Returning at the marker would drop the logged body before its EOF observation
+and incorrectly count the harness's successful request as a client disconnect.
+Test both body EOF and genuine early drop with the actual lifecycle wrapper.
 
-- [ ] Continue only when no error event occurred, `[DONE]` was observed, and
+- [x] Continue only when no error event occurred, `[DONE]` was observed, and
 finish reason is `tool_calls`. If a valid call is emitted, require exactly `read_file` and string
 `path="example.rs"`; return actual file bytes including trailing LF with the
 same `tool_call_id`, using `tool_choice:"none"`. Never execute arbitrary model
@@ -981,7 +994,7 @@ is malformed, retain that failure, omit unsafe tool execution, and mark the
 continuation unexercised. Capture infrastructure can pass while answer quality
 fails, but no failed/unexercised tool round trip becomes a claimed success.
 
-- [ ] After each request, wait boundedly for its physical engine snapshot,
+- [x] After each request, wait boundedly for its physical engine snapshot,
 attach measured SSE/metrics result, and persist outside generation. API
 timeout and engine-return observations remain distinct. Finish/join the
 owned actor after dropping all router/state/handle clones. Report only caps,
@@ -995,7 +1008,7 @@ with an honest unfinished engine state. Perform persistence and owned-worker
 cleanup before returning any diagnostic failure. Persistence failure is a
 separate harness result, never changed to a successful capture.
 
-- [ ] Run the scoped real-model fixture and parity tests sequentially:
+- [x] Run the scoped real-model fixture and parity tests sequentially:
 
 The parity test uses two fresh, sequential model loads and an explicit
 initial RNG state, so comparing post-generation RNG does not compare two
@@ -1046,22 +1059,29 @@ claim correctness of a rendered chat/tool answer, which is measured by the
 separate real-router fixture.
 
 ```bash
-MIVI_TEST_MODEL=models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-server --offline --lib --features fixture-diagnostics --jobs 1 fixture_generation_capture -- --ignored --test-threads=1 --nocapture
-MIVI_TEST_MODEL=models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-server --offline --lib --features fixture-diagnostics --jobs 1 fixture_observer_parity -- --ignored --test-threads=1 --nocapture
+MIVI_TEST_MODEL="$PWD/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-server --offline --release --lib --features fixture-diagnostics --jobs 1 fixture_generation_capture -- --ignored --test-threads=1 --nocapture
+MIVI_TEST_MODEL="$PWD/models/LFM2.5-1.2B-Instruct-Q4_K_M.gguf" MIVI_THREADS=2 RAYON_NUM_THREADS=2 cargo test -p mivi-server --offline --release --lib --features fixture-diagnostics --jobs 1 fixture_observer_parity -- --ignored --test-threads=1 --nocapture
 ```
 
 These commands select an existing test model only; the implementation must
 work with any explicitly supplied supported model. No paired runtime or
 broader numerical corpus rerun is included in this increment.
+Run these commands from the repository root. The shell resolves the GGUF to
+an absolute path before Cargo starts; Cargo's test process runs from its
+package directory, so a repository-relative model path is not sufficient.
+Label the real-router runs as release-profile diagnostics. Task 2's original
+compiled RED/GREEN remains in its same debug profile; the observed 155.82s
+debug RED motivated release-profile execution for additional live parity/
+lifecycle fixtures. Neither profile is a controlled runtime speed comparison.
 
-- [ ] Independently review all source wiring and real evidence before the
+- [x] Independently review all source wiring and real evidence before the
 release bump. Resolve Important findings with compiled regressions/re-review.
 Then update root workspace version 0.2.61→0.2.62 once, changelog ideas/sources
 from the spec plus exact tests/fixture status/caps/timings/privacy limitations,
 and spec/plan execution status. Refresh only workspace lockfile versions.
 Do not publish a speedup, model-quality fix, or successful agent test claim.
 
-- [ ] Run final scoped default and feature suites/checks sequentially; ignored
+- [x] Run final scoped default and feature suites/checks sequentially; ignored
 fixture tests above remain explicitly invoked, not silently counted here:
 
 ```bash
@@ -1095,6 +1115,53 @@ publication after verification, preserving `.gitignore` and local artifacts.
   warm labelling, cancellation finalization, parity, release evidence: Task 4.
 - Reference-runtime comparison and defect fixes remain separate follow-ups.
 
-Execution status: written spec approved; implementation plan prepared and
-self-reviewed. No feature implementation, Cargo/model runs, or version bump.
-Source remains v0.2.61; user `.gitignore` preserved. Execution choice pending.
+Execution status: subagent-driven execution approved and in progress on
+`feat/fixture-generation-diagnostics`. Task 1 completed in `8e44231`, with
+independent spec/quality review approved and no findings. Controller reran
+12 focused collector tests and the feature-enabled model suite (53 passed,
+4 ignored), formatting and whitespace checks. Original behavioral RED is
+reported in the implementer evidence, not independently replayed.
+Task 2 resumed after user interruption; hooks and actual-model parity/lifecycle
+verification are implemented in `6b1cc89`, independently reviewed as spec
+compliant and quality approved. Controller reran its feature-enabled suite
+(57 passed, 6 ignored). Original debug RED/GREEN and release live verification
+are implementer-reported, not independently replayed. The release parity/
+lifecycle fixture passed in 9.29s, with two sequential model loads and observed
+model reuse; this is correctness evidence, not a benchmark. Minor coverage
+limitations remain explicit: actual-model nonempty decoder-byte flush, cache
+hits, adapter fallback and mid-layer failures were not exercised.
+Task 3 completed in `185da9c`, independently reviewed as spec compliant and
+quality approved. The implementer reported 88 default and 103 feature-enabled
+server tests passing; controller reran 13 focused diagnostics tests plus
+formatting and whitespace checks. The private server contract explicitly
+represents unobserved physical completion and retains bounded initial records
+on watchdog failures. Minor review limitation: logging-helper coverage does
+not exercise the actual streaming error branches; retain for final triage.
+Task 4 source is implemented in `45034d6`. Controller verified 23 focused
+diagnostics tests, scoped Clippy for library/test targets, and fresh live
+router/parity runs. The first router run took 10.06s end-to-end and produced
+a valid read-file continuation and the expected answer, with complete captures
+and owned-worker join; observer parity passed with two sequential fresh loads.
+The first/continuation captures used 110/96 conditioned prompt tokens, both
+with zero prefix reuse. The continuation reused the loaded actor, not a
+measured KV-cache warm hit. These are local correctness observations, not
+a runtime speed comparison or general agent-quality claim.
+Independent review found an Important metadata-completeness gap, fixed in
+`f409922` with compiled behavioral RED/GREEN and 24 focused diagnostics tests
+passing (2 live tests separately ignored). Full untruncated re-review approved
+the original diff and fix, with no remaining Critical/Important findings.
+Pre-bump scoped source suites passed
+41/57 model tests (4/6 ignored), 88/113 server tests (0/2 ignored), after
+permission was granted for the existing local socket-bind test.
+Workspace bumped once to v0.2.62 after the task gates. Post-bump scoped suites
+passed: model 41 default / 57 enabled (4/6 ignored), server 88 default / 114
+enabled (0/2 ignored). Scoped Clippy/fmt/tree/diff checks passed, and the root
+release build reports `mivi 0.2.62` with no capture option. Only14 workspace
+lockfile versions changed; normal dependency versions did not. One controller
+lint overlapped a preceding release command inadvertently; no concurrent model
+loads, and subsequent checks were sequential. Live success predates the
+predicate-only clipping fix and version bump; unclipped live settings are
+unaffected, and the new clipping behavior has compiled regression coverage.
+Whole-change review and publication remain pending.
+User `.gitignore` preserved. Durable execution ledger:
+`.superpowers/sdd/fixture-progress.md` (local, ignored).

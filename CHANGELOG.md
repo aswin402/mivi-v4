@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.62] - 2026-10-02
+
+### Fixture-Only Generation Diagnostics
+
+#### Ideas, Inspirations & Sources
+
+- Preserve evidence before interpretation: distinguish rendered/conditioned
+  prompts, synthetic protocol prefixes, raw decoding before stop filtering,
+  callback delivery, and the parser-facing SSE stream.
+- Reuse existing generation and routing rather than a second inference path:
+  [chat rendering and validation](https://github.com/aswin402/mivi-v4/blob/8f7ae0d/crates/mivi-server/src/routes/chat.rs),
+  [engine actor](https://github.com/aswin402/mivi-v4/blob/8f7ae0d/crates/mivi-server/src/engine_actor.rs),
+  [model prefill/decoder and profiling](https://github.com/aswin402/mivi-v4/blob/8f7ae0d/crates/mivi-model/src/model.rs),
+  [benchmark timing](https://github.com/aswin402/mivi-v4/blob/8f7ae0d/crates/mivi-cli/src/runners/bench.rs).
+- The previous newline-sensitive fixture motivated byte-exact tool-result
+  handoff. That local observation is not a universal model-quality conclusion.
+
+#### Added
+
+- A non-default `fixture-diagnostics` feature, bounded request-local model
+  observations, private server sessions, and ignored in-process real-router
+  fixtures. No capture CLI flag, request/header switch, environment toggle,
+  network listener, project-workspace access, or mutating native tool.
+- Separate tokenization/prefill/decode and first raw/delivered/visible timing,
+  prompt/reused/processed counts, physical-return outcomes, parser/metrics
+  evidence, truncation/overflow/clipping indicators, and answer-quality status.
+- Exclusive local capture artifacts with Unix directory/file modes 0700/0600,
+  internal sequence names and no overwrite or symlink following. Captured
+  prompt/output bodies are not printed or uploaded; fixture payload logs are
+  suppressed without suppressing normal logs.
+- Bounded SSE reconstruction through body EOF after `[DONE]`; private owned
+  actor shutdown; compiled regressions for fragmented events, bounds,
+  continuation-quality independence, and clipped settings completeness.
+
+#### Measured Results and Scope
+
+- A fresh local release-profile 1.2B Q4_K_M run completed one valid `read_file`
+  call and byte-exact continuation identifying `add` and `a + b`. Both streams
+  reached EOF with complete captures, physical model return and owned-worker
+  join; no client-disconnect increment. End-to-end elapsed was 10.06s.
+- First request: model prefill 4.304533s, decode 1.112983s, consumer first visible
+  delta 4.613374s and stream completion 5.424804s. Continuation: 2.374565s prefill,
+  2.127321s decode, 2.375536s first visible delta and 4.503064s stream completion.
+  Conditioned prompt/reused/processed counts were 110/0/110 and 96/0/96.
+  The first request used a fresh loaded actor; continuation reused the actor,
+  not a measured KV-cache warm hit. These are local observations, not speedups.
+- Settings: context 4096, chunk tile 64, max output 48, request/first-output
+  budgets 120s/90s, two configured Rayon threads and one API inference slot.
+  Record text/ID caps were 65,536 bytes/256 IDs. No truncation, clipping or
+  counter overflow occurred. Model-config name is metadata, not a file hash.
+- Fresh observer-on/off parity passed with two sequential model loads,
+  context 512, max output 16 and caps 4,096 bytes/32 IDs. It matched generated
+  output, callback delivery and post-generation RNG state.
+- This tests one supported model/configuration and one controlled tool loop,
+  not Minicode or general agent reliability. Agent-sized latency and comparison
+  with other runtimes remain separate work; no numerical inference, parser,
+  public generation API, production timeout or normal dependency change.
+- Coverage limitations remain explicit: no actual-model nonempty byte-decoder
+  flush, cache-hit/adapter/mid-layer-failure run; no live malformed-tool,
+  timeout, truncation or worker-timeout scenario. The actual chat streaming-error
+  payload-log branch remains a review-noted integration-test gap.
+- Final v0.2.62 scoped suites passed: model 41 default / 57 feature-enabled
+  tests (4/6 ignored), server 88 default / 114 feature-enabled tests (0/2
+  ignored). Live fixtures were invoked separately. Scoped Clippy, formatting,
+  dependency-tree and whitespace checks passed; the root release executable
+  reports v0.2.62 and exposes no capture option. All task reviews approved;
+  the stop-token clipping completeness finding was regression-tested and fixed.
+- Commands used one Cargo job and one test thread, with two configured Rayon
+  threads. One controller lint invocation inadvertently overlapped a release
+  command; no concurrent model loads occurred, and subsequent validation was
+  sequential. No full-workspace build/check/test was run.
+
 ## [v0.2.61] - 2026-10-01
 
 ### Defer Synthetic Stream Prefixes Until Model Output
