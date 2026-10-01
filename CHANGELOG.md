@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.61] - 2026-10-01
+
+### Defer Synthetic Stream Prefixes Until Model Output
+
+#### Ideas, Inspirations & Sources
+
+- Keep server-inserted protocol text from counting as model-produced output:
+  hold the forced prefix until the first nonempty decoded model chunk, then
+  deliver both together. The prefix still conditions the same prompt, and
+  the string-stream API and tool syntax remain unchanged.
+- References to the existing actor callback, chat deadline/metric consumer,
+  and model streaming callback at the reviewed source revision:
+  [engine actor](https://github.com/aswin402/mivi-v4/blob/a64f7e1/crates/mivi-server/src/engine_actor.rs),
+  [chat deadlines and metrics](https://github.com/aswin402/mivi-v4/blob/a64f7e1/crates/mivi-server/src/routes/chat.rs),
+  [model streaming callbacks](https://github.com/aswin402/mivi-v4/blob/a64f7e1/crates/mivi-model/src/model.rs).
+
+#### Measured Results and Scope
+
+- On the local CPU 1.2B Q4_K_M model (two inference/Rayon threads, context
+  4096), a 1,085-prompt-token required-tool stream with a one-second
+  first-output deadline emitted an empty assistant role event, then the
+  explicit first-token deadline error and `[DONE]`. It produced no tool call;
+  metrics recorded `first_token_count=0` and
+  `time_to_first_token_microseconds_total=0`. A second request was admitted
+  through the single API inference-admission slot after the timeout. This
+  verifies admission-permit reuse, not physical prefill completion before
+  that second admission.
+- With 120-second request and 90-second first-output budgets, the 109-token
+  short request emitted a valid `read_file(path="example.rs")` call. Returning
+  the exact fixture contents with the same tool-call ID and `tool_choice:none`
+  produced the requested identification of `add` and `a + b`. One initial
+  follow-up omitted the fixture's trailing newline and did not meet the answer
+  check; the byte-exact retry passed. No schema, parser, model, or timeout
+  changes were made.
+- A bounded monotonic probe measured the first visible tool-call delta at
+  4.306361 seconds and server first decoded output at 3.985360 seconds. The
+  separate generation latency was 5.072729 seconds and client stream completion
+  was 5.093952 seconds. These are local observations, not a performance claim.
+- Scoped server library tests passed (86 passed, 0 failed). An initial
+  sandboxed run could not bind the test socket; the same command was rerun with
+  local-bind permission and passed. Malformed tool-call generation and
+  agent-sized latency remain separate work; this change does not claim either
+  is fixed.
+- Final v0.2.61 checks passed: 86 scoped server tests, scoped Clippy with
+  warnings denied and the existing lint allowances, package formatting, and
+  whitespace validation. The normal dependency tree is unchanged. The rebuilt
+  root `mivi` release executable reports v0.2.61.
+- Cargo jobs and test threads were one, inference/Rayon threads were two;
+  no full-workspace checks, tests, or builds were run.
+
+#### Changed
+
+- The private production streaming callback now retains the forced prefix
+  until a nonempty decoded model chunk arrives, emits the combined first
+  string once, and ignores empty decoded chunks for first-output timing.
+- No public API, normal dependency, prompt-conditioning, tool-protocol,
+  generation-budget, numerical inference, or timeout policy change.
+
 ## [v0.2.60] - 2026-10-01
 
 ### Group-Size Comparison for Test-Only Packed Prefill Diagnostics

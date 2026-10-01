@@ -1,6 +1,9 @@
 # Deferred Streaming Prefix and First-Output Deadline
 
-Status: written spec approved; implementation plan prepared, execution pending.
+Status: implementation, scoped/live verification, v0.2.61 metadata/changelog,
+final scoped checks, and the fresh root executable complete. Independent
+Task 1 and Task 2 reviews approved; final whole-change review and publication
+remain pending.
 
 ## Problem and evidence
 
