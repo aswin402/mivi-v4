@@ -370,6 +370,7 @@ fn has_clipped_metadata(value: &Value) -> bool {
     match value {
         Value::Object(object) => {
             object.get("clipped").and_then(Value::as_bool) == Some(true)
+                || object.get("stop_tokens_clipped").and_then(Value::as_bool) == Some(true)
                 || object.values().any(has_clipped_metadata)
         }
         Value::Array(values) => values.iter().any(has_clipped_metadata),
@@ -886,6 +887,45 @@ mod tests {
         );
         assert!(!decision.continuation_exercised);
         assert!(decision.answer_quality == "continuation_unexercised");
+    }
+
+    #[test]
+    fn clipped_stop_tokens_make_fixture_record_incomplete() {
+        let session =
+            super::super::FixtureSession::new(super::super::FixtureLimits::default()).unwrap();
+        let sequence = session.arm("clipped_stop_tokens").unwrap();
+        let mut record = session
+            .begin(
+                sequence,
+                "prompt",
+                "",
+                serde_json::json!({"stop_tokens": ["<stop>"]}),
+                serde_json::json!({"model": "fixture"}),
+            )
+            .unwrap();
+        record.model = Some(mivi_model::fixture_diagnostics::ModelCapture {
+            raw_decoded: CapturedText::new(8),
+            delivered: CapturedText::new(8),
+            generated_ids: mivi_model::fixture_diagnostics::CapturedIds::new(4),
+            tokenization: Some(Duration::ZERO),
+            prefill: Some(Duration::ZERO),
+            prefill_outcome: Some(mivi_model::fixture_diagnostics::StageOutcome::Complete),
+            decode: Some(Duration::ZERO),
+            first_raw: Some(Duration::ZERO),
+            first_delivered: Some(Duration::ZERO),
+            prompt_tokens: Some(1),
+            reused_tokens: Some(0),
+            processed_tokens: Some(1),
+            outcome: Some(mivi_model::fixture_diagnostics::ModelOutcome::Complete),
+            progress_counter_overflow: false,
+        });
+        record.engine_terminal = super::super::EngineTerminal::Returned;
+        record.saw_done = true;
+        assert!(record_is_complete(&record));
+
+        record.effective_settings["stop_tokens_clipped"] = serde_json::json!(true);
+
+        assert!(!record_is_complete(&record));
     }
 
     #[tokio::test]
