@@ -1,9 +1,11 @@
 # Fixture-Only Generation Diagnostics
 
-Status: implementation, all four task reviews and scoped release verification
-completed; final whole-change review pending. Clipped-metadata completeness was
+Status: implementation, all four task reviews, scoped release verification and
+whole-change review completed; v0.2.62 published on GitHub main without force.
+Remote/local equality was verified for reviewed release `c1e931d`.
+Clipped-metadata completeness was
 fixed and regression-tested in `f409922`; its re-review is approved.
-Workspace release candidate is v0.2.62. Publication remains pending final gates.
+Workspace version is v0.2.62. Minor coverage limitations remain documented.
 Baseline: published v0.2.61, commit `8f7ae0d`.
 
 ## Objective and approved scope

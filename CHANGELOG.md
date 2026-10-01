@@ -78,6 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threads. One controller lint invocation inadvertently overlapped a release
   command; no concurrent model loads occurred, and subsequent validation was
   sequential. No full-workspace build/check/test was run.
+- Independent whole-branch review approved all source/release changes with no
+  Critical/Important findings, explicitly deferring the disclosed coverage gaps.
+  Main was fast-forwarded, its 88 default server tests passed, and reviewed
+  release `c1e931d` was pushed without force. GitHub and local SHA matched;
+  the user's `.gitignore` and private local artifacts were excluded and preserved.
 
 ## [v0.2.61] - 2026-10-01
 

@@ -1100,7 +1100,7 @@ git diff --check
 Root default executable must report v0.2.62 and expose no capture option;
 normal dependency versions remain unchanged. No full-workspace command.
 
-- [ ] Obtain final whole-change review, stage only exact task source/docs/
+- [x] Obtain final whole-change review, stage only exact task source/docs/
 metadata paths, commit, publish authorized main without force, and compare
 `git rev-parse HEAD` with `git ls-remote origin refs/heads/main`. Record actual
 publication after verification, preserving `.gitignore` and local artifacts.
@@ -1115,8 +1115,8 @@ publication after verification, preserving `.gitignore` and local artifacts.
   warm labelling, cancellation finalization, parity, release evidence: Task 4.
 - Reference-runtime comparison and defect fixes remain separate follow-ups.
 
-Execution status: subagent-driven execution approved and in progress on
-`feat/fixture-generation-diagnostics`. Task 1 completed in `8e44231`, with
+Execution status: subagent-driven implementation completed, independently
+reviewed and published as v0.2.62 on `main`. Task 1 completed in `8e44231`, with
 independent spec/quality review approved and no findings. Controller reran
 12 focused collector tests and the feature-enabled model suite (53 passed,
 4 ignored), formatting and whitespace checks. Original behavioral RED is
@@ -1162,6 +1162,12 @@ lint overlapped a preceding release command inadvertently; no concurrent model
 loads, and subsequent checks were sequential. Live success predates the
 predicate-only clipping fix and version bump; unclipped live settings are
 unaffected, and the new clipping behavior has compiled regression coverage.
-Whole-change review and publication remain pending.
+Whole-change reviewer read all 6005 packet lines to EOF and approved with no
+Critical/Important findings; explicit Minor coverage limits remain follow-ups.
+Main was fast-forwarded to reviewed release `c1e931d`, its 88 default server
+tests passed again, and GitHub `main` was pushed without force. Remote/local
+SHA equality was verified at `c1e931dcfd37b686952386719318b45c8db84fba` before
+this documentation-only publication annotation. Source/version are unchanged
+by the annotation; private artifacts and user `.gitignore` remain excluded.
 User `.gitignore` preserved. Durable execution ledger:
 `.superpowers/sdd/fixture-progress.md` (local, ignored).
