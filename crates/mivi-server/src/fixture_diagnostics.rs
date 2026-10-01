@@ -1,9 +1,14 @@
 //! Private, feature-gated server-side fixture capture.
-#![allow(dead_code)] // The fixture runner consuming these APIs is Task 4.
+// Sessions are installed only by ignored tests, never normal server entry points.
+// Their private construction/consumption APIs are intentionally unused in library builds.
+#![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(test)]
 mod artifacts;
+#[cfg(test)]
+mod fixtures;
 
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use artifacts::ArtifactDirectory;
 use mivi_model::fixture_diagnostics::{CaptureLimits, CapturedText, ModelCapture};
 use serde::Serialize;
@@ -110,7 +115,6 @@ pub(crate) enum EngineTerminal {
     ModelError,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub(crate) enum QualityOutcome {
     NotAssessed,
@@ -436,7 +440,7 @@ impl FixtureSession {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) struct FixtureEngine {
     pub(crate) handle: Option<crate::engine_actor::EngineHandle>,
     pub(crate) join_handle: Option<std::thread::JoinHandle<()>>,
@@ -444,7 +448,7 @@ pub(crate) struct FixtureEngine {
     pub(crate) session: FixtureSession,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl FixtureEngine {
     pub(crate) fn handle(&self) -> Option<&crate::engine_actor::EngineHandle> {
         self.handle.as_ref()

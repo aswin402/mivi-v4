@@ -434,8 +434,7 @@ impl EngineActor {
         .map(|(handle, _join)| handle)
     }
 
-    #[cfg(feature = "fixture-diagnostics")]
-    #[allow(dead_code)]
+    #[cfg(all(feature = "fixture-diagnostics", test))]
     pub(crate) fn try_spawn_fixture(
         model: mivi_model::Model,
         config: &ServerConfig,
