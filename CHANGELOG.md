@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Critical or Important findings. Combined actual blocked-send cancellation
   coverage remains an optional regression follow-up; existing cancellation
   and real-channel backpressure checks are separate.
+- Published to GitHub `main` without force after 86 scoped server tests passed
+  on the fast-forwarded branch. The remote release head matched local main;
+  the user's pre-existing `.gitignore` change was preserved and excluded.
 
 #### Changed
 

@@ -163,7 +163,7 @@ target/release/mivi --version
 git diff --check
 ```
 
-- [ ] Obtain final whole-change review using Task 1's behavioral RED/GREEN report and actual live evidence; fix Important findings with regressions and re-review. Update completion docs only after their checks pass. Commit only task files and push the authorized branch without force. For main, compare `git rev-parse HEAD` with `git ls-remote origin refs/heads/main`. Preserve/exclude `.gitignore`. Report source/binary version, corrected metric/deadline behavior, and unresolved malformed-call/agent-quality work.
+- [x] Obtain final whole-change review using Task 1's behavioral RED/GREEN report and actual live evidence; fix Important findings with regressions and re-review. Update completion docs only after their checks pass. Commit only task files and push the authorized branch without force. For main, compare `git rev-parse HEAD` with `git ls-remote origin refs/heads/main`. Preserve/exclude `.gitignore`. Report source/binary version, corrected metric/deadline behavior, and unresolved malformed-call/agent-quality work.
 
 ## Plan self-review
 
@@ -173,7 +173,7 @@ git diff --check
 - Version, binary, evidence/changelog/sources, resources and publication: Task 2.
 - Raw malformed-output capture remains a separate diagnostic follow-up; no raw-output logging feature is included.
 
-Execution status: Task 1 complete after behavioral RED/GREEN, scoped verification, and two-wave independent spec/quality review with no findings. Task 2 scoped/live verification, v0.2.61 metadata/changelog, final scoped checks, and the fresh root executable are complete. Independent Task 2 re-review and final whole-change review approved; no Critical or Important findings remain. Publication remains pending. Second-request acceptance demonstrates API inference admission-permit reuse, not physical prefill completion before admission. User `.gitignore` preserved.
+Execution status: Tasks 1 and 2 complete, including behavioral RED/GREEN, scoped/live verification, v0.2.61 metadata/changelog, and the fresh root executable. Independent task and final whole-change reviews approved; no Critical or Important findings remain. Fast-forwarded main passed 86 scoped server tests. Published without force; GitHub main matched local release head `9d77d12` before this completion record. Second-request acceptance demonstrates API inference admission-permit reuse, not physical prefill completion before admission. User `.gitignore` preserved and excluded.
 
 Optional follow-up from final review: combine cancellation during an actual
 blocked Tokio send and receiver drop into one bounded regression. Current

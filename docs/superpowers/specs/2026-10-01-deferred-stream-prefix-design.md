@@ -2,8 +2,9 @@
 
 Status: implementation, scoped/live verification, v0.2.61 metadata/changelog,
 final scoped checks, and the fresh root executable complete. Independent
-Task 1, Task 2, and final whole-change reviews approved; publication remains
-pending. Final review found no Critical or Important issues.
+Task 1, Task 2, and final whole-change reviews approved. Published to GitHub
+main without force; remote release head verified against local main. Final
+review found no Critical or Important issues. User `.gitignore` preserved.
 
 ## Problem and evidence
 
