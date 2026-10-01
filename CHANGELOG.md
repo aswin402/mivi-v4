@@ -95,8 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped Clippy passed with the existing style-lint allowances; package format
   check and `git diff --check` passed; normal dependencies are unchanged. Cargo
   jobs and test threads were one, inference/Rayon threads were two. No full-
-  workspace check, test, or server build was run. Independent controller review
-  and publication remain pending.
+  workspace check, test, or server build was run. Independent final review
+  approved publication after the test-bound correction; publication is pending.
 
 ## [v0.2.59] - 2026-10-01
 

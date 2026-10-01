@@ -1,6 +1,6 @@
 # Group-32 Activation Packing Experiment
 
-Status: implemented and measured; final review and publication pending.
+Status: implemented, measured, and independently reviewed; publication pending.
 
 ## Goal and evidence
 
