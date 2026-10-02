@@ -1,3 +1,4 @@
+use mivi_kv::PrefixCache;
 use mivi_model::{BlockType, Model, PrefillStrategy};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -142,7 +143,9 @@ fn assert_step(actual: &[f32], expected: &OracleStep, atol: f64, rtol: f64, case
         "case={case} pos={} top token",
         expected.pos
     );
-    let margin_limit = atol + rtol * expected.top_margin.abs();
+    let mut expected_top_two = expected.logits.clone();
+    expected_top_two.sort_by(|left, right| right.total_cmp(left));
+    let margin_limit = 2.0 * atol + rtol * (expected_top_two[0].abs() + expected_top_two[1].abs());
     assert!(
         (margin - expected.top_margin).abs() <= margin_limit,
         "case={case} pos={} top margin actual={margin} expected={} limit={margin_limit}",
@@ -162,6 +165,7 @@ fn clear_model(model: &mut Model) {
 fn hybrid_adversarial_oracle_matches_token_chunk_reset_and_continuation_paths() {
     let trace = read_oracle();
     let mut model = Model::load(&fixture_path()).expect("load explicit synthetic hybrid GGUF");
+    model.prefix_cache = PrefixCache::new(8, 2);
     assert_eq!(model.config.dim, trace.config.dim);
     assert_eq!(model.config.vocab_size, trace.config.vocab_size);
     assert_eq!(model.config.max_seq_len, trace.config.context);
@@ -218,6 +222,62 @@ fn hybrid_adversarial_oracle_matches_token_chunk_reset_and_continuation_paths() 
                 assert_step(&model.state.logits, step, atol, rtol, &case.name);
             }
         }
+    }
+
+    // Warm a real two-token prefix, retain the prefix cache while resetting
+    // recurrent/KV state, then submit a prompt that shares that chunk and
+    // diverges afterward. Every growing prefix re-enters cache lookup.
+    let teacher_a = trace
+        .cases
+        .iter()
+        .find(|case| case.name == "teacher_a")
+        .unwrap();
+    let changed = trace
+        .cases
+        .iter()
+        .find(|case| case.name == "changed_prefix")
+        .unwrap();
+    assert_eq!(
+        &teacher_a.token_ids[..2],
+        &changed.token_ids[..2],
+        "changed-prefix fixture must retain one complete cached chunk"
+    );
+    assert_ne!(
+        teacher_a.token_ids[2], changed.token_ids[2],
+        "changed-prefix fixture must diverge immediately after the cached chunk"
+    );
+    clear_model(&mut model);
+    model
+        .set_prefill_strategy(PrefillStrategy::Chunked { tile_tokens: 2 })
+        .unwrap();
+    model
+        .generate_tokens_incremental(&teacher_a.token_ids, 0, 0, |_, _| true)
+        .expect("warm source prefix cache");
+    assert!(
+        model.prefix_cache.len() > 0,
+        "teacher sequence must populate prefix cache"
+    );
+    let cached_chunks = model.prefix_cache.len();
+    model.reset_context();
+    assert!(
+        model.prefix_cache.len() > 0,
+        "context reset must retain prefix cache"
+    );
+    for step in &changed.steps {
+        model
+            .generate_tokens_incremental(&changed.token_ids[..=step.pos], 0, 0, |_, _| true)
+            .expect("changed-prefix cache lookup and prefill");
+        assert!(
+            model.prefix_cache.len() >= cached_chunks,
+            "cache lookup must retain the warmed common-prefix chunks"
+        );
+        assert_step(
+            &model.state.logits,
+            step,
+            atol,
+            rtol,
+            "cached_changed_prefix",
+        );
     }
 
     // Reuse recurrent and KV state over a deliberate call boundary, then

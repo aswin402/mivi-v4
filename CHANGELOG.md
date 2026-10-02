@@ -31,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   oracle traces: serialized F32 tensor hashes, all 64 logits, top token/margin,
   provenance and two teacher sequences plus a changed-prefix case.
 - Compare Rust token-major, chunked tile sizes 1/2/3/8, split continuation, reset,
-  and changed-prefix execution against the independent hybrid reference. Explicitly
-  check finite logits, reset state, and nonzero convolution carry.
+  and changed-prefix execution against the independent hybrid reference. A warmed
+  two-token prefix is retained across context reset before testing a divergent suffix.
+  Explicitly check finite logits, reset state, and nonzero convolution carry.
 - Fix two independently tested Python-reference gaps: all query/KV heads receive
   RoPE, and reset clears lazily created convolution history.
 
@@ -43,8 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created mode0700/0600 private artifacts. The synthetic GGUF remains outside Git.
 - Both scoped `mivi-quant adversarial` tests passed. The focused hybrid integration
   test passed all15 positions (960 logits) at `atol=rtol=1e-4`, across token-major,
-  tile sizes 1/2/3/8, reset, changed prefix, and split continuation. Omitting the
-  explicit fixture path fails with an actionable error rather than skipping.
+  tile sizes 1/2/3/8, reset, a cached changed prefix, and split continuation. The
+  top-margin bound accounts for the independent error allowances of both logits.
+  Omitting the explicit fixture path fails with an actionable error rather than skipping.
 - This is a small F32 synthetic architecture oracle plus isolated quant-block
   arithmetic tests—not a real-model benchmark, full quantized hybrid graph, or
   proof of coding-agent quality. No production inference kernel was changed.

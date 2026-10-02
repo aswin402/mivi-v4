@@ -35,7 +35,7 @@ TEACHER_SEQUENCES = ((3, 7, 5, 11, 2), (9, 1, 13, 6, 4))
 CASES = (
     ("teacher_a", TEACHER_SEQUENCES[0]),
     ("teacher_b_after_reset", TEACHER_SEQUENCES[1]),
-    ("changed_prefix", (8, *TEACHER_SEQUENCES[0][1:])),
+    ("changed_prefix", (*TEACHER_SEQUENCES[0][:2], 13, 6, 4)),
 )
 
 

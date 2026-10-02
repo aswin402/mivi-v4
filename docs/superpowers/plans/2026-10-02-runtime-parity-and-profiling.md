@@ -327,7 +327,7 @@ Trace JSON includes exporter/reference revision, config, tensor byte hashes, cas
 - [x] Add scalar quant block tests named `adversarial_q4_layout_matches_independent_values` and `adversarial_q6_layout_matches_independent_values`: low/high nibble isolation, nontrivial scale/min packing, signed scales, zeros, two blocks, odd row counts, and partial output-row tiles. Use exact binary-friendly values for layout tests and a separately documented scale-aware accumulation tolerance for dot tests.
 - [x] Run focused quant RED/GREEN verification one operation at a time with Cargo jobs1, Rayon2, and Rust test threads1; final scoped filter passes 2 tests. The new decoder tests found no arithmetic discrepancy, so production quant kernels remain unchanged.
 - [x] Extend the independent generator with explicit `--output-dir PATH` and refuse collisions. Export both specified teacher sequences plus a changed-prefix case, reset the oracle between cases, and derive tensor values/traces from serialized GGUF bytes.
-- [x] Add Rust tests comparing token-major, chunked tiles1/2/3/8, split continuation, reset, and changed-prefix execution against all-logit traces. Assert every logit is finite; use absolute+relative `1e-4` checks and top-token margin.
+- [x] Add Rust tests comparing token-major, chunked tiles1/2/3/8, split continuation, reset, and cached changed-prefix execution against all-logit traces. Warm a shared cached chunk, retain it over context reset, and diverge afterward. Assert every logit is finite; use absolute+relative `1e-4` checks and an error-composed top-margin bound.
 
 ```rust
 fn assert_close(actual: f32, expected: f32, atol: f32, rtol: f32) {
