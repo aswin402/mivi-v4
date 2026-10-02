@@ -69,7 +69,7 @@ Names without a directory in a table cell belong to the directory of its first f
 **Deliverables:** private replay manifest/results, existing substage export, repeated matched comparison, teacher-forced divergence report, adversarial independent fixtures, corrected research notes.
 
 - [ ] Execute Tasks 1–6 in [the detailed P0 plan](2026-10-02-runtime-parity-and-profiling.md).
-- [ ] Record long-case split-prefill versus normal-call parity, not only the existing short check.
+- [x] Record long-case split-prefill versus normal-call parity, not only the existing short check. Task2's 110/2636-token LFM fixture passed both cases; this is same-engine synthetic evidence only.
 - [ ] Compare profiled versus unprofiled runs and preserve timeout/failure records.
 - [ ] Explain output divergence or mark it unresolved with the precise missing evidence.
 - [ ] Fix confirmed graph/state/quantization errors as individually reviewed increments before kernel promotion.
@@ -192,4 +192,8 @@ Sources and evidence boundaries are maintained in [the research report](../../AG
 
 ## Immediate next action
 
-Execute P0 Task 1: add bounded replay records and profile export tests. No runtime optimization, retrieval dependency, large-model download, release bump, or GitHub push is part of completing this planning document.
+Tasks1–2 implemented the bounded contract/profile export and private replay with
+short/long same-engine parity. Next execute P0 Task3: the bounded paired-comparison
+driver, including owned-process termination, private artifact/RSS budgets and
+honest failed/unavailable samples. Do not promote kernels or claim agent-quality
+improvements before the remaining numerical and measurement gates.

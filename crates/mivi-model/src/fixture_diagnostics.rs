@@ -132,6 +132,8 @@ pub struct ModelCapture {
     pub raw_decoded: CapturedText,
     pub delivered: CapturedText,
     pub generated_ids: CapturedIds,
+    pub terminal_token_id: Option<u32>,
+    pub stopping_reason: Option<String>,
     pub tokenization: Option<Duration>,
     pub prefill: Option<Duration>,
     pub prefill_outcome: Option<StageOutcome>,
@@ -143,6 +145,8 @@ pub struct ModelCapture {
     pub processed_tokens: Option<usize>,
     pub outcome: Option<ModelOutcome>,
     pub progress_counter_overflow: bool,
+    #[serde(skip)]
+    pub prefill_profile: Option<crate::ForwardProfileSnapshot>,
 }
 
 pub struct ModelRecorder {
@@ -161,6 +165,8 @@ impl ModelRecorder {
                 raw_decoded: CapturedText::new(limits.text_bytes),
                 delivered: CapturedText::new(limits.text_bytes),
                 generated_ids: CapturedIds::new(limits.token_ids),
+                terminal_token_id: None,
+                stopping_reason: None,
                 tokenization: None,
                 prefill: None,
                 prefill_outcome: None,
@@ -172,6 +178,7 @@ impl ModelRecorder {
                 processed_tokens: None,
                 outcome: None,
                 progress_counter_overflow: false,
+                prefill_profile: None,
             },
             entry: None,
             tokenization_start: None,
@@ -206,6 +213,18 @@ impl ModelRecorder {
                 usize::MAX
             }
         });
+    }
+
+    pub fn terminal_token(&mut self, id: u32) {
+        self.snapshot.terminal_token_id = Some(id);
+    }
+
+    pub fn stopping_reason(&mut self, reason: &str) {
+        self.snapshot.stopping_reason = Some(reason.to_owned());
+    }
+
+    pub fn prefill_profile(&mut self, profile: Option<crate::ForwardProfileSnapshot>) {
+        self.snapshot.prefill_profile = profile;
     }
 
     pub fn prefill_end(
@@ -571,5 +590,20 @@ mod tests {
             recorder.snapshot.first_delivered,
             Some(Duration::from_millis(5))
         );
+    }
+
+    #[test]
+    fn capture_records_terminal_token_separately_from_content_ids() {
+        let mut recorder = ModelRecorder::new(CaptureLimits {
+            text_bytes: 16,
+            token_ids: 2,
+        })
+        .unwrap();
+
+        recorder.snapshot.generated_ids.push(7);
+        recorder.terminal_token(9);
+
+        assert_eq!(recorder.snapshot.generated_ids.ids, [7]);
+        assert_eq!(recorder.snapshot.terminal_token_id, Some(9));
     }
 }

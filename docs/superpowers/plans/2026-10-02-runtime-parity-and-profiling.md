@@ -130,7 +130,7 @@ tests; six live model-prefix tests remained ignored. Large memory tests were
 excluded. GPT-6 Luna/high approved the arithmetic cleanup with no findings;
 all55 selected tests passed after cleanup. Release0.2.63 is scoped to this
 reviewed increment on `feat/runtime-parity-profiling`, not a completed Phase0
-or a main-branch merge. Task2 has not started.
+or a main-branch merge. Task2's execution is recorded below.
 
 ## Task 2 — Private model replay and same-engine split parity
 
@@ -153,10 +153,10 @@ Output JSON schema1: model path/identity metadata, effective context/tile/KV=`F3
 
 Teacher-forced score records contain position, supplied next-token ID, selected logits, top1/top2 IDs and margin. No full 65536-wide logit arrays or hidden-state export. Stop at16 probe positions. Compare real-model scores only if the reference exposes equivalent pre-sampler values; probability-only results must be labeled as probabilities.
 
-- [ ] Add tests for existing-file refusal, oversized input rejection before load, and missing/invalid arguments. Test the private writer against a temporary directory created by the test, not an existing user's file.
-- [ ] Build RED after registering example: `CARGO_BUILD_JOBS=1 cargo build -p mivi-model --example runtime_replay --features fixture-diagnostics --release`; expected missing example until implementation exists.
-- [ ] Implement explicit argument parsing, bounded reads, private exclusive output creation, and model setup. Configure a scoped `rayon::ThreadPoolBuilder::new().num_threads(2).build()`; do not silently inherit all laptop cores.
-- [ ] Use this generation sequence for split mode inside the pool; normal mode makes one call with the same settings. Reset sampler/profile/cache between modes, and capture the effective BOS-adjusted IDs.
+- [x] Add tests for existing-file refusal, oversized input rejection before load, and missing/invalid arguments. Test the private writer against a temporary directory created by the test, not an existing user's file.
+- [x] Establish RED before implementation. Execution used focused failing contract tests with stubs rather than the planned missing-file build failure; see the execution note below.
+- [x] Implement explicit argument parsing, bounded reads, private exclusive output creation, and model setup. Configure a scoped `rayon::ThreadPoolBuilder::new().num_threads(2).build()`; do not silently inherit all laptop cores.
+- [x] Use this generation sequence for split mode inside the pool; normal mode makes one call with the same settings. Reset sampler/profile/cache between modes, and capture the effective BOS-adjusted IDs.
 
 ```rust
 model.reset_context();
@@ -179,11 +179,35 @@ let (text, ids) = model.generate_tokens_incremental_with_cancel(
 
 Here `deadline_reached` is a local closure over an `Instant` and the explicit180s diagnostic limit, created before model load; the outer driver enforces startup/physical termination as well. Do not infer successful generation solely from a returned text value after cancellation.
 
-- [ ] Implement teacher-forcing with `Model::forward(token_id, pos)` on the same normalized prefix in token-major mode. Keep teacher-mode timing out of chunked performance results.
-- [ ] Repeat scoped build GREEN; run the replay-module unit tests from Task1.
-- [ ] Add an ignored model-required split-parity test named `replay_split_prefill_matches_single_call`, taking `MIVI_TEST_MODEL` and testing short and long synthetic prefixes sequentially. Check generated IDs, delivered text, terminal handling and final position; save failures privately.
-- [ ] Run only that live test after a model path and budget are validated: `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test -p mivi-model --release --features fixture-diagnostics replay_split_prefill_matches_single_call -- --ignored --test-threads=1`. Expected: two parity cases pass, not simply successful processes.
-- [ ] Review privacy/default feature isolation and commit Task2 files explicitly: `test: add private model runtime replay`.
+- [x] Implement teacher-forcing with `Model::forward(token_id, pos)` on the same normalized prefix in token-major mode. Keep teacher-mode timing out of chunked performance results.
+- [x] Repeat scoped build GREEN; run the replay-module unit tests from Task1.
+- [x] Add an ignored model-required split-parity test named `replay_split_prefill_matches_single_call`, taking `MIVI_TEST_MODEL` and testing short and long synthetic prefixes sequentially. Check generated IDs, delivered text, terminal handling and final position; save failures privately.
+- [x] Run only that live test after an absolute model path and budget are validated: `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 MIVI_TEST_MODEL=/absolute/path/model.gguf timeout --signal=TERM --kill-after=5s 600s cargo test -p mivi-model --example runtime_replay --release --features fixture-diagnostics replay_split_prefill_matches_single_call --offline -- --ignored --test-threads=1`. Expected: two parity cases pass, not simply successful processes.
+- [x] Review privacy/default feature isolation and include Task2 files explicitly in the patch-release commit: `test: add private model runtime replay (v0.2.64)`.
+
+Execution note (2026-10-02): split implementation into the example entry point,
+`runtime_replay/io.rs` and `runtime_replay/generation.rs`; add feature-gated direct
+capture timing, terminal/stop observations and prefill-only profile snapshots.
+Update three server test initializers for capture compatibility only. TDD used
+four failing I/O-contract tests, three failing executor/traversal tests, then a
+failing repeated-write regression; all passed after implementation. Review added
+two RED/GREEN regressions for malformed BOS metadata and entry-clock labeling.
+Fifteen non-live example tests, 28 model diagnostic tests and 24 server fixture
+compatibility tests passed (two unrelated server live fixtures remained ignored).
+Strict model/example Clippy and the default-feature model-library check passed.
+GPT-6 Luna/high approved the integrated
+implementation and follow-up fixes; the security review prompted pinned directory
+walking and single-use output rather than path-based permission checks.
+
+The release example built with one Cargo job. Tiny synthetic-model runs checked
+two finite teacher probes and normal/split output equivalence; private results
+were mode0600 within a mode0700 directory outside Git. The real local
+LFM2.5-1.2B-Instruct-Q4_K_M fixture passed both 110/2636-prefix parity cases in
+180.58s total with two inference threads, an external600s timeout and no concurrent
+Cargo/model workloads. An initial relative-path launch failed before loading;
+use an absolute `MIVI_TEST_MODEL` because Cargo changes the test working directory.
+No paired-reference speedup, agent-quality result, hard RSS enforcement or
+independent numerical parity is claimed. Those remain Tasks3–6.
 
 ## Task 3 — Bounded paired comparison driver
 

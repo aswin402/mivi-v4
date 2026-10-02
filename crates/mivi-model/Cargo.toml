@@ -20,3 +20,12 @@ byteorder.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+rayon.workspace = true
+tempfile = "3"
+libc.workspace = true
+
+[[example]]
+name = "runtime_replay"
+required-features = ["fixture-diagnostics"]

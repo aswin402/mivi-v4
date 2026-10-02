@@ -256,6 +256,32 @@ impl Model {
             .map(|recorder| recorder.snapshot)
     }
 
+    /// Begin timing an armed direct-token replay capture.
+    #[cfg(feature = "fixture-diagnostics")]
+    pub fn begin_fixture_capture_observation(
+        &mut self,
+        entry: Instant,
+    ) -> std::result::Result<(), &'static str> {
+        let recorder = self
+            .fixture_recorder
+            .as_mut()
+            .ok_or("fixture capture is not active")?;
+        recorder.begin(entry);
+        Ok(())
+    }
+
+    /// Finish an armed direct-token replay capture at physical model return.
+    #[cfg(feature = "fixture-diagnostics")]
+    pub fn finish_fixture_capture_observation(
+        &mut self,
+        outcome: crate::fixture_diagnostics::ModelOutcome,
+        finished: Instant,
+    ) {
+        if let Some(recorder) = self.fixture_recorder.as_mut() {
+            recorder.finish(finished, outcome);
+        }
+    }
+
     /// Set the prompt-prefill execution strategy.
     pub fn set_prefill_strategy(&mut self, strategy: PrefillStrategy) -> Result<()> {
         strategy.validate().map_err(ModelError::InvalidConfig)?;
@@ -1096,8 +1122,11 @@ impl Model {
             &mut should_cancel,
         );
         #[cfg(feature = "fixture-diagnostics")]
+        let prefill_profile = self.forward_profile();
+        #[cfg(feature = "fixture-diagnostics")]
         if let Some(recorder) = self.fixture_recorder.as_mut() {
             use crate::fixture_diagnostics::StageOutcome;
+            recorder.prefill_profile(prefill_profile);
             let stage_outcome = match &prefill_result {
                 Ok(true) => StageOutcome::Complete,
                 Ok(false) => StageOutcome::Cancelled,
@@ -1163,10 +1192,21 @@ impl Model {
                 .sampler
                 .sample(&mut self.state.logits_scratch, recent_slice);
 
-            if next_token == eos_token_id
-                || Some(next_token) == im_end_id
-                || Some(next_token) == endoftext_id
-            {
+            let terminal_reason = if next_token == eos_token_id {
+                Some("eos")
+            } else if Some(next_token) == im_end_id {
+                Some("im_end")
+            } else if Some(next_token) == endoftext_id {
+                Some("endoftext")
+            } else {
+                None
+            };
+            if let Some(_reason) = terminal_reason {
+                #[cfg(feature = "fixture-diagnostics")]
+                if let Some(recorder) = self.fixture_recorder.as_mut() {
+                    recorder.terminal_token(next_token);
+                    recorder.stopping_reason(_reason);
+                }
                 break;
             }
 
@@ -1192,6 +1232,10 @@ impl Model {
             if let Some(matched_len) =
                 matches_any_stop_suffix(&pending_text, &self.sampler.config.stop_tokens)
             {
+                #[cfg(feature = "fixture-diagnostics")]
+                if let Some(recorder) = self.fixture_recorder.as_mut() {
+                    recorder.stopping_reason("stop_sequence");
+                }
                 let keep_len = pending_text.len().saturating_sub(matched_len);
                 pending_text.truncate(keep_len);
                 if !pending_text.is_empty() {

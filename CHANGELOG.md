@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.64] - 2026-10-02
+
+### Private Runtime Replay — Phase 0, Task 2
+
+#### Ideas, Inspirations & Sources
+
+- Reuse Mivi's feature-gated capture recorder and forward counters, following
+  [Kimi's independent fixture discipline](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md)
+  and [Colibri's controlled benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+  Same-engine parity is only a prerequisite, not an independent numerical oracle.
+- Security review motivated component-by-component directory-descriptor traversal
+  and a single-use writer; implementation uses native Unix file APIs, not copied
+  inference kernels or model-name dispatch.
+
+#### Added
+
+- Feature-required `mivi-model` replay example with explicit local model/input/
+  output paths, bounded JSON input/output, exclusive owned-private Unix output,
+  symlink/traversal refusal, and a scoped two-thread Rayon pool. Non-Unix output
+  fails closed; normal server CLI and provider configuration are unchanged.
+- Metadata-validated BOS/EOS/vocabulary/context, F32 KV and deterministic greedy
+  settings, normal versus split-prefill modes, prefill-only profile snapshots,
+  separate observed terminal IDs and stop reasons, bounded text/ID captures,
+  explicit completion/error/cancellation outcomes, and labeled timing boundaries.
+- Up to 16 teacher-forced next-token probes with finite selected raw logits,
+  log probabilities and top-two margins scored before advancing the supplied
+  token. Teacher timing is separate from chunked-prefill measurements.
+- Model-required short/long same-engine parity fixture and
+  [private replay usage documentation](docs/RUNTIME_REPLAY_DIAGNOSTICS.md).
+
+#### Fixed
+
+- Reject present non-boolean BOS policy metadata rather than silently disabling
+  BOS insertion; retain the existing default only for absent metadata.
+- Enforce a single output-write attempt so repeated writes cannot append beyond
+  the per-result byte budget. Check private output before model loading.
+- Extend server diagnostic test initializers for the new optional capture fields;
+  this is compatibility maintenance, not a new server profiling mode.
+
+#### Scope and Verification
+
+- The example's scoped release build passed. Tiny-model teacher forcing completed
+  two finite probes; normal/split generation matched content, delivered text,
+  terminal IDs and final position, using two threads and private mode0600 results.
+- Fifteen non-live example tests passed. The explicitly selected real LFM2.5-1.2B
+  Q4_K_M parity test passed both 110- and 2636-token prefixes in 180.58s total,
+  checking complete, untruncated runs before equality. This synthetic same-engine
+  test is not an end-to-end agent workload or a latency benchmark.
+- Scoped model diagnostics passed28 tests; server fixture compatibility passed24
+  with two unrelated live fixtures ignored. Strict model/example Clippy and the
+  default-feature model-library check passed; no workspace-wide build/test.
+- The initial live-test launch failed before loading because Cargo resolved a
+  relative model path from the crate directory; the absolute-path rerun passed,
+  and documentation now makes that path requirement explicit.
+- No kernel optimization or speedup claim. Cross-engine numerical comparison,
+  repeated/profile-overhead measurements and agent-quality evaluation remain
+  subsequent tasks. The 180s cooperative deadline cannot interrupt blocking
+  model loading; hard termination, RSS supervision and observed process exit
+  belong to the external comparison driver. No normal server binary rebuild.
+
 ## [v0.2.63] - 2026-10-02
 
 ### Bounded Runtime Replay Contract — Phase 0, Task 1
