@@ -476,7 +476,7 @@ impl PrefixCache {
             }
 
             let suffix_abs_pos = abs_offset + suffix_start;
-            if suffix_abs_pos % self.chunk_size != 0 {
+            if !suffix_abs_pos.is_multiple_of(self.chunk_size) {
                 continue;
             }
 

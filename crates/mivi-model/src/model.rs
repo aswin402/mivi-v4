@@ -580,7 +580,7 @@ impl Model {
                 let _ = std::io::stdout().flush();
             }
 
-            if start_pos == 0 && (cur_pos + 1) % self.prefix_cache.chunk_size() == 0 {
+            if start_pos == 0 && (cur_pos + 1).is_multiple_of(self.prefix_cache.chunk_size()) {
                 *chained_hash =
                     self.cache_prefill_boundary(prompt_tokens, cur_pos + 1, *chained_hash);
             }
@@ -820,7 +820,7 @@ impl Model {
             }
 
             let boundary_pos = start_pos + end;
-            if start_pos == 0 && boundary_pos % self.prefix_cache.chunk_size() == 0 {
+            if start_pos == 0 && boundary_pos.is_multiple_of(self.prefix_cache.chunk_size()) {
                 chained_hash =
                     self.cache_prefill_boundary(prompt_tokens, boundary_pos, chained_hash);
             }

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
+pub mod replay;
+
 pub const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CAPTURE_IDS: usize = 65_536;
 

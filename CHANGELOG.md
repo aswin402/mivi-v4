@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.63] - 2026-10-02
+
+### Bounded Runtime Replay Contract — Phase 0, Task 1
+
+#### Ideas, Inspirations & Sources
+
+- Establish numerical evidence before selecting faster kernels, inspired by
+  [Kimi's independent fixture discipline](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md)
+  and [Colibri's controlled benchmark protocol](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Export Mivi's existing attention/SSM counters rather than duplicate timers;
+  distinguish whole-block time from projection, FFN, causal scan, and convolution.
+- The accompanying research roadmap records all eight requested projects and
+  directly relevant papers with applicability and limitations. These references
+  motivate the plan; their published speedups are not Mivi measurements.
+
+#### Added
+
+- Feature-gated replay input validation for bounded context, tile, output,
+  teacher-forced probes and selected logits; checked context arithmetic,
+  unknown-field rejection, unique logit IDs, and rejection of simultaneous
+  teacher forcing and sampling.
+- Numeric microsecond export of existing forward aggregates and all ten
+  attention/SSM substages, with checked conversion and documented overlapping
+  totals. Overflow fails instead of silently wrapping.
+- Eleven model-independent replay/export tests, including exact limits,
+  malformed input, every duration field's overflow, and substage ordering.
+- Native-first roadmap/TODO and focused Phase 0 execution plan with scoped
+  verification, private artifact budgets and evidence-gated optimization.
+
+#### Fixed
+
+- Replace manual integer ceiling-division and cache-boundary modulo checks
+  with Rust's native operations in the affected KV/model code, resolving the
+  existing strict Clippy failures without changing valid cache layouts.
+- Reject overflowing Q8 byte-size calculations with `AllocationOverflow`;
+  extreme quantized KV dimensions no longer panic at round-up arithmetic in
+  the covered constructor cases. Add regressions for rejection and partial
+  block storage sizes. This is input robustness, not a measured speedup.
+- Cleanup follows the compiler's exact `manual_div_ceil` and
+  `manual_is_multiple_of` diagnostics; the regression was derived from Mivi's
+  existing checked-allocation error contract, not a copied external kernel.
+
+#### Scope and Verification
+
+- The replay runner, paired reference driver, new independent hybrid oracle,
+  and live repeated measurements remain subsequent tasks. Callers must also
+  bound input-file reads and validate vocabulary/BOS-adjusted lengths.
+- This increment adds no normal-server capture switch, model-name inference
+  behavior, kernel change, timeout change, or measured speed improvement.
+- Selected feature-enabled diagnostic tests: 27 passed, including the eleven
+  new tests after observed RED/GREEN execution; one Cargo job and one test
+  thread, with Rayon configured to two threads. No model was loaded.
+- The original strict-Clippy checkpoint exposed26 KV diagnostics and three
+  model/transformer diagnostics. After the focused cleanup, scoped strict
+  model-library Clippy including dependencies passes without suppressions.
+- Additional selected tests: seven small cache tests, thirteen prefix tests,
+  six nonignored model-prefix tests (six model-required tests ignored), and
+  two synthetic attention tests pass. Large memory-calculation tests were
+  excluded deliberately; no full workspace validation or live agent test.
+- GPT-6 Luna/high reviews approved replay spec/code quality and the arithmetic
+  cleanup. The replay reader-boundary documentation note was addressed; the
+  arithmetic review found no issues. This increment totals55 passing selected
+  tests and is published on the feature branch, not merged into main.
+
 ## [v0.2.62] - 2026-10-02
 
 ### Fixture-Only Generation Diagnostics
