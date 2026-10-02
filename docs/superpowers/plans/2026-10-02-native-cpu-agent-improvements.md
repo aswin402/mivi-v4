@@ -192,8 +192,9 @@ Sources and evidence boundaries are maintained in [the research report](../../AG
 
 ## Immediate next action
 
-Tasks1–2 implemented the bounded contract/profile export and private replay with
-short/long same-engine parity. Next execute P0 Task3: the bounded paired-comparison
-driver, including owned-process termination, private artifact/RSS budgets and
-honest failed/unavailable samples. Do not promote kernels or claim agent-quality
+Tasks1–3 implemented the bounded contract/profile export, private replay with
+short/long same-engine parity, and the supervised paired-comparison driver.
+Task3's native-only smoke and synthetic tests are not a real paired benchmark.
+Next execute P0 Task4: router timing and profiling controls, distinguishing
+headers/heartbeats from useful output and physical worker return. Do not promote kernels or claim agent-quality
 improvements before the remaining numerical and measurement gates.

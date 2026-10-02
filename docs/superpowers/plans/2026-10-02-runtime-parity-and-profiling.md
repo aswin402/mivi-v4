@@ -211,7 +211,12 @@ independent numerical parity is claimed. Those remain Tasks3–6.
 
 ## Task 3 — Bounded paired comparison driver
 
-**Files:** create `scripts/runtime_compare/compare.py`, `scripts/runtime_compare/test_compare.py`.
+**Files:** create `scripts/runtime_compare/compare.py`, `scripts/runtime_compare/test_compare.py`,
+`private_io.py`, `process_supervisor.py`, `gguf_metadata.py` and `test_gguf_metadata.py`
+in that directory, plus focused post-exit/retention regressions in
+`test_supervisor_limits.py`. The helper split follows implementation inspection: metadata
+preflight, pinned private I/O and continuous process supervision are separate
+safety boundaries, not additional runtime features.
 
 **Consumes:** Task2 binary/output; optional explicitly supplied local llama.cpp executable; private JSON manifest. **Produces:** `python3 scripts/runtime_compare/compare.py --manifest PATH --output-dir PATH`; private JSON/Markdown reports with schema1.
 
@@ -251,7 +256,7 @@ def summarize(samples: list[dict]) -> dict:
 
 The following executable test fixes report semantics. Empty successes produce `None` summaries, not zeros; add that case alongside the example.
 
-- [ ] Write failing standard-library tests before adding functions:
+- [x] Write failing standard-library tests before adding functions:
 
 ```python
 import unittest
@@ -273,12 +278,27 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result["prefill_ms"], {"median": 15.0, "min": 10.0, "max": 20.0})
 ```
 
-- [ ] Run RED: `python3 -m unittest discover -s scripts/runtime_compare -p 'test_*.py'`; expected missing module/functions or failed assertions.
-- [ ] Implement validation, supervision, alternating pairs, and report generation. Add mocked child tests for timeout/RSS/oversized logs, startup failure, collision/symlink refusal, `[DONE]`/EOF disagreement, and cleanup failure. No model loads in these tests.
-- [ ] Repeat GREEN and require all selected tests pass.
-- [ ] For the first divergent position, replay the identical prefix in both engines; compare matched selected scores if available, top-token margin, stop policy and quantized-activation behavior. Mark absent raw logits or intermediate states as unavailable, not equal.
-- [ ] Require reports to distinguish model-callback TTFT from reference network-visible TTFT. Never compute a ratio between mismatched boundaries without flagging it.
-- [ ] Review and commit only the two script files: `test: add bounded paired runtime comparison`.
+- [x] Run RED: `python3 -m unittest discover -s scripts/runtime_compare -p 'test_*.py'`; expected missing module/functions or failed assertions.
+- [x] Implement validation, supervision, alternating pairs, and report generation. Add mocked child tests for timeout/RSS/oversized logs, startup failure, collision/symlink refusal, `[DONE]`/EOF disagreement, and cleanup failure. No model loads in these tests.
+- [x] Repeat GREEN and require all selected tests pass.
+- [x] For the first divergent position, replay the identical prefix in both engines; compare matched selected scores if available, top-token margin, stop policy and quantized-activation behavior. Mark absent raw logits or intermediate states as unavailable, not equal.
+- [x] Require reports to distinguish model-callback TTFT from reference network-visible TTFT. Never compute a ratio between mismatched boundaries without flagging it.
+- [x] Review the script/helper files and associated usage/release documentation,
+  excluding private artifacts and unrelated changes; commit the completed
+  increment: `test: add bounded paired runtime comparison`.
+
+Task3 execution: seven standard-library modules/helpers/tests implement the
+bounded driver. Initial missing-module RED and focused safety/protocol regressions
+preceded GREEN; independent review identified probe-cleanup continuation and
+fast-exit artifact bypass, then deadline/source-reporting gaps. Each was repaired
+and re-reviewed; native default stop strings are carried from verified output,
+not duplicated in the adapter. Fresh scoped54 tests passed. Validation-only
+created no output/child; tiny native CLI completed and reaped successfully with
+private0700/0600 artifacts, reference unavailable, partial/exit2 and no parity
+claim. Artifact/RSS caps are sampled; unsafe cleanup refuses retention. Discarded
+diagnostic suffixes are explicitly counted. Actual paired measurements remain
+Task6 because no reference executable is installed. Task3 release0.2.65 uses a
+scoped default-feature model-library check with jobs1; normal server is unchanged.
 
 ## Task 4 — Router timing and profiling controls
 

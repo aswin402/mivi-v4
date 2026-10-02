@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.65] - 2026-10-02
+
+### Private Paired Runtime Comparison — Phase 0, Task 3
+
+#### Ideas, Inspirations & Sources
+
+- Independent evidence and controlled pairs follow
+  [Kimi's fixture discipline](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md)
+  and [Colibri's benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Tokenizer/BOS/EOS/context preflight follows the
+  [GGUF specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
+  Reference checks follow the pinned llama.cpp
+  [server contract](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/README.md),
+  [response serializer](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-task.cpp)
+  and [cache/terminal implementation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-context.cpp).
+  This is native Python diagnostic orchestration, not copied inference kernels.
+
+#### Added
+
+- Standard-library comparison CLI with exact schema-1 manifests, model SHA256,
+  metadata-derived vocabulary/BOS/context validation, optional explicit pinned
+  local reference, sequential alternating pairs, and private JSON/Markdown reports.
+- Owned-process supervision with bounded logs, sampled Linux process-tree RSS,
+  artifact checks during blocking HTTP and after child exit, TERM/KILL cleanup,
+  explicit failures and no later launches after unsuccessful cleanup.
+- Descriptor-pinned private directories/files, symlink/traversal/FIFO refusal,
+  output collision protection, reserved report space and bounded failure retention.
+  Retention may discard oversized owned diagnostic suffixes after verified cleanup;
+  numeric loss accounting is retained, and model/manifest files are untouched.
+- Common-prefix first-divergence probes, selected native logits/reference logprobs,
+  explicit unavailable observations, per-sample engine order and
+  [comparison usage documentation](docs/RUNTIME_COMPARISON_DIAGNOSTICS.md).
+
+#### Fixed
+
+- Handle the pinned reference's actual cold-cache counters and `/props` fields;
+  distinguish cached size from prior reuse and terminal EOS from content IDs.
+- Match the full verified native stop-string policy, including runtime defaults,
+  rather than sending only metadata EOS or duplicating model-specific literals.
+- Reject exhausted session budgets before version/help or inference launches;
+  preserve probe cleanup failures instead of reducing them to recoverable errors.
+- Catch fast-exit artifact overruns and refuse retention after unverified primary
+  or divergence-probe cleanup. Validate the post-BOS prompt bound and skipped
+  GGUF boolean-array encodings.
+
+#### Scope and Verification
+
+- All 54 scoped Python tests passed, including real synthetic child timeout,
+  logging, RSS, descendant cleanup and fast-exit regressions; HTTP tests use only
+  a localhost mock. Review findings were repaired with RED/GREEN regressions.
+- Validation-only created no output or child. Tiny-model native CLI smoke completed
+  with successful reaping and private mode0700 directories/mode0600 reports;
+  an absent reference correctly produced `partial`, exit2 and no comparison.
+  The smoke used the existing v0.2.64 replay executable. The v0.2.65 scoped
+  default-feature model-library check and lockfile refresh passed with Cargo
+  jobs1; no workspace-wide build/test was run.
+- RSS/artifact enforcement is sampled, not a kernel quota or real-time guarantee.
+  Reference nonstreaming TTFT, raw logits and intermediate state remain unavailable;
+  missing or failed measurements never become zero latency or numerical equality.
+- No local llama.cpp executable was installed, downloaded or benchmarked. No real
+  paired-model performance, speedup or coding-agent quality claim. Normal server,
+  provider configuration and inference backend are unchanged; no server rebuild.
+
 ## [v0.2.64] - 2026-10-02
 
 ### Private Runtime Replay — Phase 0, Task 2
