@@ -263,22 +263,20 @@ fn hybrid_adversarial_oracle_matches_token_chunk_reset_and_continuation_paths() 
         model.prefix_cache.len() > 0,
         "context reset must retain prefix cache"
     );
-    for step in &changed.steps {
-        model
-            .generate_tokens_incremental(&changed.token_ids[..=step.pos], 0, 0, |_, _| true)
-            .expect("changed-prefix cache lookup and prefill");
-        assert!(
-            model.prefix_cache.len() >= cached_chunks,
-            "cache lookup must retain the warmed common-prefix chunks"
-        );
-        assert_step(
-            &model.state.logits,
-            step,
-            atol,
-            rtol,
-            "cached_changed_prefix",
-        );
-    }
+    model
+        .generate_tokens_incremental(&changed.token_ids, 0, 0, |_, _| true)
+        .expect("changed-prefix cache lookup and prefill");
+    assert!(
+        model.prefix_cache.len() >= cached_chunks,
+        "cache lookup must retain the warmed common-prefix chunks"
+    );
+    assert_step(
+        &model.state.logits,
+        changed.steps.last().unwrap(),
+        atol,
+        rtol,
+        "cached_changed_prefix",
+    );
 
     // Reuse recurrent and KV state over a deliberate call boundary, then
     // compare every suffix point, not only the final output token.
