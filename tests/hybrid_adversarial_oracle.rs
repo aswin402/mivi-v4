@@ -225,8 +225,8 @@ fn hybrid_adversarial_oracle_matches_token_chunk_reset_and_continuation_paths() 
     }
 
     // Warm a real two-token prefix, retain the prefix cache while resetting
-    // recurrent/KV state, then submit a prompt that shares that chunk and
-    // diverges afterward. Every growing prefix re-enters cache lookup.
+    // recurrent/KV state, then submit one prompt that shares that chunk and
+    // diverges afterward. Profiling verifies the shared chunk was restored.
     let teacher_a = trace
         .cases
         .iter()
