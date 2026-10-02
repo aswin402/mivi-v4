@@ -64,21 +64,20 @@ def softmax(x: List[float]) -> List[float]:
 
 
 def apply_rope(q: List[float], k: List[float], head_dim: int, pos: int, rope_base: float = 1_000_000.0):
-    for i in range(0, head_dim, 2):
-        freq = 1.0 / (rope_base ** (i / head_dim))
-        angle = pos * freq
-        cos_val = math.cos(angle)
-        sin_val = math.sin(angle)
+    if head_dim <= 0 or head_dim % 2 or len(q) % head_dim or len(k) % head_dim:
+        raise ValueError("RoPE buffers must contain complete heads with an even head dimension")
 
-        if i + 1 < len(q):
-            q0, q1 = q[i], q[i + 1]
-            q[i] = q0 * cos_val - q1 * sin_val
-            q[i + 1] = q0 * sin_val + q1 * cos_val
-
-        if i + 1 < len(k):
-            k0, k1 = k[i], k[i + 1]
-            k[i] = k0 * cos_val - k1 * sin_val
-            k[i + 1] = k0 * sin_val + k1 * cos_val
+    for values in (q, k):
+        for head_start in range(0, len(values), head_dim):
+            for i in range(0, head_dim, 2):
+                freq = 1.0 / (rope_base ** (i / head_dim))
+                angle = pos * freq
+                cos_val = math.cos(angle)
+                sin_val = math.sin(angle)
+                index = head_start + i
+                x, y = values[index], values[index + 1]
+                values[index] = x * cos_val - y * sin_val
+                values[index + 1] = x * sin_val + y * cos_val
 
 
 def matvec(w: List[List[float]], x: List[float]) -> List[float]:
@@ -101,6 +100,8 @@ class ReferenceEngine:
     def reset(self):
         self.kv_k.clear()
         self.kv_v.clear()
+        for key in [key for key in self.ssm_states if isinstance(key, str) and key.startswith("conv_")]:
+            del self.ssm_states[key]
         for i in range(self.config.n_layers):
             self.ssm_states[i] = [0.0] * min(self.config.ssm_state_dim, self.config.dim)
 

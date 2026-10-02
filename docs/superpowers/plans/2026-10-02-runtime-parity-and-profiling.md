@@ -324,10 +324,10 @@ Fixture contract: vocabulary64, context128, alternating SSM/attention layers, no
 
 Trace JSON includes exporter/reference revision, config, tensor byte hashes, cases, token IDs, all64 logits, top token, and numerical policy. Python must evaluate **decoded serialized bytes**, not original pre-quantized weights. Independent layout equations must not call Mivi's Rust decoder or simply duplicate its helper output.
 
-- [ ] Add scalar quant block tests named `adversarial_q4_layout_matches_independent_values` and `adversarial_q6_layout_matches_independent_values`: low/high nibble isolation, nontrivial scale/min packing, signed scales, zeros, two blocks, odd row counts, and partial output-row tiles. Use exact binary-friendly values for layout tests and a separately documented accumulation tolerance for dot tests.
-- [ ] Run RED then GREEN, one at a time: `cargo test -p mivi-quant adversarial -j 1 -- --test-threads=1`, with `RAYON_NUM_THREADS=2`.
-- [ ] Extend the independent generator with explicit `--output-dir PATH` and refuse collisions. Export teacher sequences `[3, 7, 5, 11, 2]` and `[9, 1, 13, 6, 4]`, reset between them, and derive traces from serialized bytes.
-- [ ] Add Rust tests comparing token-major, chunked tiles1/2/3/8, split continuation, reset, and changed-prefix execution against those traces. Assert every compared logit is finite; use absolute+relative error and top-token margin, not only sampled argmax.
+- [x] Add scalar quant block tests named `adversarial_q4_layout_matches_independent_values` and `adversarial_q6_layout_matches_independent_values`: low/high nibble isolation, nontrivial scale/min packing, signed scales, zeros, two blocks, odd row counts, and partial output-row tiles. Use exact binary-friendly values for layout tests and a separately documented scale-aware accumulation tolerance for dot tests.
+- [x] Run focused quant RED/GREEN verification one operation at a time with Cargo jobs1, Rayon2, and Rust test threads1; final scoped filter passes 2 tests. The new decoder tests found no arithmetic discrepancy, so production quant kernels remain unchanged.
+- [x] Extend the independent generator with explicit `--output-dir PATH` and refuse collisions. Export both specified teacher sequences plus a changed-prefix case, reset the oracle between cases, and derive tensor values/traces from serialized GGUF bytes.
+- [x] Add Rust tests comparing token-major, chunked tiles1/2/3/8, split continuation, reset, and changed-prefix execution against all-logit traces. Assert every logit is finite; use absolute+relative `1e-4` checks and top-token margin.
 
 ```rust
 fn assert_close(actual: f32, expected: f32, atol: f32, rtol: f32) {
@@ -340,8 +340,8 @@ fn assert_close(actual: f32, expected: f32, atol: f32, rtol: f32) {
 
 Start F32 tiny-graph acceptance at `atol=1e-4`, `rtol=1e-4`. Any failure requires first-divergence analysis; do not loosen tolerances merely to pass. Quantized same-byte accumulation needs its own justified scale-aware policy, not transfer of the old blanket0.05 logit bound.
 
-- [ ] Run scoped integration RED/GREEN: `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --test hybrid_adversarial_oracle -- --test-threads=1`. Pass the private generated fixture path through `MIVI_ADVERSARIAL_FIXTURE`; missing fixture is an explicit actionable failure, not silently skipped.
-- [ ] Review oracle independence, provenance/license, reset/carried-state coverage; commit only generator, synthetic JSON, integration test, and affected quant/reference files: `test: add independent adversarial hybrid oracle`.
+- [x] Run scoped integration RED/GREEN with Cargo jobs1/Rayon2/test threads1. Missing `MIVI_ADVERSARIAL_FIXTURE` fails actionably; explicit private GGUF path passes the integration test.
+- [x] Review oracle independence, provenance/source links, reset/carried-state coverage; prepare Task5 implementation plus the required v0.2.67 release metadata for `test: add independent adversarial hybrid oracle`.
 
 ## Task 6 — Execute bounded evidence run, correct docs, and hand off
 

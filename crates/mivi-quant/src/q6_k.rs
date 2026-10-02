@@ -233,6 +233,112 @@ pub fn matvec_q6_k(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: usiz
 mod tests {
     use super::*;
 
+    fn independent_q6(block: &[u8], index: usize) -> f32 {
+        let half = index / 128;
+        let within = index % 128;
+        let lane = within % 32;
+        let plane = within / 32;
+        let ql_index = half * 64 + lane + if plane % 2 == 1 { 32 } else { 0 };
+        let qh = block[128 + half * 32 + lane];
+        let low = if plane < 2 {
+            block[ql_index] & 0x0f
+        } else {
+            block[ql_index] >> 4
+        };
+        let quant = i16::from(low | (((qh >> (plane * 2)) & 0x03) << 4)) - 32;
+        let scale_index = half * 8 + lane / 16 + plane * 2;
+        let scale = i8::from_ne_bytes([block[192 + scale_index]]) as f32;
+        let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
+        d * scale * f32::from(quant)
+    }
+
+    fn adversarial_block(seed: usize) -> Vec<u8> {
+        let mut block = vec![0u8; Q6_K_BYTES];
+        for (i, value) in block[..128].iter_mut().enumerate() {
+            *value = (i * 29 + seed * 47 + 0x15) as u8;
+        }
+        for (i, value) in block[128..192].iter_mut().enumerate() {
+            *value = (i * 61 + seed * 23 + 0x93) as u8;
+        }
+        for (i, value) in block[192..208].iter_mut().enumerate() {
+            *value = (i as i8).wrapping_mul(13).wrapping_add(seed as i8 * 7) as u8;
+        }
+        block[208..210].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn adversarial_q6_layout_matches_independent_values() {
+        let blocks = [adversarial_block(0), adversarial_block(1)];
+        let mut decoded = vec![0.0; Q6_K_BLOCK_SIZE * blocks.len()];
+        for (block_idx, block) in blocks.iter().enumerate() {
+            dequantize_q6_k(
+                block,
+                &mut decoded[block_idx * Q6_K_BLOCK_SIZE..(block_idx + 1) * Q6_K_BLOCK_SIZE],
+            );
+            for index in 0..Q6_K_BLOCK_SIZE {
+                assert_eq!(
+                    decoded[block_idx * Q6_K_BLOCK_SIZE + index],
+                    independent_q6(block, index),
+                    "block={block_idx} index={index}"
+                );
+            }
+        }
+
+        // Dot accumulation allows SIMD/FMA ordering differences with a bound
+        // proportional to the absolute product sum.
+        let row_blocks: Vec<Vec<u8>> = (0..6).map(adversarial_block).collect();
+        let weights: Vec<u8> = row_blocks.iter().flatten().copied().collect();
+        let x: Vec<f32> = (0..512)
+            .map(|i| {
+                if i % 3 == 0 {
+                    0.5
+                } else if i % 3 == 1 {
+                    -0.25
+                } else {
+                    0.125
+                }
+            })
+            .collect();
+        let mut actual = vec![0.0; 3];
+        try_matvec_q6_k(&mut actual, &weights, &x, 3, 512).unwrap();
+        for row in 0..3 {
+            let mut expected = 0.0f64;
+            let mut magnitude = 0.0f64;
+            for b in 0..2 {
+                for i in 0..Q6_K_BLOCK_SIZE {
+                    let product =
+                        independent_q6(&row_blocks[row * 2 + b], i) * x[b * Q6_K_BLOCK_SIZE + i];
+                    expected += f64::from(product);
+                    magnitude += f64::from(product.abs());
+                }
+            }
+            let error = (f64::from(actual[row]) - expected).abs();
+            assert!(
+                error <= 2.0e-6 * magnitude + 1.0e-5,
+                "row={row} error={error} magnitude={magnitude}"
+            );
+        }
+
+        let mut tile_out = vec![0.0; 6];
+        crate::quantized_matmul_rows(
+            &mut tile_out,
+            crate::GgmlType::Q6_K,
+            &weights,
+            &[x.clone(), x.clone()].concat(),
+            2,
+            3,
+            512,
+        )
+        .unwrap();
+        for batch_idx in 0..2 {
+            for row in 0..3 {
+                let tolerance = 2.0e-6 * actual[row].abs() + 1.0e-5;
+                assert!((tile_out[batch_idx * 3 + row] - actual[row]).abs() <= tolerance);
+            }
+        }
+    }
+
     #[test]
     fn test_q6_k_dequant_roundtrip() {
         let mut block = vec![0u8; Q6_K_BYTES];

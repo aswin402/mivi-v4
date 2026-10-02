@@ -246,3 +246,113 @@ pub fn matvec_q4_k_m(out: &mut [f32], weights: &[u8], x: &[f32], n: usize, d: us
         panic!("{}", e);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use crate::{quantized_matmul_rows, GgmlType};
+
+    fn independent_q4(block: &[u8], index: usize) -> f32 {
+        let group = index / 64;
+        let within = index % 64;
+        let byte = block[16 + group * 32 + within % 32];
+        let quant = if within < 32 { byte & 0x0f } else { byte >> 4 };
+        let subblock = group * 2 + usize::from(within >= 32);
+        let packed = &block[4..16];
+        let (scale, minimum) = if subblock < 4 {
+            (packed[subblock] & 0x3f, packed[subblock + 4] & 0x3f)
+        } else {
+            (
+                (packed[subblock + 4] & 0x0f) | ((packed[subblock - 4] >> 6) << 4),
+                (packed[subblock + 4] >> 4) | ((packed[subblock] >> 6) << 4),
+            )
+        };
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        d * f32::from(scale) * f32::from(quant) - dmin * f32::from(minimum)
+    }
+
+    fn adversarial_block(seed: usize) -> Vec<u8> {
+        let mut block = vec![0u8; Q4_K_BYTES];
+        block[..2].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
+        block[2..4].copy_from_slice(&f16::from_f32(0.25).to_le_bytes());
+        for (i, value) in block[4..16].iter_mut().enumerate() {
+            *value = (seed.wrapping_mul(41).wrapping_add(i * 53 + 17)) as u8;
+        }
+        for (i, value) in block[16..].iter_mut().enumerate() {
+            let low = (i * 5 + seed * 3) & 0x0f;
+            let high = (i * 7 + seed * 11 + 1) & 0x0f;
+            *value = (high as u8) << 4 | low as u8;
+        }
+        block
+    }
+
+    #[test]
+    fn adversarial_q4_layout_matches_independent_values() {
+        let blocks = [adversarial_block(0), adversarial_block(1)];
+        let mut decoded = vec![0.0; Q4_K_BLOCK_SIZE * blocks.len()];
+        for (block_idx, block) in blocks.iter().enumerate() {
+            dequantize_q4_k_m(
+                block,
+                &mut decoded[block_idx * Q4_K_BLOCK_SIZE..(block_idx + 1) * Q4_K_BLOCK_SIZE],
+            );
+            for index in 0..Q4_K_BLOCK_SIZE {
+                assert_eq!(
+                    decoded[block_idx * Q4_K_BLOCK_SIZE + index],
+                    independent_q4(block, index),
+                    "block={block_idx} index={index}"
+                );
+            }
+        }
+
+        // Dot accumulation allows small SIMD/FMA ordering differences. The
+        // bound scales with the sum of absolute products, not a fixed logit cap.
+        let mut row_values = Vec::new();
+        for row in 0..3 {
+            for block_idx in 0..2 {
+                row_values.extend(adversarial_block(row + block_idx));
+            }
+        }
+        let x: Vec<f32> = (0..512)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.25 })
+            .collect();
+        let mut actual = vec![0.0; 3];
+        try_matvec_q4_k_m(&mut actual, &row_values, &x, 3, 512).unwrap();
+        for row in 0..3 {
+            let row_blocks = [adversarial_block(row), adversarial_block(row + 1)];
+            let mut expected = 0.0f64;
+            let mut magnitude = 0.0f64;
+            for (b, block) in row_blocks.iter().enumerate() {
+                for i in 0..Q4_K_BLOCK_SIZE {
+                    let product = independent_q4(block, i) * x[b * Q4_K_BLOCK_SIZE + i];
+                    expected += f64::from(product);
+                    magnitude += f64::from(product.abs());
+                }
+            }
+            let error = (f64::from(actual[row]) - expected).abs();
+            assert!(
+                error <= 2.0e-6 * magnitude + 1.0e-5,
+                "row={row} error={error} magnitude={magnitude}"
+            );
+        }
+
+        // Three output rows exercise the odd/partial output-row tile boundary.
+        let batch = 2;
+        let mut tile_out = vec![0.0; batch * 3];
+        quantized_matmul_rows(
+            &mut tile_out,
+            GgmlType::Q4_K,
+            &row_values,
+            &[x.clone(), x.clone()].concat(),
+            batch,
+            3,
+            512,
+        )
+        .unwrap();
+        for batch_idx in 0..batch {
+            for row in 0..3 {
+                assert_eq!(tile_out[batch_idx * 3 + row], actual[row]);
+            }
+        }
+    }
+}

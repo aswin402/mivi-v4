@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.67] - 2026-10-03
+
+### Independent Adversarial Arithmetic and Hybrid Oracle — Phase 0, Task 5
+
+#### Ideas, Inspirations & Sources
+
+- Synthetic fixture provenance and complete-trace discipline follow
+  [Kimi's fixture guidance](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md).
+- Independent serialized-byte evaluation and bounded comparisons draw on
+  [Colibri's benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- GGUF tensor layout and K-quant block arithmetic are checked against the
+  [GGUF specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
+  and [GGML quantization implementation](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c).
+  The tests use independent scalar equations; no inference kernels were copied.
+
+#### Added
+
+- Add independently decoded Q4_K/Q6_K block tests for nibble/bit-plane layout,
+  nontrivial scales/minima, signed scales, two-block rows, and partial odd-row
+  tiles. Dot accumulation uses a scale-aware absolute-product tolerance.
+- Add a collision-refusing private synthetic GGUF exporter and committed schema-1
+  oracle traces: serialized F32 tensor hashes, all 64 logits, top token/margin,
+  provenance and two teacher sequences plus a changed-prefix case.
+- Compare Rust token-major, chunked tile sizes 1/2/3/8, split continuation, reset,
+  and changed-prefix execution against the independent hybrid reference. Explicitly
+  check finite logits, reset state, and nonzero convolution carry.
+- Fix two independently tested Python-reference gaps: all query/KV heads receive
+  RoPE, and reset clears lazily created convolution history.
+
+#### Scope and Verification
+
+- Four focused Python tests passed; the generator reproduced the committed trace
+  from decoded serialized GGUF bytes, refused an existing output directory, and
+  created mode0700/0600 private artifacts. The synthetic GGUF remains outside Git.
+- Both scoped `mivi-quant adversarial` tests passed. The focused hybrid integration
+  test passed all15 positions (960 logits) at `atol=rtol=1e-4`, across token-major,
+  tile sizes 1/2/3/8, reset, changed prefix, and split continuation. Omitting the
+  explicit fixture path fails with an actionable error rather than skipping.
+- This is a small F32 synthetic architecture oracle plus isolated quant-block
+  arithmetic tests—not a real-model benchmark, full quantized hybrid graph, or
+  proof of coding-agent quality. No production inference kernel was changed.
+
+---
+
 ## [v0.2.66] - 2026-10-02
 
 ### Router Timing and Profiling Controls — Phase 0, Task 4
