@@ -263,9 +263,17 @@ fn hybrid_adversarial_oracle_matches_token_chunk_reset_and_continuation_paths() 
         model.prefix_cache.len() > 0,
         "context reset must retain prefix cache"
     );
+    model.enable_forward_profile();
+    model.reset_forward_profile();
     model
         .generate_tokens_incremental(&changed.token_ids, 0, 0, |_, _| true)
         .expect("changed-prefix cache lookup and prefill");
+    let processed_tokens = model.forward_profile().unwrap().tokens;
+    assert_eq!(
+        processed_tokens,
+        changed.token_ids.len() - 2,
+        "a matching two-token cached chunk must be restored, not recomputed"
+    );
     assert!(
         model.prefix_cache.len() >= cached_chunks,
         "cache lookup must retain the warmed common-prefix chunks"
