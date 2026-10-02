@@ -164,9 +164,21 @@ fn observe_event(
     let tool_fragments = delta
         .get("tool_calls")
         .and_then(serde_json::Value::as_array);
-    if (!content.is_empty() || tool_fragments.is_some_and(|calls| !calls.is_empty()))
-        && result.first_visible_delta.is_none()
-    {
+    let tool_output = tool_fragments.is_some_and(|calls| {
+        calls.iter().any(|call| {
+            call.get("function").is_some_and(|function| {
+                function
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| !name.is_empty())
+                    || function
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|arguments| !arguments.is_empty())
+            })
+        })
+    });
+    if (!content.is_empty() || tool_output) && result.first_visible_delta.is_none() {
         result.first_visible_delta = Some(started.elapsed());
     }
     append_field(&mut result.content, content, cap)?;
@@ -507,6 +519,10 @@ async fn run_fixture_request(
             Ok(observed) => {
                 record.first_visible_delta = observed.first_visible_delta;
                 record.stream_elapsed = Some(observed.elapsed);
+                if record.capture_router_timing().is_err() {
+                    record.capture_incomplete = true;
+                    session.mark_incomplete();
+                }
                 record.router_finish = observed.finish.clone();
                 record.saw_done = observed.saw_done;
                 if observed.saw_error {
@@ -600,7 +616,7 @@ fn final_answer_is_qualified(stream: &ObservedStream) -> bool {
         && stream.content.contains("a + b")
 }
 
-async fn run_fixture_capture() -> Result<FixtureRunSummary, &'static str> {
+async fn run_fixture_capture(profile_model: bool) -> Result<FixtureRunSummary, &'static str> {
     let start = Instant::now();
     let capture_limits = CaptureLimits {
         text_bytes: MODEL_TEXT_CAP,
@@ -609,6 +625,7 @@ async fn run_fixture_capture() -> Result<FixtureRunSummary, &'static str> {
     .validate()?;
     let limits = super::FixtureLimits {
         model: capture_limits,
+        profile_model,
         requests: 2,
         records: 2,
         stream_deadline: STREAM_DEADLINE,
@@ -740,6 +757,160 @@ async fn run_fixture_capture() -> Result<FixtureRunSummary, &'static str> {
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FixtureProfileOutput {
+    raw_decoded: String,
+    delivered: String,
+    generated_ids: Vec<u32>,
+    router_content: String,
+}
+
+struct FixtureProfileControlSummary {
+    output: FixtureProfileOutput,
+    profile_present: bool,
+    terminal: super::EngineTerminal,
+    worker_return_us: Option<u64>,
+    request_done: bool,
+    cleanup_complete: bool,
+    artifact_directory: PathBuf,
+}
+
+async fn run_fixture_profile_control(
+    profile_model: bool,
+) -> Result<FixtureProfileControlSummary, &'static str> {
+    const TEXT_LIMIT: usize = 4 * 1024;
+    const TOKEN_LIMIT: usize = 32;
+    const OUTPUT_LIMIT: usize = 16;
+    const CONTEXT_LIMIT: usize = 512;
+
+    let mut limits = super::FixtureLimits::default();
+    limits.model = CaptureLimits {
+        text_bytes: TEXT_LIMIT,
+        token_ids: TOKEN_LIMIT,
+    }
+    .validate()?;
+    limits.profile_model = profile_model;
+    limits.requests = 1;
+    limits.records = 1;
+    let session = super::FixtureSession::new(limits)?;
+    let workspace = FixtureWorkspace::create().map_err(|_| "fixture workspace setup failed")?;
+    let artifact = super::ArtifactDirectory::create()
+        .map_err(|_| "fixture artifact directory setup failed")?;
+    let model_path = std::env::var_os("MIVI_TEST_MODEL")
+        .ok_or("configuration required: set MIVI_TEST_MODEL to a supported model file")?;
+    let model_path = PathBuf::from(model_path);
+    if !model_path.is_absolute() || !model_path.is_file() {
+        return Err("configuration required: MIVI_TEST_MODEL must be an absolute model file path");
+    }
+    let mut config = crate::config::ServerConfig::default();
+    config.request_timeout_secs = 120;
+    config.first_token_timeout_secs = 90;
+    config.max_concurrent_requests = 1;
+    let model = mivi_model::Model::load_with_ctx(&model_path, Some(CONTEXT_LIMIT))
+        .map_err(|_| "fixture model load failed for configured MIVI_TEST_MODEL")?;
+    let mut engine =
+        crate::engine_actor::EngineActor::try_spawn_fixture(model, &config, session.clone())
+            .map_err(|_| "fixture engine actor startup failed")?;
+    let Some(engine_handle) = engine.handle().cloned() else {
+        drop(engine.take_handle());
+        if engine.wait_and_join(GENERATION_WATCHDOG).await.is_err() {
+            return Err("fixture actor cleanup was not observed within its watchdog");
+        }
+        return Err("fixture engine shut down");
+    };
+    let state = crate::state::AppState::with_config(
+        "fixture-model",
+        mivi_tools::ToolBroker::new(),
+        engine_handle,
+        None,
+        config,
+    )
+    .with_workspace(workspace.path().to_path_buf());
+    let metrics = Arc::clone(&state.metrics);
+    let app = crate::create_router(Arc::new(state));
+    let payload = json!({
+        "model": "mivi",
+        "stream": true,
+        "temperature": 0,
+        "seed": 7,
+        "max_tokens": OUTPUT_LIMIT,
+        "messages": [{"role":"user","content":"Return the word hello."}]
+    });
+    let request_result =
+        run_fixture_request(&app, &session, &metrics, "fixture_profile", payload).await;
+    let result = (|| {
+        let record = request_result
+            .record
+            .as_ref()
+            .ok_or("fixture profile record was unavailable")?;
+        let model = record
+            .model
+            .as_ref()
+            .ok_or("fixture profile model capture was unavailable")?;
+        let stream = request_result
+            .stream
+            .as_ref()
+            .ok_or("fixture profile router stream was unavailable")?;
+        if !request_result.http_success {
+            return Err("fixture profile request failed");
+        }
+        if !request_result.capture_complete || !record_is_complete(record) {
+            return Err("fixture profile request capture was incomplete or truncated");
+        }
+        if model.reused_tokens != Some(0)
+            || model.prefill_outcome
+                != Some(mivi_model::fixture_diagnostics::StageOutcome::Complete)
+            || model.outcome != Some(mivi_model::fixture_diagnostics::ModelOutcome::Complete)
+        {
+            return Err("fixture profile request did not complete a cold model prefill");
+        }
+        if profile_model {
+            let snapshot = model
+                .prefill_profile
+                .as_ref()
+                .ok_or("fixture profile snapshot was unavailable")?;
+            if snapshot.tokens == 0 || snapshot.total_stage_time().is_zero() {
+                return Err("fixture profile snapshot contained no measured prefill work");
+            }
+        } else if model.prefill_profile.is_some() {
+            return Err("unprofiled fixture unexpectedly retained a model profile");
+        }
+        let output = FixtureProfileOutput {
+            raw_decoded: model.raw_decoded.text.clone(),
+            delivered: model.delivered.text.clone(),
+            generated_ids: model.generated_ids.ids.clone(),
+            router_content: stream.content.clone(),
+        };
+        let summary = FixtureProfileControlSummary {
+            output,
+            profile_present: record.model_prefill_profile_us.is_some(),
+            terminal: record.engine_terminal,
+            worker_return_us: record.actor_dequeue_to_worker_return_us,
+            request_done: stream.saw_done,
+            cleanup_complete: false,
+            artifact_directory: artifact.path().to_path_buf(),
+        };
+        artifact
+            .write(record.sequence, record)
+            .map_err(|_| "fixture profile artifact persistence failed")?;
+        Ok(summary)
+    })();
+
+    drop(app);
+    drop(metrics);
+    drop(engine.take_handle());
+    let cleanup_complete = engine
+        .wait_and_join(engine.session.generation_watchdog())
+        .await
+        .is_ok();
+    if !cleanup_complete {
+        return Err("fixture actor cleanup was not observed within its watchdog");
+    }
+    let mut summary = result?;
+    summary.cleanup_complete = true;
+    Ok(summary)
+}
+
 #[cfg(test)]
 #[tokio::test]
 #[ignore = "requires explicit MIVI_TEST_MODEL; exercises the actual router and actor"]
@@ -747,7 +918,7 @@ async fn fixture_generation_capture() -> Result<(), Box<dyn std::error::Error>> 
     if cfg!(debug_assertions) {
         return Err(io::Error::other("run fixture diagnostics in release profile").into());
     }
-    let summary = run_fixture_capture().await.map_err(io::Error::other)?;
+    let summary = run_fixture_capture(false).await.map_err(io::Error::other)?;
     println!(
         "fixture_generation_capture: profile=release capture_status={} continuation={} answer_quality={} cleanup={} context=4096 tile=64 request_deadline_s=120 first_output_deadline_s=90 stream_cap_bytes={} token_cap={} threads=2 concurrency=1 elapsed_ms={} artifact_dir={}",
         if summary.capture_complete { "complete" } else { "incomplete" },
@@ -766,6 +937,49 @@ async fn fixture_generation_capture() -> Result<(), Box<dyn std::error::Error>> 
     assert!(
         summary.continuation_exercised,
         "fixture tool continuation unexercised"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+#[ignore = "requires explicit MIVI_TEST_MODEL; compares profiled and unprofiled router runs"]
+async fn fixture_profile_control_parity() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err(io::Error::other("run fixture diagnostics in release profile").into());
+    }
+    let baseline = run_fixture_profile_control(false)
+        .await
+        .map_err(io::Error::other)?;
+    let profiled = run_fixture_profile_control(true)
+        .await
+        .map_err(io::Error::other)?;
+
+    assert!(
+        baseline.output == profiled.output,
+        "profiling changed output"
+    );
+    assert!(
+        !baseline.profile_present,
+        "baseline unexpectedly has model profile"
+    );
+    assert!(profiled.profile_present, "enabled model profile is missing");
+    for run in [&baseline, &profiled] {
+        assert!(run.request_done, "router stream did not reach DONE");
+        assert_eq!(run.terminal, super::EngineTerminal::Returned);
+        assert!(
+            run.worker_return_us.is_some(),
+            "request worker return was not observed"
+        );
+        assert!(
+            run.cleanup_complete,
+            "owned actor teardown was not observed"
+        );
+    }
+    println!(
+        "fixture_profile_control_parity: status=passed context=512 max_tokens=16 capture_cap_bytes=4096 token_cap=32 sequential=true baseline_artifact_dir={} profiled_artifact_dir={}",
+        baseline.artifact_directory.display(),
+        profiled.artifact_directory.display(),
     );
     Ok(())
 }
@@ -875,6 +1089,86 @@ mod tests {
         let observed = drain_fixture_sse(body, 128, Instant::now(), &mut transcript).await;
 
         assert!(observed.unwrap().saw_done);
+    }
+
+    #[tokio::test]
+    async fn fixture_profile_records_visible_content_and_preserves_output() {
+        let body = body_from_chunks(vec![
+            chunk(": keep-alive\n\n"),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+            ),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_fixture\",\"function\":{\"name\":\"\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            ),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"example.rs\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            ),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"unchanged\"},\"finish_reason\":null}]}\n\n",
+            ),
+            chunk("data: [DONE]\n\n"),
+        ]);
+        let started = Instant::now();
+        let mut transcript = CapturedText::new(4096);
+
+        let observed = drain_fixture_sse(body, 4096, started, &mut transcript)
+            .await
+            .unwrap();
+
+        assert_eq!(observed.content, "unchanged");
+        assert_eq!(observed.calls.len(), 1);
+        assert_eq!(observed.calls[0].name, "read_file");
+        assert_eq!(observed.calls[0].arguments, r#"{"path":"example.rs"}"#);
+        assert!(observed.first_visible_delta.is_some());
+        assert!(observed.first_visible_delta.unwrap() <= observed.elapsed);
+        assert!(observed.saw_done);
+        assert!(transcript.text.contains("unchanged"));
+    }
+
+    #[test]
+    fn fixture_profile_ignores_heartbeats_and_empty_envelopes_until_output() {
+        let started = Instant::now();
+        let mut result = ObservedStream {
+            first_visible_delta: None,
+            elapsed: Duration::ZERO,
+            finish: None,
+            saw_done: false,
+            saw_error: false,
+            calls: Vec::new(),
+            content: String::new(),
+        };
+        let mut call_fragments = 0;
+
+        observe_event(
+            r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+            started,
+            64,
+            &mut call_fragments,
+            &mut result,
+        )
+        .unwrap();
+        assert!(result.first_visible_delta.is_none());
+        observe_event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}"#,
+            started,
+            64,
+            &mut call_fragments,
+            &mut result,
+        )
+        .unwrap();
+        assert!(result.first_visible_delta.is_none());
+        observe_event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file","arguments":""}}]}}]}"#,
+            started,
+            64,
+            &mut call_fragments,
+            &mut result,
+        )
+        .unwrap();
+
+        assert!(result.first_visible_delta.is_some());
+        assert_eq!(result.calls[0].name, "read_file");
     }
 
     #[test]

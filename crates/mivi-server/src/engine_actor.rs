@@ -4,6 +4,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+#[cfg(feature = "fixture-diagnostics")]
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::generation::{validate_json_output, GenerationOptions, ResponseMode};
@@ -22,6 +24,8 @@ pub enum EngineCommand {
         options: GenerationOptions,
         responder: mpsc::Sender<Result<String, String>>,
         cancellation: GenerationCancellation,
+        #[cfg(feature = "fixture-diagnostics")]
+        queued_at: Option<Instant>,
     },
     Encode {
         text: String,
@@ -369,6 +373,8 @@ impl EngineHandle {
                 options,
                 responder,
                 cancellation: cancellation.clone(),
+                #[cfg(feature = "fixture-diagnostics")]
+                queued_at: self.fixture_capture_active().then(Instant::now),
             })
             .await
             .map_err(|_| ERR_ENGINE_CHANNEL_DISCONNECTED.to_string())?;
@@ -520,7 +526,11 @@ impl EngineActor {
                                 options,
                                 responder,
                                 cancellation,
+                                #[cfg(feature = "fixture-diagnostics")]
+                                queued_at,
                             } => {
+                                #[cfg(feature = "fixture-diagnostics")]
+                                let worker_started = Instant::now();
                                 handle_generate_stream_with_fixture(
                                     &mut model,
                                     mock_mode,
@@ -536,8 +546,16 @@ impl EngineActor {
                                         fixture_sequence,
                                         &fixture_config,
                                         max_tokens,
+                                        #[cfg(feature = "fixture-diagnostics")]
+                                        queued_at,
                                     ),
                                 );
+                                #[cfg(feature = "fixture-diagnostics")]
+                                if let (Some(session), Some(sequence)) =
+                                    (actor_session.as_ref(), fixture_sequence)
+                                {
+                                    session.mark_worker_return(sequence, worker_started.elapsed());
+                                }
                             }
                             EngineCommand::Encode { text, responder } => {
                                 handle_encode(&model, text, responder);
@@ -665,6 +683,7 @@ struct FixtureCaptureContext {
     profile_source: &'static str,
     max_tokens: usize,
     prefill_strategy: mivi_model::PrefillStrategy,
+    queue_wait: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "fixture-diagnostics")]
@@ -674,6 +693,7 @@ fn fixture_context(
     sequence: Option<usize>,
     config: &ServerConfig,
     max_tokens: usize,
+    queued_at: Option<Instant>,
 ) -> Option<FixtureCaptureContext> {
     Some(FixtureCaptureContext {
         session: session?.clone(),
@@ -686,6 +706,7 @@ fn fixture_context(
         },
         max_tokens,
         prefill_strategy: config.prefill_strategy,
+        queue_wait: queued_at.map(|queued_at| queued_at.elapsed()),
     })
 }
 
@@ -722,12 +743,32 @@ fn handle_generate_stream_with_fixture(
     if let Some(model) = model.as_mut() {
         record.model = model.take_fixture_capture();
     }
-    record.engine_terminal = if record.model.is_none() {
+    if record.capture_model_profile().is_err() {
+        record.capture_incomplete = true;
+        fixture.as_ref().unwrap().session.mark_incomplete();
+    }
+    record.engine_terminal = fixture_engine_terminal(
+        record.model.as_ref().and_then(|capture| capture.outcome),
+        record.model.is_some(),
+        cancellation.is_cancelled(),
+    );
+    if record.model.is_none() {
+        record.capture_incomplete = true;
+        fixture.as_ref().unwrap().session.mark_incomplete();
+    }
+    fixture.as_ref().unwrap().session.finish_engine(record);
+}
+
+#[cfg(feature = "fixture-diagnostics")]
+fn fixture_engine_terminal(
+    outcome: Option<mivi_model::fixture_diagnostics::ModelOutcome>,
+    capture_observed: bool,
+    cancellation_requested: bool,
+) -> crate::fixture_diagnostics::EngineTerminal {
+    if !capture_observed {
         crate::fixture_diagnostics::EngineTerminal::Unobserved
-    } else if cancellation.is_cancelled() {
-        crate::fixture_diagnostics::EngineTerminal::Cancelled
     } else {
-        match record.model.as_ref().and_then(|capture| capture.outcome) {
+        match outcome {
             Some(mivi_model::fixture_diagnostics::ModelOutcome::Complete) => {
                 crate::fixture_diagnostics::EngineTerminal::Returned
             }
@@ -740,14 +781,10 @@ fn handle_generate_stream_with_fixture(
             Some(mivi_model::fixture_diagnostics::ModelOutcome::ModelError) => {
                 crate::fixture_diagnostics::EngineTerminal::ModelError
             }
+            None if cancellation_requested => crate::fixture_diagnostics::EngineTerminal::Cancelled,
             None => crate::fixture_diagnostics::EngineTerminal::NotStarted,
         }
-    };
-    if record.model.is_none() {
-        record.capture_incomplete = true;
-        fixture.as_ref().unwrap().session.mark_incomplete();
     }
-    fixture.as_ref().unwrap().session.finish_engine(record);
 }
 
 #[cfg(not(feature = "fixture-diagnostics"))]
@@ -801,6 +838,23 @@ fn handle_generate_stream_impl(
                 settings,
                 fixture.descriptor.clone(),
             );
+            if let Some(record) = record.as_mut() {
+                record.command_submit_to_dequeue_us = fixture
+                    .queue_wait
+                    .map(crate::fixture_diagnostics::duration_micros)
+                    .transpose()
+                    .unwrap_or_else(|_| {
+                        record.capture_incomplete = true;
+                        fixture.session.mark_incomplete();
+                        None
+                    });
+            }
+            if fixture.session.profile_model() {
+                m.enable_forward_profile();
+                m.reset_forward_profile();
+            } else {
+                m.disable_forward_profile();
+            }
             if record.is_some()
                 && m.start_fixture_capture(fixture.session.capture_limits())
                     .is_err()
@@ -1237,6 +1291,42 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(1);
         let handle = EngineHandle::new(sender, false);
         assert!(!handle.fixture_capture_active());
+    }
+
+    #[cfg(feature = "fixture-diagnostics")]
+    #[test]
+    fn fixture_profile_classifies_physical_request_worker_outcomes() {
+        use crate::fixture_diagnostics::EngineTerminal;
+        use mivi_model::fixture_diagnostics::ModelOutcome;
+
+        for (outcome, expected) in [
+            (Some(ModelOutcome::Complete), EngineTerminal::Returned),
+            (Some(ModelOutcome::Cancelled), EngineTerminal::Cancelled),
+            (
+                Some(ModelOutcome::DeliveryStopped),
+                EngineTerminal::ReceiverClosed,
+            ),
+            (Some(ModelOutcome::ModelError), EngineTerminal::ModelError),
+            (None, EngineTerminal::NotStarted),
+        ] {
+            assert_eq!(fixture_engine_terminal(outcome, true, false), expected);
+        }
+        assert_eq!(
+            fixture_engine_terminal(Some(ModelOutcome::Complete), true, true),
+            EngineTerminal::Returned
+        );
+        assert_eq!(
+            fixture_engine_terminal(Some(ModelOutcome::DeliveryStopped), true, true),
+            EngineTerminal::ReceiverClosed
+        );
+        assert_eq!(
+            fixture_engine_terminal(Some(ModelOutcome::Cancelled), true, false),
+            EngineTerminal::Cancelled
+        );
+        assert_eq!(
+            fixture_engine_terminal(Some(ModelOutcome::Complete), false, false),
+            EngineTerminal::Unobserved
+        );
     }
 
     #[cfg(feature = "fixture-diagnostics")]

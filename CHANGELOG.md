@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.66] - 2026-10-02
+
+### Router Timing and Profiling Controls — Phase 0, Task 4
+
+#### Ideas, Inspirations & Sources
+
+- Controlled profile-on/off comparisons and explicit evidence boundaries follow
+  [Colibri's benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Independent fixture discipline follows
+  [Kimi's fixture guidance](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md).
+- Reuse Mivi's existing model capture/profile counters and actor lifecycle; no
+  duplicate kernel timers, model-name branches, or normal-server profile setting.
+
+#### Added
+
+- Optional numeric microsecond boundaries for useful router output, stream parse
+  completion, observed model stages/profile, actor queue/worker return; unobserved
+  prompt-render timing remains absent.
+- Ignore heartbeats and empty role/tool envelopes when identifying first useful
+  content or tool output. Keep request-worker return independent from model
+  terminal status and actor teardown.
+- Make actor/waiter lifecycle handoffs tolerate ordinary fixture-state lock
+  contention; preserve captured terminal outcomes when a late cancellation flag
+  arrives.
+- Add a model-required sequential profiling off/on router control that rejects
+  incomplete/truncated captures and compares output without exposing it in logs.
+- Add [private router profiling guidance](docs/ROUTER_PROFILE_DIAGNOSTICS.md).
+
+#### Scope and Verification
+
+- Eight focused profile tests passed (one model-required test ignored in the unit
+  run); the tiny synthetic GGUF live off/on control passed with identical captured
+  output, measured enabled prefill profile, observed worker return and actor
+  cleanup. The test process was supervised with bounded resources and private
+  artifacts.
+- The default-feature `mivi-server` library check passed with Cargo jobs1. No
+  workspace-wide build/check/test was run.
+- Same-engine output parity is a correctness control, not a performance or coding
+  agent quality claim. The synthetic tiny model does not establish real-model
+  latency or reference-engine parity; only observed stage timings are exported.
+
+---
+
 ## [v0.2.65] - 2026-10-02
 
 ### Private Paired Runtime Comparison — Phase 0, Task 3

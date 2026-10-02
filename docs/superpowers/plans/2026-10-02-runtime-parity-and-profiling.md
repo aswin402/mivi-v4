@@ -306,13 +306,13 @@ scoped default-feature model-library check with jobs1; normal server is unchange
 
 **Consumes:** existing `FixtureRecord`, `EngineTerminal`, `ModelCapture`, `try_spawn_fixture` lifecycle and Task1 profile representation. **Produces:** numeric optional boundary fields in existing private records and test `fixture_profile_control_parity`.
 
-- [ ] Write mocked tests enforcing header/heartbeat versus useful delta distinction, monotonic timestamps, missing-boundary `None`, and physical returned/cancelled/receiver-closed status. Assert delivered output is unchanged with profiling enabled.
-- [ ] Run RED with `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test -p mivi-server --features fixture-diagnostics fixture_profile -- --test-threads=1`; require actual selected tests, not a zero-test success.
-- [ ] Export existing optional model profile into the record without duplicate per-layer timers. Record queue/render/tokenize/prefill/first raw/first visible/decode/parse-finish/worker return only if actually observed; never manufacture timings from unrelated aggregate counters.
-- [ ] Repeat GREEN; add an ignored live `fixture_profile_control_parity` fixture using the existing private writer and owned actor teardown. Run profiled/unprofiled sequentially with identical seeded settings.
-- [ ] Run `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test -p mivi-server --release --features fixture-diagnostics fixture_profile_control_parity -- --ignored --test-threads=1` after explicit model/budget configuration. Expected output/text parity plus physical worker return; timings may differ.
-- [ ] Run existing scoped observer-parity fixture if collector integration changed. Do not rerun every model-required test.
-- [ ] Review normal-build isolation and commit explicit Task4 files: `test: expose fixture profile and lifecycle boundaries`.
+- [x] Write mocked tests enforcing heartbeat/empty-envelope versus useful delta distinction, monotonic timestamps, missing-boundary `None`, and physical returned/cancelled/receiver-closed status. Verify bounded captured output.
+- [x] Run focused `fixture_profile` tests with Cargo jobs1 and one test thread; eight selected tests passed and the one model-required control was ignored. Both contention regressions were first observed failing, then passed after repair.
+- [x] Export existing optional model profile into the record without duplicate per-layer timers. Queue/render/tokenize/prefill/first raw/first visible/decode/parse-finish/worker return are recorded only when observed; unavailable prompt-render timing stays `None`.
+- [x] Add an ignored live `fixture_profile_control_parity` fixture with sequential identical seeded settings, truncation/completion checks, private artifact writer and owned actor teardown.
+- [x] Build only the `mivi-server` release library test target with one Cargo job. Tiny synthetic GGUF off/on control passed: identical captured output, profile observed only when enabled, worker return and actor cleanup observed.
+- [x] Capture integration changed only in the feature-gated diagnostics path; focused profile controls cover it. No broad model-required test sweep.
+- [x] Verify default-feature `mivi-server` library isolation; prepare explicit Task4 release files for `test: expose fixture profile and lifecycle boundaries`.
 
 ## Task 5 — Independent adversarial arithmetic and hybrid oracle
 

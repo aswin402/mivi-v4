@@ -25,6 +25,7 @@ const MAX_TOTAL_BUDGET: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub(crate) struct FixtureLimits {
     pub model: CaptureLimits,
+    pub profile_model: bool,
     pub requests: usize,
     pub records: usize,
     pub stream_deadline: Duration,
@@ -38,6 +39,7 @@ impl Default for FixtureLimits {
                 text_bytes: 65_536,
                 token_ids: 256,
             },
+            profile_model: false,
             requests: 4,
             records: 4,
             stream_deadline: Duration::from_secs(120),
@@ -95,6 +97,24 @@ pub(crate) struct FixtureRecord {
     pub router_stream: CapturedText,
     pub first_visible_delta: Option<Duration>,
     pub stream_elapsed: Option<Duration>,
+    /// Offsets from router dispatch start; comments/heartbeats do not set visibility.
+    pub router_dispatch_to_first_visible_us: Option<u64>,
+    pub router_dispatch_to_parse_finish_us: Option<u64>,
+    /// Model stage durations and first-output offsets use the model recorder's entry origin.
+    pub model_tokenization_duration_us: Option<u64>,
+    pub model_prefill_duration_us: Option<u64>,
+    pub model_entry_to_first_raw_us: Option<u64>,
+    pub model_entry_to_first_delivered_us: Option<u64>,
+    pub model_decode_duration_us: Option<u64>,
+    pub model_prefill_profile_us: Option<Value>,
+    /// Elapsed time from actor command dequeue to fixture request worker return.
+    pub actor_dequeue_to_worker_return_us: Option<u64>,
+    /// Duration from command submission to actor dequeue, on the actor monotonic clock.
+    pub command_submit_to_dequeue_us: Option<u64>,
+    /// No permitted prompt-render hook currently observes this interval.
+    pub prompt_render_us: Option<u64>,
+    #[serde(skip)]
+    worker_return_observed: bool,
     pub metrics_before: crate::state::MetricsSnapshot,
     pub metrics_after: crate::state::MetricsSnapshot,
     pub router_finish: Option<String>,
@@ -215,6 +235,10 @@ impl FixtureSession {
         self.0.limits.model
     }
 
+    pub(crate) fn profile_model(&self) -> bool {
+        self.0.limits.profile_model
+    }
+
     pub(crate) fn text_limit(&self) -> usize {
         self.0.limits.model.text_bytes
     }
@@ -278,6 +302,18 @@ impl FixtureSession {
             router_stream: CapturedText::new(text_cap),
             first_visible_delta: None,
             stream_elapsed: None,
+            router_dispatch_to_first_visible_us: None,
+            router_dispatch_to_parse_finish_us: None,
+            model_tokenization_duration_us: None,
+            model_prefill_duration_us: None,
+            model_entry_to_first_raw_us: None,
+            model_entry_to_first_delivered_us: None,
+            model_decode_duration_us: None,
+            model_prefill_profile_us: None,
+            actor_dequeue_to_worker_return_us: None,
+            command_submit_to_dequeue_us: None,
+            prompt_render_us: None,
+            worker_return_observed: false,
             metrics_before: empty_metrics(),
             metrics_after: empty_metrics(),
             router_finish: None,
@@ -292,13 +328,7 @@ impl FixtureSession {
     }
 
     pub(crate) fn finish_engine(&self, mut record: FixtureRecord) {
-        let mut state = match self.0.state.try_lock() {
-            Ok(state) => state,
-            Err(_) => {
-                self.mark_incomplete();
-                return;
-            }
-        };
+        let mut state = self.lock_lifecycle_state();
         let partial_matches = match state.partial.as_ref() {
             Some(partial) => partial.sequence == record.sequence,
             None => false,
@@ -316,18 +346,47 @@ impl FixtureSession {
         self.0.notify.notify_one();
     }
 
-    pub(crate) fn take_finished(&self, sequence: usize) -> Option<FixtureRecord> {
-        let mut state = match self.0.state.try_lock() {
-            Ok(state) => state,
-            Err(_) => {
-                self.mark_incomplete();
-                return None;
-            }
-        };
-        let index = state
+    pub(crate) fn mark_worker_return(&self, sequence: usize, elapsed: Duration) {
+        // The waiter may briefly hold this lock while polling for the actor's
+        // return. Wait for that short critical section instead of losing a valid
+        // lifecycle observation due to ordinary contention.
+        let mut state = self.lock_lifecycle_state();
+        let Some(record) = state
             .finished
-            .iter()
-            .position(|record| record.sequence == sequence)?;
+            .iter_mut()
+            .find(|record| record.sequence == sequence)
+        else {
+            drop(state);
+            self.mark_incomplete();
+            return;
+        };
+        record.worker_return_observed = true;
+        let converted = duration_micros(elapsed);
+        match converted {
+            Ok(value) => record.actor_dequeue_to_worker_return_us = Some(value),
+            Err(_) => record.capture_incomplete = true,
+        }
+        drop(state);
+        if converted.is_err() {
+            self.mark_incomplete();
+        } else {
+            self.0.notify.notify_one();
+        }
+    }
+
+    pub(crate) fn take_finished(&self, sequence: usize) -> Option<FixtureRecord> {
+        self.take_finished_matching(sequence, false)
+    }
+
+    fn take_finished_matching(
+        &self,
+        sequence: usize,
+        require_worker_return: bool,
+    ) -> Option<FixtureRecord> {
+        let mut state = self.lock_lifecycle_state();
+        let index = state.finished.iter().position(|record| {
+            record.sequence == sequence && (!require_worker_return || record.worker_return_observed)
+        })?;
         let mut record = state.finished.remove(index)?;
         record.capture_incomplete |= self.0.incomplete.load(Ordering::Acquire);
         Some(record)
@@ -359,7 +418,7 @@ impl FixtureSession {
                 let notified = self.0.notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if let Some(record) = self.take_finished(sequence) {
+                if let Some(record) = self.take_finished_matching(sequence, true) {
                     return Ok(record);
                 }
                 if self.0.incomplete.load(Ordering::Acquire) {
@@ -434,9 +493,55 @@ impl FixtureSession {
         }
     }
 
+    fn lock_lifecycle_state(&self) -> std::sync::MutexGuard<'_, SessionState> {
+        // Lifecycle handoffs are tiny synchronous critical sections. Blocking
+        // through ordinary contention avoids converting scheduler timing into a
+        // false missing-observation failure.
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn mark_incomplete(&self) {
         self.0.incomplete.store(true, Ordering::Release);
         self.0.notify.notify_one();
+    }
+}
+
+pub(crate) fn duration_micros(duration: Duration) -> Result<u64, &'static str> {
+    u64::try_from(duration.as_micros()).map_err(|_| "fixture duration overflow")
+}
+
+impl FixtureRecord {
+    pub(crate) fn capture_router_timing(&mut self) -> Result<(), &'static str> {
+        self.router_dispatch_to_first_visible_us =
+            self.first_visible_delta.map(duration_micros).transpose()?;
+        self.router_dispatch_to_parse_finish_us =
+            self.stream_elapsed.map(duration_micros).transpose()?;
+        Ok(())
+    }
+
+    pub(crate) fn capture_model_profile(&mut self) -> Result<(), &'static str> {
+        let Some(model) = self.model.as_ref() else {
+            return Ok(());
+        };
+        self.model_tokenization_duration_us =
+            model.tokenization.map(duration_micros).transpose()?;
+        self.model_prefill_duration_us = model.prefill.map(duration_micros).transpose()?;
+        self.model_entry_to_first_raw_us = model.first_raw.map(duration_micros).transpose()?;
+        self.model_entry_to_first_delivered_us =
+            model.first_delivered.map(duration_micros).transpose()?;
+        self.model_decode_duration_us = model.decode.map(duration_micros).transpose()?;
+        self.model_prefill_profile_us = model
+            .prefill_profile
+            .map(mivi_model::fixture_diagnostics::replay::ProfileMicros::from_snapshot)
+            .transpose()?
+            .map(|profile| {
+                serde_json::to_value(profile).map_err(|_| "profile serialization failed")
+            })
+            .transpose()?;
+        Ok(())
     }
 }
 
@@ -526,6 +631,125 @@ mod tests {
                 serde_json::json!({"model_config_name": {"value": "test", "clipped": false}}),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn fixture_profile_exports_only_observed_numeric_boundaries() {
+        let session = fixture_session();
+        let mut record = begin(&session, "profile", "prompt", "");
+        record.first_visible_delta = Some(Duration::from_micros(21));
+        record.stream_elapsed = Some(Duration::from_micros(34));
+        record.model = Some(ModelCapture {
+            raw_decoded: CapturedText::new(8),
+            delivered: CapturedText::new(8),
+            generated_ids: mivi_model::fixture_diagnostics::CapturedIds::new(4),
+            terminal_token_id: None,
+            stopping_reason: None,
+            tokenization: Some(Duration::from_micros(5)),
+            prefill: Some(Duration::from_micros(8)),
+            prefill_outcome: None,
+            decode: Some(Duration::from_micros(13)),
+            first_raw: Some(Duration::from_micros(17)),
+            first_delivered: Some(Duration::from_micros(19)),
+            prompt_tokens: None,
+            reused_tokens: None,
+            processed_tokens: None,
+            outcome: None,
+            progress_counter_overflow: false,
+            prefill_profile: Some(mivi_model::ForwardProfileSnapshot {
+                tokens: 4,
+                embedding: Duration::from_micros(3),
+                ..mivi_model::ForwardProfileSnapshot::default()
+            }),
+        });
+        record.capture_router_timing().unwrap();
+        record.capture_model_profile().unwrap();
+
+        let exported = serde_json::to_value(record).unwrap();
+
+        assert_eq!(exported["router_dispatch_to_first_visible_us"], 21);
+        assert_eq!(exported["router_dispatch_to_parse_finish_us"], 34);
+        assert!(
+            exported["router_dispatch_to_first_visible_us"].as_u64()
+                <= exported["router_dispatch_to_parse_finish_us"].as_u64()
+        );
+        assert_eq!(exported["model_tokenization_duration_us"], 5);
+        assert_eq!(exported["model_prefill_duration_us"], 8);
+        assert_eq!(exported["model_entry_to_first_raw_us"], 17);
+        assert_eq!(exported["model_entry_to_first_delivered_us"], 19);
+        assert_eq!(exported["model_decode_duration_us"], 13);
+        assert_eq!(exported["model_prefill_profile_us"]["tokens"], 4);
+        assert_eq!(exported["model_prefill_profile_us"]["embedding"], 3);
+        assert!(exported["command_submit_to_dequeue_us"].is_null());
+        assert!(exported["prompt_render_us"].is_null());
+        assert!(exported["actor_dequeue_to_worker_return_us"].is_null());
+    }
+
+    #[test]
+    fn fixture_profile_keeps_worker_return_separate_from_terminal_outcome() {
+        let session = fixture_session();
+        for (id, terminal) in [
+            ("returned", EngineTerminal::Returned),
+            ("cancelled", EngineTerminal::Cancelled),
+            ("receiver_closed", EngineTerminal::ReceiverClosed),
+        ] {
+            let mut record = begin(&session, id, "prompt", "");
+            record.engine_terminal = terminal;
+            let sequence = record.sequence;
+            session.finish_engine(record);
+            session.mark_worker_return(sequence, Duration::from_micros(41));
+            let retained = session.take_finished(sequence).unwrap();
+
+            assert_eq!(retained.engine_terminal, terminal);
+            assert_eq!(retained.actor_dequeue_to_worker_return_us, Some(41));
+        }
+    }
+
+    #[test]
+    fn fixture_profile_worker_return_waits_through_state_lock_contention() {
+        let session = fixture_session();
+        let record = begin(&session, "contended-return", "prompt", "");
+        let sequence = record.sequence;
+        session.finish_engine(record);
+
+        let state_guard = session.0.state.lock().unwrap();
+        let worker_session = session.clone();
+        let worker = std::thread::spawn(move || {
+            worker_session.mark_worker_return(sequence, Duration::from_micros(41));
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        drop(state_guard);
+        worker.join().unwrap();
+
+        let retained = session.take_finished(sequence).unwrap();
+        assert!(!retained.capture_incomplete);
+        assert!(retained.worker_return_observed);
+        assert_eq!(retained.actor_dequeue_to_worker_return_us, Some(41));
+    }
+
+    #[tokio::test]
+    async fn fixture_profile_waiter_tolerates_worker_return_lock_contention() {
+        let session = fixture_session();
+        let record = begin(&session, "contended-waiter", "prompt", "");
+        let sequence = record.sequence;
+        session.finish_engine(record);
+        session.mark_worker_return(sequence, Duration::from_micros(41));
+
+        let lock_session = session.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let lock_holder = std::thread::spawn(move || {
+            let state_guard = lock_session.0.state.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            drop(state_guard);
+        });
+        locked_rx.recv().unwrap();
+        let waiting_session = session.clone();
+        let waiter = tokio::spawn(async move { waiting_session.wait_finished(sequence).await });
+
+        assert!(waiter.await.unwrap().is_ok());
+        lock_holder.join().unwrap();
+        assert!(!session.incomplete());
     }
 
     #[test]
@@ -734,15 +958,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_finished_observes_completion_and_watchdog_marks_partial_unobserved() {
+    async fn fixture_profile_waits_for_worker_return_and_watchdog_marks_partial_unobserved() {
         let session = fixture_session();
         let record = begin(&session, "wait", "prompt", "");
         let sequence = record.sequence;
         session.finish_engine(record);
-        assert_eq!(
-            session.wait_finished(sequence).await.unwrap().sequence,
-            sequence
+        let waiting_session = session.clone();
+        let waiter = tokio::spawn(async move { waiting_session.wait_finished(sequence).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "record escaped before request worker return"
         );
+        session.mark_worker_return(sequence, Duration::ZERO);
+        assert_eq!(waiter.await.unwrap().unwrap().sequence, sequence);
 
         let mut limits = FixtureLimits::default();
         limits.generation_watchdog = Duration::from_millis(1);
