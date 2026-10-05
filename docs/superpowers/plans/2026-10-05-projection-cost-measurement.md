@@ -1,6 +1,6 @@
 # Projection Cost Measurement Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Identify allocation, layout conversion, decoding and computation costs in the existing projection kernel without promoting an optimization.
 
@@ -9,6 +9,12 @@
 **Tech Stack:** Rust, existing Rayon/serde/serde_json/GGUF APIs, Python standard library and `scripts/runtime_compare` supervision/private I/O. No new third-party dependencies.
 
 **Approved spec:** [projection cost measurement](../specs/2026-10-05-projection-cost-measurement-design.md).
+
+Implementation status: Tasks 1–3 are complete and independently reviewed through
+`281222b`. Live pilots exposed and fixed nested-timer and transpose-availability
+validation bugs. Task 4 has 15 accepted pairs across five cases; independent package review,
+version metadata, and publication remain pending.
+The original failed pilot is retained and counted toward the artifact budget.
 
 ## Global Constraints
 
@@ -75,7 +81,7 @@ pub struct ProjectionProfile {
 `None` means unavailable/not executed, not measured zero. Errors return the
 existing `QuantError`; they do not expose a partial success profile.
 
-- [ ] Add the feature and diagnostic module behind it. Start with the public API and failing integration tests; do not change arithmetic to make the tests pass.
+- [x] Add the feature and diagnostic module behind it. Start with the public API and failing integration tests; do not change arithmetic to make the tests pass.
 
 ```toml
 [features]
@@ -124,7 +130,7 @@ fn projection_profile_preserves_f32_bits() {
 }
 ```
 
-- [ ] Run the red phase:
+- [x] Run the red phase:
 
 ```bash
 CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --offline -p mivi-quant --features projection-diagnostics --test projection_diagnostics projection_profile -- --test-threads=1
@@ -132,8 +138,8 @@ CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --offline -p mivi-quant --feat
 
 Expected initial failure: diagnostic API is not implemented. Record the actual failure; missing dependencies require permission rather than a fabricated test result.
 
-- [ ] Extract the current body into private `quantized_matmul_rows_impl<const PROFILE: bool>` returning `Result<Option<ProjectionProfileInternal>>`; keep the original wrapper's signature and delegate to `<false>`. Use an always-compiled private internal record or equivalent no-op collector so default builds do not depend on the feature-gated public type. The feature-only wrapper invokes `<true>` and converts the record into `ProjectionProfile`. Do not duplicate arithmetic into a benchmark kernel.
-- [ ] Keep `compute_batched_rows` row iteration, SIMD calls, partition size, decode pairing and output layout unchanged. Add the same constant profiling parameter and return one worker record per existing row chunk. Retain `.try_for_each` on the unprofiled parallel path; only profiled execution collects per-worker records. Separate instantiations must not add default-path profile-vector allocations.
+- [x] Extract the current body into private `quantized_matmul_rows_impl<const PROFILE: bool>` returning `Result<Option<ProjectionProfileInternal>>`; keep the original wrapper's signature and delegate to `<false>`. Use an always-compiled private internal record or equivalent no-op collector so default builds do not depend on the feature-gated public type. The feature-only wrapper invokes `<true>` and converts the record into `ProjectionProfile`. Do not duplicate arithmetic into a benchmark kernel.
+- [x] Keep `compute_batched_rows` row iteration, SIMD calls, partition size, decode pairing and output layout unchanged. Add the same constant profiling parameter and return one worker record per existing row chunk. Retain `.try_for_each` on the unprofiled parallel path; only profiled execution collects per-worker records. Separate instantiations must not add default-path profile-vector allocations.
 
 Use this internal helper around existing operations; it returns the operation's
 result unchanged and reads the clock only inside the constant guard:
@@ -159,16 +165,16 @@ matvec wall time only. Empty work has no compute timers. Validate supported
 formats before executing any output-writing branch; unsupported formats fail
 without mutating caller output.
 
-- [ ] Extend the fixture matrix with finite nonzero F16/BF16/Q8_0/Q4_K/Q6_K weights, columns 512 for K-quants, and rows `RAYON_PARALLEL_THRESHOLD + 1` to cover odd parallel tails. Reuse the existing serialized nonzero quant-block construction in the unit tests; add Q6_K scale/bit-plane cases rather than all-zero weights. Run in local Rayon pools of 1 and 2 threads; compare bits only between profile modes in the same pool.
-- [ ] Add error tests for short out/input/weights, unsupported `Q4_0`, K-quant columns 255, and `usize::MAX` products. Initialize out with a finite sentinel and require it unchanged on error. Add empty batch/rows and exact supported branch-label checks. Require the six-format matrix to reject nonfinite output explicitly. Cross-branch matvec comparisons report maximum absolute/scaled error under the existing scale-aware test policy; never relax tolerances to silence a failure.
-- [ ] Run the green command above, followed sequentially by the default-feature regression command:
+- [x] Extend the fixture matrix with finite nonzero F16/BF16/Q8_0/Q4_K/Q6_K weights, columns 512 for K-quants, and rows `RAYON_PARALLEL_THRESHOLD + 1` to cover odd parallel tails. Reuse the existing serialized nonzero quant-block construction in the unit tests; add Q6_K scale/bit-plane cases rather than all-zero weights. Run in local Rayon pools of 1 and 2 threads; compare bits only between profile modes in the same pool.
+- [x] Add error tests for short out/input/weights, unsupported `Q4_0`, K-quant columns 255, and `usize::MAX` products. Initialize out with a finite sentinel and require it unchanged on error. Add empty batch/rows and exact supported branch-label checks. Require the six-format matrix to reject nonfinite output explicitly. Cross-branch matvec comparisons report maximum absolute/scaled error under the existing scale-aware test policy; never relax tolerances to silence a failure.
+- [x] Run the green command above, followed sequentially by the default-feature regression command:
 
 ```bash
 CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --offline -p mivi-quant matmul -- --test-threads=1
 ```
 
 Both require nonzero executed test counts. Inspect the default wrapper/constant guards to confirm clocks and collection are absent from default execution; do not claim compiled assembly verification without inspecting it.
-- [ ] Review the extraction against the pre-change kernel and commit only the four Task 1 files after `git diff --check`.
+- [x] Review the extraction against the pre-change kernel and commit only the four Task 1 files after `git diff --check`.
 
 ## Task 2 — Bounded operator executable and private I/O
 
@@ -176,7 +182,7 @@ Both require nonzero executed test counts. Inspect the default wrapper/constant 
 
 **Produces:** `projection_measure --input ABS_JSON --output ABS_JSON`, available only with model feature `projection-diagnostics`. One child prepares one case, runs one mode and returns a bounded private record. Model loading and input generation remain outside kernel timers.
 
-- [ ] Add feature forwarding and a gated example:
+- [x] Add feature forwarding and a gated example:
 
 ```toml
 # In the existing [features] table:
@@ -190,8 +196,8 @@ required-features = ["projection-diagnostics"]
 Forwarding fixture diagnostics permits reuse of the existing private example I/O
 without moving production modules. It does not wire diagnostics into the server.
 
-- [ ] Add generic `read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T>` to the existing I/O module using its bounded regular-file read. Preserve `read_input` as a validating ReplayInput wrapper. For the new generic reader pin the parent descriptor, open the basename with no-follow flags, reject nonregular/oversize/traversal inputs, and preserve existing replay tests. Reuse `PrivateOutput` via `#[path = "runtime_replay/io.rs"] mod private_io;` in the new example. Do not overwrite outputs or emit weights/activations to stdout.
-- [ ] Define the case input in `examples/projection_measure/case.rs` with `deny_unknown_fields`:
+- [x] Add generic `read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T>` to the existing I/O module using its bounded regular-file read. Preserve `read_input` as a validating ReplayInput wrapper. For the new generic reader pin the parent descriptor, open the basename with no-follow flags, reject nonregular/oversize/traversal inputs, and preserve existing replay tests. Reuse `PrivateOutput` via `#[path = "runtime_replay/io.rs"] mod private_io;` in the new example. Do not overwrite outputs or emit weights/activations to stdout.
+- [x] Define the case input in `examples/projection_measure/case.rs` with `deny_unknown_fields`:
 
 ```rust
 #[derive(serde::Deserialize)]
@@ -224,8 +230,8 @@ rank exactly 2, `cols=info.dims[0]`, `rows=info.dims[1]`, block alignment and
 checked byte spans. Use the real descriptor type, never a filename-derived type.
 Record tensor identity and paths only in private output.
 
-- [ ] Compute conservative buffer requirements before allocation: inputs, caller out, kernel row-major out, optional transposed inputs, and per-worker decoded/output scratch. Count up to `min(rows,threads)` workers. Use checked multiplication/addition, include synthetic weight bytes when allocated, and reject over-budget sizes before allocating. Mapping size is recorded separately from heap estimates; watchdog RSS remains authoritative.
-- [ ] Generate inputs with the exact deterministic rule below; weights use finite F32/F16/BF16 values or well-formed nonzero quant blocks from the Task 1 fixtures, never random bytes interpreted as floating scales:
+- [x] Compute conservative buffer requirements before allocation: inputs, caller out, kernel row-major out, optional transposed inputs, and per-worker decoded/output scratch. Count up to `min(rows,threads)` workers. Use checked multiplication/addition, include synthetic weight bytes when allocated, and reject over-budget sizes before allocating. Mapping size is recorded separately from heap estimates; watchdog RSS remains authoritative.
+- [x] Generate inputs with the exact deterministic rule below; weights use finite F32/F16/BF16 values or well-formed nonzero quant blocks from the Task 1 fixtures, never random bytes interpreted as floating scales:
 
 ```rust
 let inputs: Vec<f32> = (0..batch * cols)
@@ -250,7 +256,7 @@ If the selected shape exceeds that bound, reject it and explicitly select a
 smaller batch for a new case; do not silently truncate or alter work. Pilot
 `measured_calls` is 1; higher counts remain bounded and are not independent samples.
 
-- [ ] Start with unit tests asserting short/duplicate CLI arguments, unknown input fields, invalid counts/formats, budget overflow, missing/rank-invalid tensor and output collision fail. Add a small synthetic F32 round trip and finite quantized output tests. Add parent-symlink/output-symlink refusal and private output permission tests. Run red before implementing each contract.
+- [x] Start with unit tests asserting short/duplicate CLI arguments, unknown input fields, invalid counts/formats, budget overflow, missing/rank-invalid tensor and output collision fail. Add a small synthetic F32 round trip and finite quantized output tests. Add parent-symlink/output-symlink refusal and private output permission tests. Run red before implementing each contract.
 
 ```bash
 CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --offline -p mivi-model --features projection-diagnostics --example projection_measure -- --test-threads=1
@@ -259,7 +265,7 @@ CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test --offline -p mivi-model --feat
 
 Expected green: nonzero test counts in each command, existing replay I/O behavior
 preserved. Do not run a full model or all model tests for this I/O-only slice.
-- [ ] Review the new executable privacy/bounds, run `git diff --check`, then commit explicit Task 2 files.
+- [x] Review the new executable privacy/bounds, run `git diff --check`, then commit explicit Task 2 files.
 
 ## Task 3 — Private manifest, paired supervision and report tests
 
@@ -267,9 +273,9 @@ preserved. Do not run a full model or all model tests for this I/O-only slice.
 
 **Produces:** Python CLI `projection_measure.py --manifest ABS_JSON --output-dir ABS_DIR [--validate-only]`, functions `validate_manifest(value: dict) -> dict` and `run_session(settings: dict, output_dir: Path) -> dict`, and schema-1 report with all attempted samples and comparison status.
 
-- [ ] Define strict manifest fields: `schema`, absolute `binary`, 40-character `revision`, `repetitions`, `wall_seconds`, `session_seconds`, `rss_bytes`, `artifact_bytes`, `buffer_limit_bytes`, `model_limit_bytes`, `cases`. Cases have a unique safe `name`, `batch`, tagged `source` matching Task 2, `warmup_calls`, `measured_calls`; mode/threads are driver-owned. GGUF cases additionally require expected `model_sha256`. Reject duplicate JSON keys while parsing and reject bool-as-integer, unknown fields, duplicate names, relative/traversing/symlink paths and unsupported types.
-- [ ] Require repetitions 3 for the pilot, wall at most 180s, session at most 900s, RSS at most 2147483648 bytes, artifacts at most 67108864 bytes and positive heap/model limits. Limit manifest/input JSON to 64 KiB, case count to 16 and measured calls to 32. Bound predicted output-bit payload plus logs and reports before launching; reject sessions that cannot reserve at least 1 MiB for final reports. Explicitly selected smaller limits are valid; larger sessions need a separate reviewed decision.
-- [ ] Write red validation tests with a synthetic case and mocked executable validation:
+- [x] Define strict manifest fields: `schema`, absolute `binary`, 40-character `revision`, `repetitions`, `wall_seconds`, `session_seconds`, `rss_bytes`, `artifact_bytes`, `buffer_limit_bytes`, `model_limit_bytes`, `cases`. Cases have a unique safe `name`, `batch`, tagged `source` matching Task 2, `warmup_calls`, `measured_calls`; mode/threads are driver-owned. GGUF cases additionally require outer-case `expected_model_sha256`. Reject duplicate JSON keys while parsing and reject bool-as-integer, unknown fields, duplicate names, relative/traversing/symlink paths and unsupported types.
+- [x] Require repetitions 3 for the pilot, wall at most 180s, session at most 900s, RSS at most 2147483648 bytes, artifacts at most 67108864 bytes and positive heap/model limits. Limit manifest/input JSON to 64 KiB, case count to 16 and measured calls to 32. Bound predicted output-bit payload plus logs and reports before launching; reject sessions that cannot reserve at least 1 MiB for final reports. Explicitly selected smaller limits are valid; larger sessions need a separate reviewed decision.
+- [x] Write red validation tests with a synthetic case and mocked executable validation:
 
 ```python
 def test_boolean_batch_rejected(self):
@@ -289,8 +295,8 @@ Implement test helpers `valid_manifest`, `invoke_validate_only` and temporary
 `output_dir` in this test class; they construct explicit private temp paths and a
 64-column, 3-row, batch-9 F32 synthetic case. No model is needed for unit tests.
 
-- [ ] Implement validation-only without creating directories, spawning a child or loading/mapping model weights. Live preflight hashes executable/models through pinned regular-file descriptors, records actual hashes and revision, and refuses a model-hash mismatch. Do not assert a supplied revision proves binary provenance: retain the binary hash and the build command in private provenance.
-- [ ] Implement order `unprofiled/profiled`, `profiled/unprofiled`, `unprofiled/profiled` for repetitions 0/1/2. Spawn one child per mode/case/repetition, never parallel models. Allocate private sample directories and bounded input JSON via `PrivateDirectory`. Use existing `run_child`, with a session deadline and reserved cleanup/report allowance:
+- [x] Implement validation-only without creating directories, spawning a child or loading/mapping model weights. Live preflight hashes executable/models through pinned regular-file descriptors, records actual hashes and revision, and refuses a model-hash mismatch. Do not assert a supplied revision proves binary provenance: retain the binary hash and the build command in private provenance.
+- [x] Implement order `unprofiled/profiled`, `profiled/unprofiled`, `unprofiled/profiled` for repetitions 0/1/2. Spawn one child per mode/case/repetition, never parallel models. Allocate private sample directories and bounded input JSON via `PrivateDirectory`. Use existing `run_child`, with a session deadline and reserved cleanup/report allowance:
 
 ```python
 allowance = min(settings["wall_seconds"], deadline - time.monotonic())
@@ -310,9 +316,9 @@ well as drained channels. Retain supervision status/RSS scope/cleanup independen
 of runner status. Stop launching after cleanup failure; never relabel failure
 as a missing or successful sample. No shell commands or stdin protocol.
 
-- [ ] Parse bounded child results with exact schema/type/length checks and a 4 MiB per-result cap. Require finite times, finite output floats decoded from bits, compatible shape/source/branch/threads, `all_calls_bit_identical=true` in both modes, and matching reference output bits. Incompatible/failed samples do not contribute to successful medians. Summarize per-repetition call aggregates, then medians/ranges across three repetitions; repeated inner calls are not independent samples.
-- [ ] Report profiled/unprofiled total-call ratios only for matched work and compatible timer boundaries. Label instrumentation perturbed or uncertain when the absolute median difference exceeds 5% or observed noise prevents attribution; faster profiled calls do not prove negative overhead. The 5% threshold is a reporting policy, not proof of accurate clocks. Keep worker sums under `worker_work_ns` and serial elapsed fields under `wall_ns`; never calculate wall shares from worker sums. Batch-1 stage availability stays null.
-- [ ] Add mocked-child tests for order, bit mismatch, nonfinite output, malformed schema, overlarge result, timeout, RSS/artifact failure, collision/symlink/privacy, report-reserve exhaustion and cleanup failure halting launches. Exercise the existing supervisor's real timeout/cleanup tests sequentially as regression coverage.
+- [x] Parse bounded child results with exact schema/type/length checks and a 4 MiB per-result cap. Require finite times, finite output floats decoded from bits, compatible shape/source/branch/threads, `all_calls_bit_identical=true` in both modes, and matching reference output bits. Incompatible/failed samples do not contribute to successful medians. Summarize per-repetition call aggregates, then medians/ranges across three repetitions; repeated inner calls are not independent samples.
+- [x] Report profiled/unprofiled total-call ratios only for matched work and compatible timer boundaries. Label instrumentation perturbed or uncertain when the absolute median difference exceeds 5% or observed noise prevents attribution; faster profiled calls do not prove negative overhead. The 5% threshold is a reporting policy, not proof of accurate clocks. Keep worker sums under `worker_work_ns` and serial elapsed fields under `wall_ns`; never calculate wall shares from worker sums. Batch-1 stage availability stays null.
+- [x] Add mocked-child tests for order, bit mismatch, nonfinite output, malformed schema, overlarge result, timeout, RSS/artifact failure, collision/symlink/privacy, report-reserve exhaustion and cleanup failure halting launches. Exercise the existing supervisor's real timeout/cleanup tests sequentially as regression coverage.
 
 ```bash
 python3 -m unittest discover -s scripts/runtime_compare -p 'test_projection_measure.py'
@@ -322,13 +328,13 @@ python3 -m unittest discover -s scripts/runtime_compare -p 'test_supervisor_limi
 Expected green: nonzero test counts, no models loaded, no leaked mock children.
 If sandbox permissions deny a required mock operation, retry via the approval
 mechanism and disclose the failed attempt separately.
-- [ ] Review validation, deadline/accounting and privacy; commit only the two new Python files after `git diff --check`.
+- [x] Review validation, deadline/accounting and privacy; commit only the two new Python files after `git diff --check`.
 
 ## Task 4 — Bounded pilot, decision and completed release
 
 **Consumes:** Tasks 1–3 passing focused tests, approved explicit resource limits and local model. **Produces:** private paired results and a redacted evidence report; a decision for the next P1-A slice, not an optimized kernel.
 
-- [ ] Build just the new example:
+- [x] Build just the new example:
 
 ```bash
 CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo build --offline -p mivi-model --features projection-diagnostics --example projection_measure --release -j 1
@@ -337,9 +343,9 @@ CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo build --offline -p mivi-model --fea
 Expected: successful scoped example build. Record compiler/Cargo versions,
 commit, executable hash and feature flags privately. Do not rebuild llama.cpp or
 run a full-model comparison for diagnostic-only instrumentation.
-- [ ] Create a private session with `mktemp -d`; use existing `PrivateDirectory` for manifests/results. Inspect local GGUF descriptors to choose distinct compatible projection and FFN shapes/types explicitly. Do not assume architecture or tensor names. Start with a small synthetic serial and parallel-tail case; select real weight tensors only after bounds are computed. Use batch 64 plus one small or tail batch for selected shapes within the 15-minute budget; do not run the complete combinatorial test matrix as a live benchmark.
-- [ ] Record CPU/features/RAM/OS, swap/load/thermal caveats, private model/binary hashes, descriptor shape/type and exact case/repetition/warmup conditions. Choose `model_limit_bytes` from the actual file size plus a checked allowance, not an architecture constant. Generate a private manifest for the new driver; set all pilot limits explicitly. No system cache flush.
-- [ ] Validate then run using user-created private paths (these paths are examples, not presumed existing):
+- [x] Create a private session with `mktemp -d`; use existing `PrivateDirectory` for manifests/results. Inspect local GGUF descriptors to choose distinct compatible projection and FFN shapes/types explicitly. Do not assume architecture or tensor names. Start with a small synthetic serial and parallel-tail case; select real weight tensors only after bounds are computed. Use batch 64 plus one small or tail batch for selected shapes within the 15-minute budget; do not run the complete combinatorial test matrix as a live benchmark.
+- [x] Record CPU/features/RAM/OS, swap/load/thermal caveats, private model/binary hashes, descriptor shape/type and exact case/repetition/warmup conditions. Choose `model_limit_bytes` from the actual file size plus a checked allowance, not an architecture constant. Generate a private manifest for the new driver; set all pilot limits explicitly. No system cache flush.
+- [x] Validate then run using user-created private paths (these paths are examples, not presumed existing):
 
 ```bash
 python3 scripts/runtime_compare/projection_measure.py --manifest /tmp/mivi-projection-session/manifest.json --output-dir /tmp/mivi-projection-session/results --validate-only
@@ -349,8 +355,8 @@ python3 scripts/runtime_compare/projection_measure.py --manifest /tmp/mivi-proje
 Require validation creates no output/child. Retain all actual statuses and
 cleanup evidence. Count completed pairs explicitly; a failed/budget-limited
 pilot is evidence, not permission to silently raise limits or omit failures.
-- [ ] Verify profile/unprofiled bit agreement, nonfinite rejection, default-path tests and profiler disturbance. Publish median/range call times and separate serial/parallel clock interpretation. Discuss which allocation/transpose/decode/compute costs are measurable and which remain uncertain; do not reuse Phase 0 operator percentages as new measurements.
-- [ ] Write `docs/PROJECTION_COST_EVIDENCE_2026-10-05.md` with redacted provenance, results, failures, instrumentation caveats and exactly one next decision: caller-owned scratch experiment, faithful locality experiment, or insufficient evidence. Keep master P1-A optimization/promotion boxes unchecked; mark only cost measurement complete if the actual data supports that status.
+- [x] Verify profile/unprofiled bit agreement, nonfinite rejection, default-path tests and profiler disturbance. Publish median/range call times and separate serial/parallel clock interpretation. Discuss which allocation/transpose/decode/compute costs are measurable and which remain uncertain; do not reuse Phase 0 operator percentages as new measurements.
+- [x] Write `docs/PROJECTION_COST_EVIDENCE_2026-10-05.md` with redacted provenance, results, failures, instrumentation caveats and exactly one next decision: caller-owned scratch experiment, faithful locality experiment, or insufficient evidence. Keep master P1-A optimization/promotion boxes unchecked; mark only cost measurement complete if the actual data supports that status.
 - [ ] Self-review the diff, private file modes, nonzero test counts, bounds/cleanup and profile type/clock claims. Request Luna/high review if available; disclose capacity failures without claiming independent approval. Fix introduced findings, rerun affected focused commands and run `git diff --check`.
 - [ ] After acceptance, increment the then-current workspace patch version once, update all 14 local lockfile package versions without changing third-party dependencies, and add changelog sources: approved spec/Phase 0 evidence, Colibri methodology and pinned GGML numerical-path context. State measurement-only scope, unresolved cross-engine divergence and no default kernel promotion. Do not bump at intermediate task commits.
 - [ ] Stage explicit task-owned docs/release files, inspect `git diff --cached --check` and staged paths, commit, then non-force push `feat/runtime-parity-profiling`. Verify remote branch hash equals local HEAD; leave `.gitignore` unstaged.
