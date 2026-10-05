@@ -8,6 +8,7 @@ description = "GGUF parser, hybrid LFM architecture (SSM+GQA), LoRA adapters, fo
 
 [features]
 fixture-diagnostics = []
+projection-diagnostics = ["fixture-diagnostics", "mivi-quant/projection-diagnostics"]
 
 [dependencies]
 mivi-core.workspace = true
@@ -29,3 +30,7 @@ libc.workspace = true
 [[example]]
 name = "runtime_replay"
 required-features = ["fixture-diagnostics"]
+
+[[example]]
+name = "projection_measure"
+required-features = ["projection-diagnostics"]
