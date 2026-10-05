@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.68] - 2026-10-05
+
+### Bounded CPU Runtime Evidence — Phase 0, Task 6
+
+#### Ideas, Inspirations & Sources
+
+- Controlled paired measurements follow [Colibri's benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Numerical evidence boundaries follow [Kimi's fixture guidance](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/tests/fixtures/README.md).
+- Quantized operand-path analysis uses [pinned GGML CPU traits](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cpu/ggml-cpu.c);
+  hybrid-state caveats draw on [LMCache guidance](https://docs.lmcache.ai/recipes/kimi_linear.html).
+
+#### Documentation and Evidence
+
+- Publish a redacted [runtime evidence report](docs/CPU_RUNTIME_EVIDENCE_2026-10-05.md):
+  three paired repetitions at 110/1024/2636 prompt tokens, 18 completed runs,
+  plus three separate native profile controls with matching outputs.
+- Long native prefill median is 84.243s; projections/FFNs consume 72.61% of
+  counted forward-stage time in the separate long control. Select P1-A faithful
+  scratch/locality experiments, starting with cost isolation rather than an
+  assumed allocation bottleneck.
+- Disclose reproducible short/medium output divergence, unequal medium decode
+  lengths, unmatchable first-step EOS policy and incompatible timing boundaries.
+  Long output agreement does not establish general cross-engine parity.
+- Correct historical Q8 lossless claims to lossy, F32 K+V 4K storage to 96MiB
+  for the stated dimensions, and label historical speedup goals/defaults.
+
+#### Scope and Verification
+
+- 54 focused comparison tests passed; scoped replay and pinned reference targets
+  built with one job. Inference used two threads, sequential workloads and
+  explicit wall/RSS/artifact limits. Cleanup succeeded for all measured runs.
+- Measured Mivi is v0.2.67 at `5c49b97`; this release changes documentation and
+  version metadata, not inference kernels. Raw experiment artifacts remain
+  private. Numerical divergence remains unresolved; no kernel speedup,
+  cross-engine parity or coding-agent quality claim is made.
+
+---
+
 ## [v0.2.67] - 2026-10-03
 
 ### Independent Adversarial Arithmetic and Hybrid Oracle — Phase 0, Task 5

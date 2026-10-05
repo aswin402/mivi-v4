@@ -1,7 +1,14 @@
 # Mivi CPU agent runtime: research and proposed roadmap
 
 Research date: 2026-10-02. Baseline: Mivi 0.2.62, commit `0fe99c81275ef9dbef1f133ad8f5a59a1584b83f`.
-Status: research complete; detailed implementation planning requested on 2026-10-02. See the [master roadmap and TODO](superpowers/plans/2026-10-02-native-cpu-agent-improvements.md) and [first execution package](superpowers/plans/2026-10-02-runtime-parity-and-profiling.md). Implementation has not begun as part of this planning request; optional expansion still needs separate approval.
+Status (2026-10-05): Phase 0 Tasks 1–5 are implemented and released through
+v0.2.67: bounded replay/comparison tooling, profiling/lifecycle boundaries, and
+independent arithmetic/hybrid fixtures. Task 6 has completed the bounded evidence
+package; see the [measured findings and unresolved numerical limits](CPU_RUNTIME_EVIDENCE_2026-10-05.md).
+P1-A is selected for projection/FFN experiments. Cross-engine parity and
+approximate-mode promotion remain unestablished. See the [master roadmap and TODO](superpowers/plans/2026-10-02-native-cpu-agent-improvements.md)
+and [first execution package](superpowers/plans/2026-10-02-runtime-parity-and-profiling.md).
+Optional expansion still needs separate approval.
 
 ## Recommendation
 
@@ -68,12 +75,12 @@ Inspection scope: project READMEs, selected official documentation, Kimi fixture
 
 ### Phase 0 — trustworthy comparison and numerical diagnosis
 
-- [ ] Turn the existing private diagnostic replay into a bounded, reproducible comparison workflow, retaining non-default diagnostic exposure.
-- [ ] Match effective BOS/EOS, stop handling, sampler history/penalties, context, KV precision, prompt IDs, thread count and output cap. Track terminal-token inclusion separately from generated content.
-- [ ] Run profiled and unprofiled controls. Record queue, render/tokenize, prefill, first raw output, first client-visible content/tool delta, decode, parse/finish and physical worker return as separate boundaries.
-- [ ] Export existing attention/SSM substage aggregates: QKV/input/output projections, FFN, causal attention scan and convolution. Measure allocation/copy/transpose costs only if stage evidence warrants them.
-- [ ] Investigate the first output divergence with teacher-forced identical prefixes and bounded logit/state comparisons. Distinguish rounding or quantized-activation differences from graph/state bugs; do not require every cross-engine greedy token to match when logits are near-tied.
-- [ ] Strengthen tiny independent fixtures: real quant-block scales/mins/nibbles, odd row/tile tails, nonuniform weights, carried convolution state, GQA/RoPE positions, reset and continuation. Compare the same dequantized GGUF weights, not an unrelated original checkpoint.
+- [x] Turn the existing private diagnostic replay into a bounded, reproducible comparison workflow, retaining non-default diagnostic exposure (Tasks 1–3).
+- [x] Verify requested/effective BOS, sampler penalties, context, KV precision, numeric IDs, threads and output cap; retain terminal tokens separately. Task6 documents the unmatchable first-step EOS suppression rather than claiming identical terminal policy.
+- [x] Run separate profile controls and unprofiled pairs. Task6 labels model prefill/callback/decode clocks and unavailable router/client TTFT; Task4's separate fixture boundary coverage is not a measured real-agent result.
+- [x] Export existing attention/SSM substage aggregates: QKV/input/output projections, FFN, causal attention scan and convolution (Tasks 1/4). Allocation/copy/transpose attribution remains a subsequent measurement.
+- [x] Probe short/medium first divergences with identical shared prefixes and bounded selected scores. Task6 reports ranking disagreements and precise missing raw-logit/activation/state evidence; the cause is unresolved and the medium disagreement is not merely a near tie.
+- [x] Strengthen tiny independent fixtures: quant-block scales/mins/nibbles, odd row/tile tails, nonuniform weights, carried convolution state, GQA/RoPE positions, reset and continuation (Task 5). The hybrid graph is F32; Q4_K/Q6_K arithmetic is tested independently on serialized quant blocks.
 
 Gate: reproducible report with known confounders, substage breakdown, and explained or explicitly unresolved divergence. Any confirmed correctness bug is fixed before promoting a faster default.
 

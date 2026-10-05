@@ -2,6 +2,13 @@
 
 **Date:** September 2, 2026  
 **Project:** Mivi-v4  
+**Review (2026-10-05):** This is a historical design note. See the
+[runtime evidence plan](superpowers/plans/2026-10-02-runtime-parity-and-profiling.md)
+and [measured findings](CPU_RUNTIME_EVIDENCE_2026-10-05.md) for current validation
+gates. The measured library default remains token-major in v0.2.67;
+tile64 is an explicitly selected diagnostic setting. Memory figures below cover
+K+V storage only; throughput targets require repeated measurements.
+
 **Topics:** 
 1. **Quantized Attention KV Cache (`Q8_0`, `Q4_0`, and Asymmetric KIVI-style compression)**
 2. **High-Throughput Chunked Prefill & SIMD Tiled GEMM (Sarathi & llama.cpp `n_ubatch` architecture)**
@@ -40,15 +47,21 @@ graph TD
 In long-context inference (64K / 128K tokens), the KV cache size grows linearly with sequence length $L$:
 $$\text{Memory}_{\text{KV}} = 2 \times N_{\text{attn\_layers}} \times L \times d_{\text{kv}} \times \text{bytes\_per\_element}$$
 
-For Mivi's hybrid architecture ($N_{\text{attn\_layers}} = 6, d_{\text{kv}} = 512$):
+For the illustrative hybrid configuration ($N_{\text{attn\_layers}} = 6, d_{\text{kv}} = 512$),
+the F32 4K calculation is `2*6*4096*512*4 = 100663296 bytes = 96 MiB`.
+Loaded-model dimensions determine actual allocation; exclude SSM, allocator,
+activation and prefix-snapshot overhead from this storage-only table:
+
 | Precision | Bytes per Value | 4K Context | 32K Context | 64K Context | 128K Context |
 |---|---|---|---|---|---|
-| **FP32** | 4.0 bytes | 24.5 MB | 196 MB | 393 MB | 786 MB |
-| **FP16** | 2.0 bytes | 12.3 MB | 98 MB | 196 MB | 393 MB |
-| **Q8_0** (32-block) | 1.0625 bytes | **6.5 MB** | **52 MB** | **104 MB** | **208 MB** |
-| **Q4_0** (32-block) | 0.5625 bytes | **3.4 MB** | **27 MB** | **55 MB** | **110 MB** |
+| **FP32** | 4.0 bytes | 96 MiB | 768 MiB | 1536 MiB | 3072 MiB |
+| **FP16** | 2.0 bytes | 48 MiB | 384 MiB | 768 MiB | 1536 MiB |
+| **Q8_0** (32-block) | 1.0625 bytes | **25.5 MiB** | **204 MiB** | **408 MiB** | **816 MiB** |
+| **Q4_0** (32-block) | 0.5625 bytes | **13.5 MiB** | **108 MiB** | **216 MiB** | **432 MiB** |
 
-*(Note: For a pure 16-layer transformer, these numbers are $2.67\times$ larger! Mivi's hybrid design already saves 62.5% of KV cache memory).*
+For 16 attention layers at the same KV width and context, multiply the table by
+`16/6`. This illustrative layer-count comparison reduces KV storage by 62.5%; it
+does not account for the hybrid model's additional recurrent state.
 
 #### 2. The Pitfall: Dequantization Overhead
 Research from `llama.cpp` and `FlashInfer` reveals that if an engine dequantizes cached keys/values to FP32 into a temporary buffer for every single token forward step, the memory bandwidth cost of writing and reading temporary buffers **destroys token generation throughput**.
@@ -59,7 +72,9 @@ Research from `llama.cpp` and `FlashInfer` reveals that if an engine dequantizes
 #### 3. Key vs. Value Sensitivity (KIVI Asymmetric Insight)
 - **Key vectors** undergo exponential scaling in Softmax: $\exp\left(\frac{q \cdot k}{\sqrt{d}}\right)$. Even small quantization noise on high-magnitude key channels causes severe distribution drift.
 - **Value vectors** undergo linear weighted combination: $O = \sum \alpha_i v_i$. They are significantly more resilient to quantization.
-- **Mivi Design**: We support symmetric `Q8_0` (lossless, 73.4% memory reduction) and asymmetric `Q8_0 Key + Q4_0 Value` (81.6% memory reduction).
+- **Mivi Design**: `Q8_0` is lossy. For aligned 32-element blocks, symmetric
+  Q8_0 storage uses 73.4% fewer bytes than F32; asymmetric `Q8_0 Key + Q4_0 Value`
+  uses 79.7% fewer bytes. These are storage ratios, not model-quality guarantees.
 
 ---
 
@@ -76,7 +91,7 @@ graph TD
 ```
 
 #### 1. The Bottleneck of Token-by-Token Prefill
-Currently, when a 2,000-token prompt is submitted to Mivi:
+The September 2, 2026 token-major bandwidth model assumed:
 - For each token $t \in [0, 2000]$, Mivi loads all layer weights from memory to compute GEMV (matrix-vector multiplication).
 - For a 350M model (~250 MB weights), processing 2,000 tokens sequentially requires reading **$2,000 \times 250\text{ MB} = 500\text{ GB}$ of RAM bandwidth**!
 - At a CPU memory bandwidth of $50\text{ GB/s}$, the physical lower bound on prefill time is $500 / 50 = 10\text{ seconds}$!
@@ -86,7 +101,10 @@ If we process tokens in tiles of $B = 64$ or $B = 128$ tokens (`n_ubatch`):
 - All $B$ token embeddings $X \in \mathbb{R}^{B \times d}$ are projected in a single **Cache-Blocked Matrix-Matrix Multiplication (GEMM)**:
   $$Q, K, V = X \cdot W^T$$
 - The weights $W$ are loaded from memory **only ONCE for every $B$ tokens**, reducing memory bandwidth traffic by **$B\times$** (e.g. $64\times$ reduction)!
-- For a 2,000-token prompt with $B = 128$, total weight memory reads drop from 500 GB down to **$3.9\text{ GB}$**, dropping prefill latency from 10s down to **$< 0.8\text{s}$ (over 10x faster TTFT)!**
+- The idealized 2,000-token/$B=128$ model estimates weight reads of 3.9 GB
+  instead of 500 GB. It does not measure cache traffic, compute, packing,
+  recurrent state, or request latency. The earlier <0.8s/10x claim remains an
+  unmeasured design goal.
 
 #### 3. Hybrid SSM + Attention Batch Prefill
 - **SSM Layers (ShortConv + Linear State)**:
@@ -149,7 +167,7 @@ pub fn dot_f32_q8_0_avx2(q_f32: &[f32], k_block_34: &[u8]) -> f32 {
 
 ```rust
 pub struct PrefillChunkConfig {
-    /// Micro-batch tile size for CPU cache-blocked GEMM (default: 64 tokens)
+    /// Historical proposed tile size: 64; library default remains token-major.
     pub chunk_size: usize,
 }
 
@@ -208,9 +226,12 @@ gantt
 
 ## 4. Expected Performance & Memory Impact
 
-1. **KV Cache RAM Usage at 64,000 Tokens**:
-   - `FP32`: 393 MB $\to$ **`Q8_0`: 104 MB** $\to$ **`Q4_0`: 55 MB** (73% to 86% memory reduction).
+1. **KV Cache RAM Usage at 65,536 Tokens**:
+   - For 65,536 tokens with the illustrative dimensions: `FP32` 1536 MiB,
+     `Q8_0` 408 MiB, `Q4_0` 216 MiB (storage-only reductions of 73.4%/85.9%).
 2. **Cold TTFT on a 2,000-Token Prompt**:
-   - Sequential Prefill: ~8.0 seconds $\to$ **Chunked Tiled GEMM: ~0.8 – 1.2 seconds (6x–10x speedup)**.
+   - The historical ~8s to ~0.8–1.2s (6x–10x) figures are unmeasured goals;
+     use the dated observations above and the runtime evidence plan for results.
 3. **Warm Prefix Hits (LMCache)**:
-   - Remains instant ($< 0.05\text{ ms}$) via 64-token hybrid snapshot restores.
+   - Restore copies matching KV intervals and recurrent checkpoints. Its cost
+     grows with restored data; <0.05ms has not been established by these notes.

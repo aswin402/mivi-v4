@@ -28,7 +28,7 @@ This is the master roadmap and TODO tracker. The [Phase 0 plan](2026-10-02-runti
 
 - [x] Research the eight requested projects and primary papers; document applicability and limitations in [the research report](../../AGENT_CPU_RUNTIME_RESEARCH_AND_PLAN.md).
 - [x] Obtain an initial matched-ID, two-thread CPU comparison. **Single samples only; output divergence remains unresolved.**
-- [ ] P0. Establish repeatable timing, substage attribution, numerical diagnosis, and independent oracle coverage.
+- [x] P0. Establish repeatable timing, substage attribution, numerical diagnosis, and independent oracle coverage. [Task6 findings](../../CPU_RUNTIME_EVIDENCE_2026-10-05.md) retain unresolved short/medium ranking differences; parity/approximate promotion remains blocked.
 - [ ] P1. Select and implement one measured native optimization, then reassess.
 - [ ] P2. Validate and improve exact multi-turn prefix reuse.
 - [ ] P3. Validate architecture/capability declarations and bounded agent interoperability.
@@ -68,11 +68,11 @@ Names without a directory in a table cell belong to the directory of its first f
 
 **Deliverables:** private replay manifest/results, existing substage export, repeated matched comparison, teacher-forced divergence report, adversarial independent fixtures, corrected research notes.
 
-- [ ] Execute Tasks 1–6 in [the detailed P0 plan](2026-10-02-runtime-parity-and-profiling.md).
+- [x] Execute Tasks 1–6 in [the detailed P0 plan](2026-10-02-runtime-parity-and-profiling.md).
 - [x] Record long-case split-prefill versus normal-call parity, not only the existing short check. Task2's 110/2636-token LFM fixture passed both cases; this is same-engine synthetic evidence only.
-- [ ] Compare profiled versus unprofiled runs and preserve timeout/failure records.
-- [ ] Explain output divergence or mark it unresolved with the precise missing evidence.
-- [ ] Fix confirmed graph/state/quantization errors as individually reviewed increments before kernel promotion.
+- [x] Compare separate profile controls against three unprofiled samples per workload; outputs/stopping match, timing variation is disclosed, and setup failures are identified separately.
+- [x] Mark short/medium divergence unresolved with missing reference raw logits and real-model hybrid/activation traces; long outputs match in all three pairs.
+- [x] Correct the independently tested Python reference RoPE/reset gaps in Task5. No real-model graph/layout defect is confirmed by Task6; future regressions still block promotion.
 
 **Exit gate:** three paired samples per workload with medians/ranges, matched effective settings and IDs, distinct timing boundaries, substage evidence, independently checked quantized arithmetic/hybrid state, and no hidden failures. Full hidden-state parity with llama.cpp is not assumed available through its HTTP API.
 
@@ -192,9 +192,9 @@ Sources and evidence boundaries are maintained in [the research report](../../AG
 
 ## Immediate next action
 
-Tasks1–3 implemented the bounded contract/profile export, private replay with
-short/long same-engine parity, and the supervised paired-comparison driver.
-Task3's native-only smoke and synthetic tests are not a real paired benchmark.
-Next execute P0 Task4: router timing and profiling controls, distinguishing
-headers/heartbeats from useful output and physical worker return. Do not promote kernels or claim agent-quality
-improvements before the remaining numerical and measurement gates.
+Tasks1–6 have completed the Phase0 evidence package. The measured runtime is
+v0.2.67; this documentation checkpoint does not change its inference arithmetic.
+Select P1-A only: first measure projection/FFN allocation, transpose, decode and
+compute, then evaluate faithful scratch/locality improvements. Short/medium
+cross-engine divergence is unresolved; approximate modes and parity claims remain
+blocked. Agent quality still needs the separate P3 evaluation.

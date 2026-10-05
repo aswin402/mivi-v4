@@ -1,6 +1,13 @@
 # Research & Architectural Analysis: AirLLM & Colibrì
 
 **Date:** September 2, 2026  
+**Review (2026-10-05):** The Mivi sections below are historical proposals, not
+implemented capabilities or measured speedups. Expert residency requires a
+supported MoE graph and demonstrated memory pressure. The current CPU work is
+tracked in the [native runtime roadmap](superpowers/plans/2026-10-02-native-cpu-agent-improvements.md)
+and [measured CPU evidence](CPU_RUNTIME_EVIDENCE_2026-10-05.md); offloading,
+expert heat maps, and the proposed dashboard remain separate design work.
+
 **Sources:**
 - **AirLLM**: *Layer-by-Layer Weight Streaming & Asynchronous Prefetching* ([github.com/lyogavin/airllm](https://github.com/lyogavin/airllm))
 - **Colibrì**: *Tiny Engine, Immense Model — AI Memory Multitiering & JIT for Weights* ([github.com/JustVugg/colibri](https://github.com/JustVugg/colibri))

@@ -345,19 +345,24 @@ Start F32 tiny-graph acceptance at `atol=1e-4`, `rtol=1e-4`. Any failure require
 
 ## Task 6 — Execute bounded evidence run, correct docs, and hand off
 
-**Files:** modify research report and affected research notes; update this plan's checkboxes only after evidence exists. Measurements remain private. Release files change only if completed implementation is being released.
+**Files:** modify research report and affected research notes; update this plan's checkboxes only after evidence exists. Measurements remain private. Under the user's standing release policy, the completed evidence/documentation update receives v0.2.68; measured binaries remain v0.2.67 and no runtime implementation change is claimed.
 
 **Consumes:** Tasks1–5 passing tests and explicit paths/budget. **Produces:** private paired report plus a redacted committed findings summary identifying the next optimization or correctness fix.
 
-- [ ] Record CPU/features/RAM, binary revisions/hashes, model SHA256, tensor-format inventory, OS/thermal caveats, sampler and terminal policies. Reference baseline model hash is `b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5`; a mismatch is a different experiment, not the same baseline.
-- [ ] Validate manifest via `python3 scripts/runtime_compare/compare.py --manifest /tmp/mivi-runtime-session/manifest.json --output-dir /tmp/mivi-runtime-session/results --validate-only`. These are example user-created private paths; do not presume they already exist. Expected: validated budgets/paths, no model loaded/process started.
-- [ ] Run the same command without `--validate-only` after approval of live resource usage. Measure three paired repetitions for each short/medium/long workload; order Mivi/reference, reference/Mivi, Mivi/reference. Retain failures and run separate profile controls, never substitute profiled samples into unprofiled medians.
-- [ ] Record cold inference state separately from OS page-cache warmth; no system-wide cache flush. Decode comparisons require matched output lengths or per-token disclosure, not equal total time assertions.
-- [ ] Complete first-divergence score/terminal diagnosis; use Task5 to distinguish graph/state/layout errors from near-tied or changed-arithmetic decisions. Record unresolved causes explicitly.
-- [ ] Correct `Q8 lossless` claims to lossy, label6×–10× historical goals as unmeasured, and correct F32 K+V4K arithmetic to `2*6*4096*512*4 = 100663296 bytes = 96MiB`, excluding SSM/allocator/prefix overhead. Annotate historical prefill defaults by date.
-- [ ] Select exactly one next package from the master roadmap using measured substage costs. Publish relative contributions and uncertainty, not “attention is slow” from whole-block aggregates.
-- [ ] Self-review privacy, nonzero test counts, bounds/cleanup, correctness gaps and claimed performance. Run `git diff --check`; stage only reviewed task-owned documentation.
-- [ ] If releasing completed diagnostic implementation, apply the master release checklist once to that increment; otherwise leave release status explicitly pending. Changelog sources: Kimi fixtures, Colibri protocol, GGML quant/repack, relevant hybrid-cache guidance, and Liquid tool card where used.
+- [x] Record CPU/features/RAM, binary revisions/hashes, model SHA256, tensor-format inventory, OS/thermal caveats, sampler and terminal policies. Task6's 2026-10-05 private provenance matches reference baseline model hash `b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5`; a mismatch is a different experiment, not the same baseline.
+- [x] Validate an explicitly created private manifest with `--validate-only`; no result directory or child is created. Tokenizer-derived normalized counts are 110/1024/2636; the pinned reference version/help checks confirm all required flags.
+- [x] Run the same command without `--validate-only` after approval of live resource usage. Measure three paired repetitions for each short/medium/long workload; order Mivi/reference, reference/Mivi, Mivi/reference. All 18 runs and three separate profile controls completed; controls are excluded from unprofiled medians.
+- [x] Record cold inference state separately from OS page-cache warmth; no system-wide cache flush. Disclose native/reference medium content lengths 48/19 and native per-content-token decode boundaries; reference per-token decode and client TTFT are unavailable.
+- [x] Complete bounded first-divergence score/terminal diagnosis. Short/medium first differ at generated positions 1/11; native token-major probes reproduce chunked choices. Full reference logits/intermediate states are unavailable, so the cause remains explicitly unresolved; Task5 coverage does not prove full quantized-model parity.
+- [x] Correct `Q8 lossless` claims to lossy, label6×–10× historical goals as unmeasured, and correct F32 K+V4K arithmetic to `2*6*4096*512*4 = 100663296 bytes = 96MiB`, excluding SSM/allocator/prefix overhead. Annotate historical prefill defaults by date.
+- [x] Select exactly one next package: P1-A faithful projection/FFN scratch/locality experiments. The long control attributes 72.61% to projections/FFNs, 26.86% to the causal scan and 0.15% to convolution; nested FFN shares are not added to totals. Allocation/transpose/decode/compute isolation comes first.
+- [x] Self-review privacy, 54 passing focused tests, bounds/cleanup, correctness gaps and claimed performance. `git diff --check` passed; stage only reviewed task-owned documentation and release metadata, excluding the user's `.gitignore` change and private artifacts.
+- [x] Apply the user's patch-release policy once: v0.2.68 evidence/documentation release metadata and changelog. Sources: Kimi fixtures, Colibri protocol, pinned GGML quant/repack, and relevant hybrid-cache guidance. Preserve v0.2.67 measured-binary provenance.
+
+Execution evidence: [redacted Task6 report](../../CPU_RUNTIME_EVIDENCE_2026-10-05.md).
+The 35-minute paired budget completed in 746.26s; separate controls remained
+within their 10-minute budget. All supervised cleanup succeeded. This completes
+the evidence gate with unresolved numerical limits, not a parity promotion.
 
 ## Acceptance and handoff
 
