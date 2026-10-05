@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.69] - 2026-10-05
+
+### Projection Cost Diagnostics — P1-A Measurement Slice
+
+#### Ideas, Inspirations & Sources
+
+- Follow the [approved projection measurement design](docs/superpowers/specs/2026-10-05-projection-cost-measurement-design.md) and [Phase 0 runtime evidence](docs/CPU_RUNTIME_EVIDENCE_2026-10-05.md).
+- Alternating paired runs, explicit clock boundaries, and retained negative results draw on [Colibri's benchmark methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Faithful numerical-path constraints use [pinned GGML CPU traits](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cpu/ggml-cpu.c) as context; no GGML kernel was copied or promoted.
+
+#### Added and Fixed
+
+- Add opt-in shared-arithmetic projection diagnostics and a gated operator example, using synthetic F32 activations with synthetic weights or metadata-selected GGUF matrices. Default calls remain unprofiled.
+- Add bounded, privately retained paired measurements through the existing process supervisor. Separate outer call wall time, inner kernel stages, and overlapping worker-work durations.
+- Preserve exact paired output comparisons while compacting report metadata; exclude unmatched runs from timing medians and release paired output buffers.
+- Cover empty work, overflow, six supported formats, branch boundaries and odd parallel tails. Correct BF16 format validation, nested timer validation, and transpose availability for the actual kernel branches.
+
+#### Evidence, Limits & Verification
+
+- Publish the [projection cost evidence](docs/PROJECTION_COST_EVIDENCE_2026-10-05.md): 15 accepted pairs across five cases. All 84 children cleaned up; 27 earlier validation-error records remain unchanged. Private artifacts total 58,372,289 bytes, below the combined 64 MiB ceiling.
+- Select a faithful locality experiment around the largest measured accumulation-work category. This is a hypothesis, not proof of a locality bottleneck, predicted speedup, or production promotion.
+- 86 focused Rust/Python tests passed; the scoped diagnostic release example built without warnings. Cargo used one job, Rust tests one thread, and operators two threads. No full-workspace check/build/test ran.
+- GGUF diagnostic mapping requires Linux and quiescent input files. Raw results, local paths, and model/binary hashes remain private.
+- Measurements used workspace v0.2.68; this release adds diagnostics and metadata, not an optimized inference kernel. Synthetic operator measurements do not establish real-model latency or coding-agent quality; existing cross-engine divergence remains unresolved.
+
+---
+
 ## [v0.2.68] - 2026-10-05
 
 ### Bounded CPU Runtime Evidence — Phase 0, Task 6

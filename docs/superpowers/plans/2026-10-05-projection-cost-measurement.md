@@ -12,8 +12,9 @@
 
 Implementation status: Tasks 1–3 are complete and independently reviewed through
 `281222b`. Live pilots exposed and fixed nested-timer and transpose-availability
-validation bugs. Task 4 has 15 accepted pairs across five cases; independent package review,
-version metadata, and publication remain pending.
+validation bugs. Task 4 has 15 accepted pairs across five cases. Final package
+review accepted the measurement-only slice at `a75bb09` with no findings;
+v0.2.69 metadata is prepared, and publication remains pending.
 The original failed pilot is retained and counted toward the artifact budget.
 
 ## Global Constraints
@@ -357,8 +358,8 @@ cleanup evidence. Count completed pairs explicitly; a failed/budget-limited
 pilot is evidence, not permission to silently raise limits or omit failures.
 - [x] Verify profile/unprofiled bit agreement, nonfinite rejection, default-path tests and profiler disturbance. Publish median/range call times and separate serial/parallel clock interpretation. Discuss which allocation/transpose/decode/compute costs are measurable and which remain uncertain; do not reuse Phase 0 operator percentages as new measurements.
 - [x] Write `docs/PROJECTION_COST_EVIDENCE_2026-10-05.md` with redacted provenance, results, failures, instrumentation caveats and exactly one next decision: caller-owned scratch experiment, faithful locality experiment, or insufficient evidence. Keep master P1-A optimization/promotion boxes unchecked; mark only cost measurement complete if the actual data supports that status.
-- [ ] Self-review the diff, private file modes, nonzero test counts, bounds/cleanup and profile type/clock claims. Request Luna/high review if available; disclose capacity failures without claiming independent approval. Fix introduced findings, rerun affected focused commands and run `git diff --check`.
-- [ ] After acceptance, increment the then-current workspace patch version once, update all 14 local lockfile package versions without changing third-party dependencies, and add changelog sources: approved spec/Phase 0 evidence, Colibri methodology and pinned GGML numerical-path context. State measurement-only scope, unresolved cross-engine divergence and no default kernel promotion. Do not bump at intermediate task commits.
+- [x] Self-review the diff, private file modes, nonzero test counts, bounds/cleanup and profile type/clock claims. Request Luna/high review if available; disclose capacity failures without claiming independent approval. Fix introduced findings, rerun affected focused commands and run `git diff --check`.
+- [x] After acceptance, increment the then-current workspace patch version once, update all 14 local lockfile package versions without changing third-party dependencies, and add changelog sources: approved spec/Phase 0 evidence, Colibri methodology and pinned GGML numerical-path context. State measurement-only scope, unresolved cross-engine divergence and no default kernel promotion. Do not bump at intermediate task commits.
 - [ ] Stage explicit task-owned docs/release files, inspect `git diff --cached --check` and staged paths, commit, then non-force push `feat/runtime-parity-profiling`. Verify remote branch hash equals local HEAD; leave `.gitignore` unstaged.
 
 ## Acceptance/handoff
