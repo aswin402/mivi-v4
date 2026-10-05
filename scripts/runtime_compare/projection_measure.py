@@ -546,10 +546,12 @@ def validate_result(value: Any, case: dict, profile: bool) -> dict:
                   or item["rows_wall_ns"] is None or item["output_layout_ns"] is None
                   or not item["workers"]):
                 raise ValueError("batched profile stage availability is invalid")
-            if value["batch"] < 32 and item["input_transpose_ns"] is not None:
-                raise ValueError("input transpose stage is unavailable below batch 32")
-            if value["batch"] >= 32 and item["input_transpose_ns"] is None:
-                raise ValueError("large batch profile lacks input transpose stage")
+            if (expected_branch in {"matvec", "per_input_dot"}
+                    and item["input_transpose_ns"] is not None):
+                raise ValueError("input transpose stage is unavailable for this branch")
+            if (expected_branch in {"across_batch", "across_batch_pair"}
+                    and item["input_transpose_ns"] is None):
+                raise ValueError("input transpose stage is required for this branch")
     elif value["profile_calls"] != []:
         raise ValueError("unprofiled result must not contain profile calls")
     return value

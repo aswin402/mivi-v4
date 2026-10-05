@@ -148,6 +148,33 @@ class ProjectionManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inner profile call wall exceeds outer call wall"):
             projection_measure.validate_result(record, settings["cases"][0], True)
 
+    def test_across_batch_profile_requires_input_transpose_at_batch_nine(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        record = self.child_record(True)
+        record["profile_calls"][0]["input_transpose_ns"] = 10
+
+        validated = projection_measure.validate_result(record, settings["cases"][0], True)
+
+        self.assertEqual(validated["profile_calls"][0]["input_transpose_ns"], 10)
+
+    def test_per_input_dot_profile_rejects_input_transpose(self):
+        manifest = self.valid_manifest()
+        manifest["cases"][0]["batch"] = 2
+        settings = projection_measure.validate_manifest(manifest)
+        record = self.child_record(True, batch=2)
+        record["profile_calls"][0]["input_transpose_ns"] = 10
+
+        with self.assertRaisesRegex(ValueError, "input transpose stage is"):
+            projection_measure.validate_result(record, settings["cases"][0], True)
+
+    def test_across_batch_profile_rejects_missing_input_transpose(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        record = self.child_record(True)
+        record["profile_calls"][0]["input_transpose_ns"] = None
+
+        with self.assertRaisesRegex(ValueError, "input transpose stage is"):
+            projection_measure.validate_result(record, settings["cases"][0], True)
+
     def test_synthetic_result_must_report_zero_mapping_bytes(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         record = self.child_record(False)
@@ -212,7 +239,7 @@ class ProjectionManifestTests(unittest.TestCase):
             record["profile_calls"] = [{
                 "schema": 1, "branch": branch, "call_wall_ns": 1000,
                 "validation_ns": 20, "buffer_init_ns": 10,
-                "input_transpose_ns": 10 if batch >= 32 else None, "rows_wall_ns": 800,
+                "input_transpose_ns": 10 if batch >= 9 else None, "rows_wall_ns": 800,
                 "output_layout_ns": 30, "delegated_matvec_ns": None,
                 "unclassified_wall_ns": 140,
                 "workers": [{"scratch_init_ns": 1, "decode_ns": 2,
