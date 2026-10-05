@@ -1,6 +1,6 @@
 # Projection cost measurement design
 
-Status: approach approved; written spec awaiting user review. This is the first
+Status: written spec approved by the user on 2026-10-05. This is the first
 measurement-only slice of P1-A, not approval to promote a new kernel.
 
 ## Goal and evidence
