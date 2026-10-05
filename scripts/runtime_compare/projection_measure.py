@@ -535,8 +535,8 @@ def validate_result(value: Any, case: dict, profile: bool) -> dict:
         _validate_profile(value["profile_calls"], value["branch"], case["measured_calls"],
                           value["rows"])
         for item, call_wall_ns in zip(value["profile_calls"], times):
-            if item["call_wall_ns"] != call_wall_ns:
-                raise ValueError("profile and result call wall timings differ")
+            if item["call_wall_ns"] > call_wall_ns:
+                raise ValueError("inner profile call wall exceeds outer call wall")
             if value["batch"] == 1:
                 if (item["workers"] or item["delegated_matvec_ns"] is None
                         or any(item[field] is not None for field in

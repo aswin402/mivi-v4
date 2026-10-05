@@ -130,6 +130,24 @@ class ProjectionManifestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             projection_measure.validate_result(record, case, True)
 
+    def test_profile_inner_timer_may_differ_from_outer_timer(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        record = self.child_record(True)
+        record["call_wall_ns"][0] = 2000
+
+        validated = projection_measure.validate_result(record, settings["cases"][0], True)
+
+        self.assertEqual(validated["call_wall_ns"], [2000])
+        self.assertEqual(validated["profile_calls"][0]["call_wall_ns"], 1000)
+
+    def test_profile_inner_timer_cannot_exceed_outer_timer(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        record = self.child_record(True)
+        record["call_wall_ns"][0] = 999
+
+        with self.assertRaisesRegex(ValueError, "inner profile call wall exceeds outer call wall"):
+            projection_measure.validate_result(record, settings["cases"][0], True)
+
     def test_synthetic_result_must_report_zero_mapping_bytes(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         record = self.child_record(False)

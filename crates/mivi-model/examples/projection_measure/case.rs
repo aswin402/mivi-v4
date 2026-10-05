@@ -31,6 +31,7 @@ pub enum Source {
 }
 
 impl CaseInput {
+    #[cfg(test)]
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         let input: Self = serde_json::from_slice(bytes).map_err(|_| "invalid case JSON")?;
         input.validate()?;
