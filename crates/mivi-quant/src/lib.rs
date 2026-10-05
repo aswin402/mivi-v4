@@ -1,6 +1,8 @@
 //! Quantization definitions, dequantization routines, and quantized matrix-vector operations.
 
 pub mod f16;
+#[cfg(feature = "projection-diagnostics")]
+pub mod projection_diagnostics;
 pub mod q4_k_m;
 pub mod q6_k;
 pub mod q8_0;
@@ -149,40 +151,175 @@ pub fn quantized_matmul_rows(
     rows: usize,
     cols: usize,
 ) -> Result<()> {
-    let block_size = ggml_type
-        .block_size()
-        .ok_or(QuantError::UnsupportedType(ggml_type as u32))?;
-    let type_size = ggml_type
-        .type_size()
-        .ok_or(QuantError::UnsupportedType(ggml_type as u32))?;
-    if !cols.is_multiple_of(block_size) {
-        return Err(QuantError::DimensionMisaligned {
-            dim: cols,
-            block_size,
-        });
+    quantized_matmul_rows_impl::<false>(out, ggml_type, weights, inputs, batch, rows, cols)
+        .map(|_| ())
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Diagnostic-only fields are intentionally inert in default builds.
+pub(crate) struct WorkerWorkInternal {
+    pub scratch_init_ns: u64,
+    pub decode_ns: u64,
+    pub accumulate_ns: u64,
+    pub zero_copy_ns: u64,
+    pub rows: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Populated and read only by the opt-in feature instantiation.
+pub(crate) struct ProjectionProfileInternal {
+    pub schema: u32,
+    pub branch: &'static str,
+    pub call_wall_ns: u64,
+    pub validation_ns: u64,
+    pub buffer_init_ns: Option<u64>,
+    pub input_transpose_ns: Option<u64>,
+    pub rows_wall_ns: Option<u64>,
+    pub output_layout_ns: Option<u64>,
+    pub delegated_matvec_ns: Option<u64>,
+    pub unclassified_wall_ns: u64,
+    pub workers: Vec<WorkerWorkInternal>,
+}
+
+fn measured<const PROFILE: bool, T>(operation: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let started = if PROFILE {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let value = operation();
+    let elapsed_ns = started.map(|t| u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    (value, elapsed_ns)
+}
+
+fn add_elapsed<const PROFILE: bool>(total: &mut u64, elapsed: Option<u64>) {
+    if PROFILE {
+        *total = total.saturating_add(elapsed.unwrap_or_default());
     }
-    let row_bytes = (cols / block_size)
-        .checked_mul(type_size)
-        .ok_or(QuantError::ArithmeticOverflow)?;
-    validate_matmul_args(
-        out, weights, inputs, batch, rows, cols, row_bytes, block_size,
-    )?;
+}
+
+fn finish_profile<const PROFILE: bool>(
+    mut profile: Option<ProjectionProfileInternal>,
+    call_started: Option<std::time::Instant>,
+) -> Option<ProjectionProfileInternal> {
+    if PROFILE {
+        let profile = profile.as_mut().expect("profiled invocation has a profile");
+        profile.call_wall_ns = u64::try_from(
+            call_started
+                .expect("profiled invocation has a call timer")
+                .elapsed()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
+        let serial_stages = profile
+            .validation_ns
+            .saturating_add(profile.buffer_init_ns.unwrap_or_default())
+            .saturating_add(profile.input_transpose_ns.unwrap_or_default())
+            .saturating_add(profile.rows_wall_ns.unwrap_or_default())
+            .saturating_add(profile.output_layout_ns.unwrap_or_default())
+            .saturating_add(profile.delegated_matvec_ns.unwrap_or_default());
+        profile.unclassified_wall_ns = profile.call_wall_ns.saturating_sub(serial_stages);
+    }
+    profile
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quantized_matmul_rows_impl<const PROFILE: bool>(
+    out: &mut [f32],
+    ggml_type: GgmlType,
+    weights: &[u8],
+    inputs: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<Option<ProjectionProfileInternal>> {
+    let call_started = if PROFILE {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    let profile = if PROFILE {
+        Some(ProjectionProfileInternal {
+            schema: 1,
+            ..ProjectionProfileInternal::default()
+        })
+    } else {
+        None
+    };
+
+    let (validation, validation_ns) = measured::<PROFILE, _>(|| {
+        if !matches!(
+            ggml_type,
+            GgmlType::Q8_0
+                | GgmlType::Q4_K
+                | GgmlType::Q6_K
+                | GgmlType::F16
+                | GgmlType::BF16
+                | GgmlType::F32
+        ) {
+            return Err(QuantError::UnsupportedType(ggml_type as u32));
+        }
+        let block_size = ggml_type
+            .block_size()
+            .ok_or(QuantError::UnsupportedType(ggml_type as u32))?;
+        let type_size = ggml_type
+            .type_size()
+            .ok_or(QuantError::UnsupportedType(ggml_type as u32))?;
+        if !cols.is_multiple_of(block_size) {
+            return Err(QuantError::DimensionMisaligned {
+                dim: cols,
+                block_size,
+            });
+        }
+        let row_bytes = (cols / block_size)
+            .checked_mul(type_size)
+            .ok_or(QuantError::ArithmeticOverflow)?;
+        validate_matmul_args(
+            out, weights, inputs, batch, rows, cols, row_bytes, block_size,
+        )?;
+        let branch = if batch == 1 {
+            "matvec"
+        } else if batch == 0 || rows == 0 {
+            "empty"
+        } else if batch <= 8 {
+            "per_input_dot"
+        } else if batch >= 32 {
+            "across_batch_pair"
+        } else {
+            "across_batch"
+        };
+        Ok((row_bytes, branch))
+    });
+    let (row_bytes, branch) = validation?;
+    let mut profile = profile;
+    if PROFILE {
+        let current = profile.as_mut().expect("profiled invocation has a profile");
+        current.validation_ns = validation_ns.unwrap_or_default();
+        current.branch = branch;
+    }
 
     // Preserve the exact established matvec result for the one-row case. Tiles
     // with more than one input row use the batch kernel below.
     if batch == 1 {
-        return quantized_matvec(
-            &mut out[..rows],
-            ggml_type,
-            weights,
-            &inputs[..cols],
-            rows,
-            cols,
-        );
+        let (result, delegated_matvec_ns) = measured::<PROFILE, _>(|| {
+            quantized_matvec(
+                &mut out[..rows],
+                ggml_type,
+                weights,
+                &inputs[..cols],
+                rows,
+                cols,
+            )
+        });
+        result?;
+        if PROFILE {
+            profile.as_mut().unwrap().delegated_matvec_ns = delegated_matvec_ns;
+        }
+        return Ok(finish_profile::<PROFILE>(profile, call_started));
     }
 
     if batch == 0 || rows == 0 {
-        return Ok(());
+        return Ok(finish_profile::<PROFILE>(profile, call_started));
     }
 
     let accumulation_mode = batch_accumulation_mode(batch);
@@ -190,21 +327,82 @@ pub fn quantized_matmul_rows(
     // kernel. Small batches use full-width input dot products instead: calling
     // a SIMD helper once per column over a two- or eight-element slice creates
     // thousands of tiny calls and defeats the established matvec kernels.
-    let transposed_inputs = if accumulation_mode == BatchAccumulationMode::AcrossBatchFma {
-        let mut transposed_inputs = vec![0.0f32; cols * batch];
-        for batch_idx in 0..batch {
-            for col in 0..cols {
-                transposed_inputs[col * batch + batch_idx] = inputs[batch_idx * cols + col];
+    let ((mut transposed_inputs, mut row_major_output), buffer_init_ns) =
+        measured::<PROFILE, _>(|| {
+            let transposed_inputs = if accumulation_mode == BatchAccumulationMode::AcrossBatchFma {
+                vec![0.0f32; cols * batch]
+            } else {
+                Vec::new()
+            };
+            let row_major_output = vec![0.0f32; rows * batch];
+            (transposed_inputs, row_major_output)
+        });
+    if PROFILE {
+        profile.as_mut().unwrap().buffer_init_ns = buffer_init_ns;
+    }
+    if accumulation_mode == BatchAccumulationMode::AcrossBatchFma {
+        let (_, input_transpose_ns) = measured::<PROFILE, _>(|| {
+            for batch_idx in 0..batch {
+                for col in 0..cols {
+                    transposed_inputs[col * batch + batch_idx] = inputs[batch_idx * cols + col];
+                }
             }
+        });
+        if PROFILE {
+            profile.as_mut().unwrap().input_transpose_ns = input_transpose_ns;
         }
-        transposed_inputs
-    } else {
-        Vec::new()
-    };
-    let mut row_major_output = vec![0.0f32; rows * batch];
+    }
 
     let num_threads = rayon::current_num_threads().max(1);
-    if rows >= types::RAYON_PARALLEL_THRESHOLD && num_threads > 1 {
+    let parallel = rows >= types::RAYON_PARALLEL_THRESHOLD && num_threads > 1;
+    let execute_rows = || {
+        if parallel {
+            let chunk_rows = rows.div_ceil(num_threads);
+            row_major_output
+                .par_chunks_mut(chunk_rows * batch)
+                .enumerate()
+                .map(|(chunk_idx, slice)| {
+                    let row_start = chunk_idx * chunk_rows;
+                    let row_end = (row_start + chunk_rows).min(rows);
+                    compute_batched_rows::<PROFILE>(
+                        slice,
+                        row_start,
+                        row_end,
+                        batch,
+                        cols,
+                        row_bytes,
+                        ggml_type,
+                        weights,
+                        inputs,
+                        &transposed_inputs,
+                        accumulation_mode,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()
+        } else {
+            compute_batched_rows::<PROFILE>(
+                &mut row_major_output,
+                0,
+                rows,
+                batch,
+                cols,
+                row_bytes,
+                ggml_type,
+                weights,
+                inputs,
+                &transposed_inputs,
+                accumulation_mode,
+            )
+            .map(|worker| vec![worker])
+        }
+    };
+
+    let worker_records = if PROFILE {
+        let (result, rows_wall_ns) = measured::<PROFILE, _>(execute_rows);
+        let records = result?;
+        profile.as_mut().unwrap().rows_wall_ns = rows_wall_ns;
+        records
+    } else if parallel {
         let chunk_rows = rows.div_ceil(num_threads);
         row_major_output
             .par_chunks_mut(chunk_rows * batch)
@@ -212,7 +410,7 @@ pub fn quantized_matmul_rows(
             .try_for_each(|(chunk_idx, slice)| {
                 let row_start = chunk_idx * chunk_rows;
                 let row_end = (row_start + chunk_rows).min(rows);
-                compute_batched_rows(
+                compute_batched_rows::<PROFILE>(
                     slice,
                     row_start,
                     row_end,
@@ -225,9 +423,11 @@ pub fn quantized_matmul_rows(
                     &transposed_inputs,
                     accumulation_mode,
                 )
+                .map(|_| ())
             })?;
+        Vec::new()
     } else {
-        compute_batched_rows(
+        compute_batched_rows::<PROFILE>(
             &mut row_major_output,
             0,
             rows,
@@ -240,18 +440,27 @@ pub fn quantized_matmul_rows(
             &transposed_inputs,
             accumulation_mode,
         )?;
+        Vec::new()
+    };
+    if PROFILE {
+        profile.as_mut().unwrap().workers = worker_records;
     }
 
-    for row in 0..rows {
-        for batch_idx in 0..batch {
-            out[batch_idx * rows + row] = row_major_output[row * batch + batch_idx];
+    let (_, output_layout_ns) = measured::<PROFILE, _>(|| {
+        for row in 0..rows {
+            for batch_idx in 0..batch {
+                out[batch_idx * rows + row] = row_major_output[row * batch + batch_idx];
+            }
         }
+    });
+    if PROFILE {
+        profile.as_mut().unwrap().output_layout_ns = output_layout_ns;
     }
-    Ok(())
+    Ok(finish_profile::<PROFILE>(profile, call_started))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compute_batched_rows(
+fn compute_batched_rows<const PROFILE: bool>(
     row_major_output: &mut [f32],
     row_start: usize,
     row_end: usize,
@@ -263,59 +472,86 @@ fn compute_batched_rows(
     inputs: &[f32],
     transposed_inputs: &[f32],
     accumulation_mode: BatchAccumulationMode,
-) -> Result<()> {
+) -> Result<WorkerWorkInternal> {
+    let mut work = WorkerWorkInternal {
+        rows: row_end - row_start,
+        ..WorkerWorkInternal::default()
+    };
     if accumulation_mode == BatchAccumulationMode::AcrossBatchFma && batch >= 32 {
-        let mut decoded = vec![0.0f32; 2 * cols];
+        let (mut decoded, scratch_init_ns) = measured::<PROFILE, _>(|| vec![0.0f32; 2 * cols]);
+        add_elapsed::<PROFILE>(&mut work.scratch_init_ns, scratch_init_ns);
         for (pair_idx, output) in row_major_output.chunks_mut(2 * batch).enumerate() {
             let row_idx = row_start + pair_idx * 2;
             let weight_start = row_idx * row_bytes;
             let (first, second) = decoded.split_at_mut(cols);
-            dequantize_slice(
-                ggml_type,
-                &weights[weight_start..weight_start + row_bytes],
-                first,
-            )?;
-            output.fill(0.0);
-            if row_idx + 1 < row_end {
-                let weight_start = weight_start + row_bytes;
+            let (decode_result, decode_ns) = measured::<PROFILE, _>(|| {
                 dequantize_slice(
                     ggml_type,
                     &weights[weight_start..weight_start + row_bytes],
-                    second,
-                )?;
+                    first,
+                )
+            });
+            decode_result?;
+            add_elapsed::<PROFILE>(&mut work.decode_ns, decode_ns);
+            let (_, zero_ns) = measured::<PROFILE, _>(|| output.fill(0.0));
+            add_elapsed::<PROFILE>(&mut work.zero_copy_ns, zero_ns);
+            if row_idx + 1 < row_end {
+                let weight_start = weight_start + row_bytes;
+                let (decode_result, decode_ns) = measured::<PROFILE, _>(|| {
+                    dequantize_slice(
+                        ggml_type,
+                        &weights[weight_start..weight_start + row_bytes],
+                        second,
+                    )
+                });
+                decode_result?;
+                add_elapsed::<PROFILE>(&mut work.decode_ns, decode_ns);
                 let (out0, out1) = output.split_at_mut(batch);
-                mivi_core::simd::matmul_accumulate_transposed_pair_simd(
-                    out0,
-                    out1,
-                    first,
-                    second,
-                    transposed_inputs,
-                    batch,
-                    cols,
-                );
+                let (_, accumulate_ns) = measured::<PROFILE, _>(|| {
+                    mivi_core::simd::matmul_accumulate_transposed_pair_simd(
+                        out0,
+                        out1,
+                        first,
+                        second,
+                        transposed_inputs,
+                        batch,
+                        cols,
+                    )
+                });
+                add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);
             } else {
-                mivi_core::simd::matmul_accumulate_transposed_simd(
-                    output,
-                    first,
-                    transposed_inputs,
-                    batch,
-                    cols,
-                );
+                let (_, accumulate_ns) = measured::<PROFILE, _>(|| {
+                    mivi_core::simd::matmul_accumulate_transposed_simd(
+                        output,
+                        first,
+                        transposed_inputs,
+                        batch,
+                        cols,
+                    )
+                });
+                add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);
             }
         }
-        return Ok(());
+        return Ok(work);
     }
-    let mut decoded_row = vec![0.0f32; cols];
-    let mut row_output = vec![0.0f32; batch];
+    let (mut decoded_row, decoded_init_ns) = measured::<PROFILE, _>(|| vec![0.0f32; cols]);
+    let (mut row_output, output_init_ns) = measured::<PROFILE, _>(|| vec![0.0f32; batch]);
+    add_elapsed::<PROFILE>(&mut work.scratch_init_ns, decoded_init_ns);
+    add_elapsed::<PROFILE>(&mut work.scratch_init_ns, output_init_ns);
     for row_idx in row_start..row_end {
         let weight_start = row_idx * row_bytes;
-        row_output.fill(0.0);
-        dequantize_slice(
-            ggml_type,
-            &weights[weight_start..weight_start + row_bytes],
-            &mut decoded_row,
-        )?;
-        match accumulation_mode {
+        let (_, zero_ns) = measured::<PROFILE, _>(|| row_output.fill(0.0));
+        add_elapsed::<PROFILE>(&mut work.zero_copy_ns, zero_ns);
+        let (decode_result, decode_ns) = measured::<PROFILE, _>(|| {
+            dequantize_slice(
+                ggml_type,
+                &weights[weight_start..weight_start + row_bytes],
+                &mut decoded_row,
+            )
+        });
+        decode_result?;
+        add_elapsed::<PROFILE>(&mut work.decode_ns, decode_ns);
+        let (_, accumulate_ns) = measured::<PROFILE, _>(|| match accumulation_mode {
             BatchAccumulationMode::PerInputDot => {
                 for (batch_idx, output) in row_output.iter_mut().enumerate() {
                     let input_start = batch_idx * cols;
@@ -334,11 +570,15 @@ fn compute_batched_rows(
                     cols,
                 );
             }
-        }
+        });
+        add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);
         let output_start = (row_idx - row_start) * batch;
-        row_major_output[output_start..output_start + batch].copy_from_slice(&row_output);
+        let (_, copy_ns) = measured::<PROFILE, _>(|| {
+            row_major_output[output_start..output_start + batch].copy_from_slice(&row_output)
+        });
+        add_elapsed::<PROFILE>(&mut work.zero_copy_ns, copy_ns);
     }
-    Ok(())
+    Ok(work)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

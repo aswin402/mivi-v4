@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description = "Quantization types (Q4_K_M, Q8_0, F16), block layouts, dequantization, and matrix-vector compute"
 
+[features]
+projection-diagnostics = []
+
 [dependencies]
 mivi-core.workspace = true
 thiserror.workspace = true
