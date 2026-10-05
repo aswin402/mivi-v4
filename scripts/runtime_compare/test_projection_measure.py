@@ -1,11 +1,13 @@
 """Strict manifest and paired projection-driver coverage."""
 
 import hashlib
+import gc
 import json
 import os
 import struct
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -282,6 +284,67 @@ class ProjectionManifestTests(unittest.TestCase):
         self.assertEqual(report["summary"]["synthetic-small"]["profiled"]["status_counts"],
                          {"comparison_mismatch": 1, "complete": 2})
 
+    def test_unmatched_complete_samples_are_counted_but_excluded_from_medians(self):
+        samples = [
+            {"case": "case", "repetition": 0, "mode": "profiled",
+             "status": "complete", "comparison_status": "mismatch",
+             "call_wall_ns": [10, 20]},
+            {"case": "case", "repetition": 0, "mode": "unprofiled",
+             "status": "complete", "comparison_status": "mismatch",
+             "call_wall_ns": [100, 200]},
+            {"case": "case", "repetition": 1, "mode": "profiled",
+             "status": "complete", "comparison_status": "matched",
+             "call_wall_ns": [30]},
+        ]
+
+        summary = projection_measure.summarize_samples(samples)
+
+        profiled = summary["case"]["profiled"]
+        self.assertEqual(profiled["status_counts"], {"complete": 2})
+        self.assertEqual(profiled["repetition_call_totals"][0], {
+            "repetition": 0, "status": "complete", "total_call_ns": None})
+        self.assertEqual(profiled["total_call_ns"], {"median": 30, "min": 30, "max": 30})
+        self.assertIsNone(summary["case"]["unprofiled"]["total_call_ns"])
+
+    def test_output_bit_arrays_are_released_at_each_pair_boundary(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        bit_refs = []
+        observations = []
+        child_calls = 0
+        original_validate = projection_measure.validate_result
+
+        class TrackedBits(list):
+            pass
+
+        def track_validated_bits(*args, **kwargs):
+            validated = original_validate(*args, **kwargs)
+            tracked = TrackedBits(validated["output_bits"])
+            bit_refs.append(weakref.ref(tracked))
+            validated["output_bits"] = tracked
+            return validated
+
+        def child(argv, *_args, **_kwargs):
+            nonlocal child_calls
+            if child_calls == 1:
+                observations.append(bit_refs[0]() is not None)
+            elif child_calls == 2:
+                gc.collect()
+                observations.append(all(ref() is None for ref in bit_refs))
+            child_calls += 1
+            child_input = json.loads(Path(argv[2]).read_bytes())
+            Path(argv[4]).write_text(json.dumps(self.child_record(child_input["profile"])))
+            return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
+                    "elapsed_seconds": 0.01, "rss_scope": "sampled",
+                    "cleanup": {"success": True, "reaped": True, "error": None}}
+
+        with mock.patch.object(projection_measure, "validate_result", new=track_validated_bits), \
+                mock.patch.object(projection_measure, "run_child", side_effect=child):
+            report = projection_measure.run_session(settings, self.output_dir)
+
+        self.assertEqual(child_calls, 6)
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(observations, [True, True])
+
     def test_nonfinite_bits_and_malformed_result_are_rejected(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         case = settings["cases"][0]
@@ -302,6 +365,35 @@ class ProjectionManifestTests(unittest.TestCase):
         self.assertEqual(report["samples"][0]["status"], "timeout")
         self.assertEqual(report["summary"]["synthetic-small"]["unprofiled"]["status_counts"],
                          {"timeout": 3})
+
+    def test_complete_sample_with_timed_out_partner_is_not_summarized(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        calls = 0
+
+        def complete_then_timeout(argv, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return {"status": "timeout", "stdout": "", "stderr": "", "returncode": -15,
+                        "elapsed_seconds": 0.1, "rss_scope": "sampled",
+                        "cleanup": {"success": True, "reaped": True, "error": None}}
+            child_input = json.loads(Path(argv[2]).read_bytes())
+            Path(argv[4]).write_text(json.dumps(self.child_record(child_input["profile"])))
+            return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
+                    "elapsed_seconds": 0.01, "rss_scope": "sampled",
+                    "cleanup": {"success": True, "reaped": True, "error": None}}
+
+        with mock.patch.object(projection_measure, "run_child", side_effect=complete_then_timeout):
+            report = projection_measure.run_session(settings, self.output_dir)
+
+        unprofiled = report["samples"][0]
+        self.assertEqual(unprofiled["status"], "complete")
+        self.assertEqual(unprofiled["comparison_status"], "not_comparable")
+        summary = report["summary"]["synthetic-small"]["unprofiled"]
+        self.assertEqual(summary["status_counts"], {"complete": 1, "timeout": 2})
+        self.assertEqual(summary["repetition_call_totals"][0], {
+            "repetition": 0, "status": "complete", "total_call_ns": None})
+        self.assertIsNone(summary["total_call_ns"])
 
     def test_comparison_report_includes_attempted_failed_pairs(self):
         samples = [

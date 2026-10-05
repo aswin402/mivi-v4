@@ -563,7 +563,9 @@ def summarize_samples(samples: list[dict]) -> dict:
                                          "by_repetition": {}})
         group["status_counts"][sample["status"]] += 1
         total = (sum(sample["call_wall_ns"])
-                 if sample["status"] == "complete" and sample.get("call_wall_ns") else None)
+                 if (sample["status"] == "complete"
+                     and sample.get("comparison_status") == "matched"
+                     and sample.get("call_wall_ns")) else None)
         group["by_repetition"][sample["repetition"]] = {
             "status": sample["status"], "total_call_ns": total}
         if total is not None:
@@ -716,6 +718,8 @@ def run_session(settings: dict, output_dir: Path) -> dict:
                             else:
                                 _previous_mode, previous_bits = previous
                                 exact_bit_matches[pair_key] = previous_bits == bits
+                                del previous_bits, _previous_mode
+                            del previous
                             sample.update({"status": "complete", "call_wall_ns": validated["call_wall_ns"],
                                            "setup_ns": validated["setup_ns"],
                                            "profile_calls": validated["profile_calls"],
