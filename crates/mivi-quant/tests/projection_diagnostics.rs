@@ -1,7 +1,9 @@
 #![cfg(feature = "projection-diagnostics")]
 
 use mivi_quant::projection_diagnostics::quantized_matmul_rows_profiled;
-use mivi_quant::{quantized_matmul_rows, GgmlType, QuantError, RAYON_PARALLEL_THRESHOLD};
+use mivi_quant::{
+    quantized_matmul_rows, quantized_matvec, GgmlType, QuantError, RAYON_PARALLEL_THRESHOLD,
+};
 
 #[test]
 fn projection_profile_preserves_f32_bits() {
@@ -112,6 +114,7 @@ fn projection_profile_reports_exact_dispatch_branches_and_empty_work() {
         (9, 3, "across_batch"),
         (32, 3, "across_batch_pair"),
         (3, 0, "empty"),
+        (1, 0, "empty"),
     ];
     for (batch, rows, branch) in cases {
         let inputs = vec![0.25; batch * 17];
@@ -205,6 +208,106 @@ fn projection_profile_preserves_bits_for_supported_formats_and_parallel_tail() {
 }
 
 #[test]
+fn projection_branches_match_matvec_reference_with_scale_aware_error() {
+    const ABS_TOLERANCE: f32 = 1.0e-5;
+    const REL_TOLERANCE: f32 = 2.0e-6;
+    let formats = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::BF16,
+        GgmlType::Q8_0,
+        GgmlType::Q4_K,
+        GgmlType::Q6_K,
+    ];
+    for ggml_type in formats {
+        let cols = match ggml_type {
+            GgmlType::Q8_0 => 32,
+            GgmlType::Q4_K | GgmlType::Q6_K => 512,
+            _ => 32,
+        };
+        let mut max_abs_error = 0.0f32;
+        let mut max_scaled_error = 0.0f32;
+
+        for rows in [3, RAYON_PARALLEL_THRESHOLD + 1] {
+            let weights = nonzero_weights(ggml_type, rows, cols);
+            for batch in [1, 2, 8, 9, 32, 64, 65] {
+                let inputs: Vec<f32> = (0..batch * cols)
+                    .map(|i| (i % 23) as f32 * 0.0625 - 0.75)
+                    .collect();
+                let mut expected = vec![f32::NAN; batch * rows];
+                for batch_idx in 0..batch {
+                    quantized_matvec(
+                        &mut expected[batch_idx * rows..(batch_idx + 1) * rows],
+                        ggml_type,
+                        &weights,
+                        &inputs[batch_idx * cols..(batch_idx + 1) * cols],
+                        rows,
+                        cols,
+                    )
+                    .unwrap();
+                }
+
+                for threads in [1, 2] {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap()
+                        .install(|| {
+                            let mut baseline = vec![f32::NAN; batch * rows];
+                            let mut profiled = baseline.clone();
+                            quantized_matmul_rows(
+                                &mut baseline,
+                                ggml_type,
+                                &weights,
+                                &inputs,
+                                batch,
+                                rows,
+                                cols,
+                            )
+                            .unwrap();
+                            quantized_matmul_rows_profiled(
+                                &mut profiled,
+                                ggml_type,
+                                &weights,
+                                &inputs,
+                                batch,
+                                rows,
+                                cols,
+                            )
+                            .unwrap();
+                            assert!(baseline.iter().chain(&profiled).all(|v| v.is_finite()));
+                            assert!(baseline
+                                .iter()
+                                .zip(&profiled)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()));
+
+                            for actual in [&baseline, &profiled] {
+                                for (index, (&actual, &reference))
+                                    in actual.iter().zip(&expected).enumerate()
+                                {
+                                    let abs_error = (actual - reference).abs();
+                                    let tolerance =
+                                        ABS_TOLERANCE + REL_TOLERANCE * reference.abs();
+                                    let scaled_error = abs_error / tolerance;
+                                    max_abs_error = max_abs_error.max(abs_error);
+                                    max_scaled_error = max_scaled_error.max(scaled_error);
+                                    assert!(
+                                        scaled_error <= 1.0,
+                                        "type={ggml_type:?}, rows={rows}, batch={batch}, threads={threads}, index={index}, actual={actual}, reference={reference}, abs_error={abs_error}, tolerance={tolerance}"
+                                    );
+                                }
+                            }
+                        });
+                }
+            }
+        }
+        println!(
+            "matvec reference error type={ggml_type:?}: max_abs={max_abs_error:.9e}, max_scaled={max_scaled_error:.9e}"
+        );
+    }
+}
+
+#[test]
 fn profiled_errors_leave_output_untouched() {
     let sentinel = 123.5;
     let mut out = vec![sentinel; 6];
@@ -255,4 +358,38 @@ fn profiled_errors_leave_output_untouched() {
             .is_err()
     );
     assert!(out.iter().all(|value| *value == sentinel));
+}
+
+#[test]
+fn profiled_empty_batch_one_and_checked_product_overflows() {
+    let sentinel = 123.5;
+    let mut out = [sentinel; 1];
+    let inputs = [0.25; 4];
+    let profile =
+        quantized_matmul_rows_profiled(&mut out[..0], GgmlType::F32, &[], &inputs, 1, 0, 4)
+            .unwrap();
+    assert_eq!(profile.branch, "empty");
+    assert!(profile.delegated_matvec_ns.is_none());
+    assert!(profile.rows_wall_ns.is_none());
+    assert!(profile.buffer_init_ns.is_none());
+    assert!(profile.input_transpose_ns.is_none());
+    assert!(profile.output_layout_ns.is_none());
+    assert!(profile.workers.is_empty());
+    assert_eq!(out, [sentinel]);
+
+    let input_product_overflow =
+        quantized_matmul_rows_profiled(&mut out[..0], GgmlType::F32, &[], &[], usize::MAX, 0, 4);
+    assert!(matches!(
+        input_product_overflow,
+        Err(QuantError::ArithmeticOverflow)
+    ));
+    assert_eq!(out, [sentinel]);
+
+    let weight_product_overflow =
+        quantized_matmul_rows_profiled(&mut out[..0], GgmlType::F32, &[], &[], 0, usize::MAX, 4);
+    assert!(matches!(
+        weight_product_overflow,
+        Err(QuantError::ArithmeticOverflow)
+    ));
+    assert_eq!(out, [sentinel]);
 }

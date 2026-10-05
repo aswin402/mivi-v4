@@ -277,10 +277,10 @@ pub(crate) fn quantized_matmul_rows_impl<const PROFILE: bool>(
         validate_matmul_args(
             out, weights, inputs, batch, rows, cols, row_bytes, block_size,
         )?;
-        let branch = if batch == 1 {
-            "matvec"
-        } else if batch == 0 || rows == 0 {
+        let branch = if batch == 0 || rows == 0 {
             "empty"
+        } else if batch == 1 {
+            "matvec"
         } else if batch <= 8 {
             "per_input_dot"
         } else if batch >= 32 {
@@ -296,6 +296,10 @@ pub(crate) fn quantized_matmul_rows_impl<const PROFILE: bool>(
         let current = profile.as_mut().expect("profiled invocation has a profile");
         current.validation_ns = validation_ns.unwrap_or_default();
         current.branch = branch;
+    }
+
+    if batch == 0 || rows == 0 {
+        return Ok(finish_profile::<PROFILE>(profile, call_started));
     }
 
     // Preserve the exact established matvec result for the one-row case. Tiles
@@ -315,10 +319,6 @@ pub(crate) fn quantized_matmul_rows_impl<const PROFILE: bool>(
         if PROFILE {
             profile.as_mut().unwrap().delegated_matvec_ns = delegated_matvec_ns;
         }
-        return Ok(finish_profile::<PROFILE>(profile, call_started));
-    }
-
-    if batch == 0 || rows == 0 {
         return Ok(finish_profile::<PROFILE>(profile, call_started));
     }
 
