@@ -5,6 +5,8 @@ mod case;
 mod private_io;
 
 use case::{CaseInput, Source};
+#[cfg(feature = "projection-locality-experiment")]
+use mivi_core::simd::ProjectionTokenTile;
 use mivi_model::gguf::GgufFile;
 use mivi_quant::projection_diagnostics::{quantized_matmul_rows_profiled, ProjectionProfile};
 use mivi_quant::{quantized_matmul_rows, GgmlType};
@@ -200,7 +202,9 @@ fn measure_case(input: CaseInput) -> Result<serde_json::Value, AnyError> {
         _ => (None, None),
     };
     Ok(serde_json::json!({
-        "schema": 1,
+        "schema": 2,
+        "comparison_group": input.comparison_group,
+        "token_tile": input.token_tile,
         "status": "complete",
         "source_kind": loaded.source_kind,
         "model_path": model_path,
@@ -360,7 +364,35 @@ fn invoke(
         std::hint::black_box(&*out);
         Ok(Some(profile))
     } else {
-        quantized_matmul_rows(out, format, weights, inputs, input.batch, rows, cols)?;
+        match input.token_tile {
+            None => quantized_matmul_rows(out, format, weights, inputs, input.batch, rows, cols)?,
+            Some(tile) => {
+                #[cfg(feature = "projection-locality-experiment")]
+                {
+                    let selector = match tile {
+                        32 => ProjectionTokenTile::Tokens32,
+                        64 => ProjectionTokenTile::Tokens64,
+                        128 => ProjectionTokenTile::Tokens128,
+                        _ => return Err("unsupported token tile selector".into()),
+                    };
+                    mivi_quant::quantized_matmul_rows_with_token_tile(
+                        out,
+                        format,
+                        weights,
+                        inputs,
+                        input.batch,
+                        rows,
+                        cols,
+                        selector,
+                    )?;
+                }
+                #[cfg(not(feature = "projection-locality-experiment"))]
+                {
+                    let _ = tile;
+                    return Err("token tile selector requires the experiment feature".into());
+                }
+            }
+        }
         std::hint::black_box(&*out);
         Ok(None)
     }
@@ -510,7 +542,7 @@ mod tests {
     #[test]
     fn synthetic_f32_measurement_is_finite_and_repeated_calls_match_bits() {
         let input = case::CaseInput::from_json(
-            br#"{"schema":1,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":2,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
+            br#"{"schema":2,"comparison_group":"test-group","token_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":2,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
         )
         .unwrap();
         input.validate().unwrap();
@@ -542,7 +574,7 @@ mod tests {
     #[test]
     fn synthetic_q8_measurement_returns_finite_reference_bits() {
         let input = case::CaseInput::from_json(
-            br#"{"schema":1,"source":{"kind":"synthetic","ggml_type":8,"rows":3,"cols":32},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
+            br#"{"schema":2,"comparison_group":"test-group","token_tile":null,"source":{"kind":"synthetic","ggml_type":8,"rows":3,"cols":32},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
         )
         .unwrap();
         let result = measure_case(input).unwrap();
@@ -559,7 +591,7 @@ mod tests {
     fn synthetic_supported_formats_produce_finite_outputs() {
         for (ggml_type, cols) in [(1, 32), (30, 32), (12, 256), (14, 256)] {
             let input = case::CaseInput::from_json(
-                format!(r#"{{"schema":1,"source":{{"kind":"synthetic","ggml_type":{ggml_type},"rows":3,"cols":{cols}}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
+                format!(r#"{{"schema":2,"comparison_group":"test-group","token_tile":null,"source":{{"kind":"synthetic","ggml_type":{ggml_type},"rows":3,"cols":{cols}}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
             ).unwrap();
             let result = measure_case(input).unwrap();
             assert!(
@@ -602,7 +634,7 @@ mod tests {
         let path = directory.path().join("tiny.gguf");
         std::fs::write(&path, tiny_gguf("other", 2)).unwrap();
         let mut missing = case::CaseInput::from_json(
-            format!(r#"{{"schema":1,"source":{{"kind":"gguf","model_path":"{}","tensor":"missing"}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#, path.display()).as_bytes(),
+            format!(r#"{{"schema":2,"comparison_group":"test-group","token_tile":null,"source":{{"kind":"gguf","model_path":"{}","tensor":"missing"}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#, path.display()).as_bytes(),
         ).unwrap();
         assert!(load_case(&missing).is_err());
         std::fs::write(&path, tiny_gguf("tensor", 1)).unwrap();
@@ -618,7 +650,7 @@ mod tests {
         let path = directory.path().join("metadata-derived.gguf");
         std::fs::write(&path, tiny_gguf("tensor", 2)).unwrap();
         let input = case::CaseInput::from_json(
-            format!(r#"{{"schema":1,"source":{{"kind":"gguf","model_path":"{}","tensor":"tensor"}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#, path.display()).as_bytes(),
+            format!(r#"{{"schema":2,"comparison_group":"test-group","token_tile":null,"source":{{"kind":"gguf","model_path":"{}","tensor":"tensor"}},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#, path.display()).as_bytes(),
         ).unwrap();
         let result = measure_case(input).unwrap();
         assert_eq!(result["format"], "F32");

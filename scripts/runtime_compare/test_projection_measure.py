@@ -5,11 +5,14 @@ import gc
 import json
 import os
 import struct
+import sys
 import tempfile
 import unittest
 import weakref
 from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import projection_measure
 
@@ -29,7 +32,7 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def valid_manifest(self):
         return {
-            "schema": 1,
+            "schema": 2,
             "binary": str(self.binary),
             "revision": "0123456789abcdef0123456789abcdef01234567",
             "repetitions": 3,
@@ -39,14 +42,152 @@ class ProjectionManifestTests(unittest.TestCase):
             "artifact_bytes": 8 * 1024 * 1024,
             "buffer_limit_bytes": 8 * 1024 * 1024,
             "model_limit_bytes": 1024 * 1024 * 1024,
-            "cases": [{
-                "name": "synthetic-small",
-                "batch": 9,
-                "source": {"kind": "synthetic", "ggml_type": 0, "rows": 3, "cols": 64},
-                "warmup_calls": 0,
-                "measured_calls": 1,
-            }],
+            "cases": [
+                {"name": name, "comparison_group": "synthetic-group", "token_tile": tile,
+                 "batch": 9,
+                 "source": {"kind": "synthetic", "ggml_type": 0, "rows": 3, "cols": 64},
+                 "warmup_calls": 0, "measured_calls": 1}
+                for name, tile in (("synthetic-small", None), ("synthetic-tile-32", 32),
+                                   ("synthetic-tile-64", 64), ("synthetic-tile-128", 128))
+            ],
         }
+
+    def paired_manifest(self):
+        return self.valid_manifest()
+
+    def test_valid_baseline_and_explicit_token_tile_selectors_are_accepted(self):
+        settings = projection_measure.validate_manifest(self.paired_manifest())
+        self.assertEqual([case["token_tile"] for case in settings["cases"]],
+                         [None, 32, 64, 128])
+
+    def test_unknown_token_tile_selector_is_rejected(self):
+        manifest = self.paired_manifest()
+        manifest["cases"][1]["token_tile"] = 16
+        with self.assertRaisesRegex(ValueError, "token_tile"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_missing_or_duplicate_baseline_and_variant_members_are_rejected(self):
+        for remove in (0, 1):
+            manifest = self.paired_manifest()
+            manifest["cases"].pop(remove)
+            with self.subTest(remove=remove), self.assertRaises(ValueError):
+                projection_measure.validate_manifest(manifest)
+        manifest = self.paired_manifest()
+        manifest["cases"].append(dict(manifest["cases"][0], name="another-baseline"))
+        with self.assertRaisesRegex(ValueError, "member|selector|group"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_duplicate_variant_selectors_are_rejected(self):
+        manifest = self.paired_manifest()
+        manifest["cases"][2]["token_tile"] = 32
+        with self.assertRaisesRegex(ValueError, "member|selector|group"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_workload_mismatch_inside_group_is_rejected(self):
+        for field, value in (("batch", 8), ("warmup_calls", 1), ("measured_calls", 2)):
+            manifest = self.paired_manifest()
+            manifest["cases"][1][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "match|group|settings"):
+                projection_measure.validate_manifest(manifest)
+        manifest = self.paired_manifest()
+        manifest["cases"][1]["source"]["rows"] = 4
+        with self.assertRaisesRegex(ValueError, "match|group|settings"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_variant_execution_alternates_around_baseline_each_repetition(self):
+        settings = projection_measure.validate_manifest(self.paired_manifest())
+        launches = []
+        child_input_fields = []
+
+        def child(argv, *_args, **_kwargs):
+            child_input = json.loads(Path(argv[2]).read_bytes())
+            child_input_fields.append(set(child_input))
+            launches.append((child_input["token_tile"], child_input["profile"],
+                             len(launches) // 8))
+            source = child_input["source"]
+            record = self.child_record(child_input["profile"], ggml_type=source["ggml_type"],
+                                       rows=source["rows"], cols=source["cols"],
+                                       batch=child_input["batch"])
+            record.update(token_tile=child_input["token_tile"],
+                          comparison_group=child_input["comparison_group"])
+            Path(argv[4]).write_text(json.dumps(record))
+            return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
+                    "elapsed_seconds": 0.01, "rss_scope": "sampled",
+                    "cleanup": {"success": True, "reaped": True, "error": None}}
+
+        with mock.patch.object(projection_measure, "run_child", side_effect=child):
+            report = projection_measure.run_session(settings, self.output_dir)
+        expected = []
+        for repetition in range(3):
+            tiles = ((None, 32, 64, 128) if repetition % 2 == 0
+                     else (32, 64, 128, None))
+            for tile in tiles:
+                for mode in projection_measure._paired_order(repetition):
+                    expected.append((tile, mode == "profiled", repetition))
+        self.assertEqual(launches, expected)
+        self.assertTrue(all(fields == {
+            "schema", "comparison_group", "token_tile", "source", "batch", "threads",
+            "profile", "warmup_calls", "measured_calls", "buffer_limit_bytes",
+            "model_limit_bytes",
+        } for fields in child_input_fields))
+        self.assertEqual(report["schema"], 2)
+
+    def test_failed_and_timed_out_group_members_are_retained_and_not_compared(self):
+        settings = projection_measure.validate_manifest(self.paired_manifest())
+        calls = 0
+
+        def failed_variant(argv, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            child_input = json.loads(Path(argv[2]).read_bytes())
+            if child_input["token_tile"] == 32:
+                return {"status": "timeout", "stdout": "bounded", "stderr": "",
+                        "returncode": -15, "elapsed_seconds": 1.0, "rss_scope": "sampled",
+                        "cleanup": {"success": True, "reaped": True, "error": None}}
+            source = child_input["source"]
+            record = self.child_record(child_input["profile"], ggml_type=source["ggml_type"],
+                                       rows=source["rows"], cols=source["cols"],
+                                       batch=child_input["batch"])
+            record.update(token_tile=child_input["token_tile"],
+                          comparison_group=child_input["comparison_group"])
+            Path(argv[4]).write_text(json.dumps(record))
+            return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
+                    "elapsed_seconds": 0.01, "rss_scope": "sampled",
+                    "cleanup": {"success": True, "reaped": True, "error": None}}
+
+        with mock.patch.object(projection_measure, "run_child", side_effect=failed_variant):
+            report = projection_measure.run_session(settings, self.output_dir)
+        failed = [sample for sample in report["samples"]
+                  if sample["case"] == "synthetic-tile-32"]
+        self.assertTrue(failed)
+        self.assertTrue(all(sample["status"] == "timeout" for sample in failed))
+        self.assertTrue(all(not pair["compatible"] for pair in report["comparison"]["groups"]))
+
+    def test_group_comparison_requires_every_output_bit_to_match(self):
+        settings = projection_measure.validate_manifest(self.paired_manifest())
+        calls = 0
+
+        def differing_tile(argv, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            child_input = json.loads(Path(argv[2]).read_bytes())
+            source = child_input["source"]
+            bits = [0x40000000] * 27 if child_input["token_tile"] == 64 else None
+            record = self.child_record(child_input["profile"], bits=bits,
+                                       ggml_type=source["ggml_type"], rows=source["rows"],
+                                       cols=source["cols"], batch=child_input["batch"])
+            record.update(token_tile=child_input["token_tile"],
+                          comparison_group=child_input["comparison_group"])
+            Path(argv[4]).write_text(json.dumps(record))
+            return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
+                    "elapsed_seconds": 0.01, "rss_scope": "sampled",
+                    "cleanup": {"success": True, "reaped": True, "error": None}}
+
+        with mock.patch.object(projection_measure, "run_child", side_effect=differing_tile):
+            report = projection_measure.run_session(settings, self.output_dir)
+        self.assertTrue(report["comparison"]["groups"])
+        self.assertTrue(any(any(value is False for value in row["output_bits_match"].values())
+                            for row in report["comparison"]["groups"]))
 
     def invoke_validate_only(self):
         manifest = self.root / "manifest.json"
@@ -63,7 +204,8 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def test_bf16_manifest_result_and_session_are_supported(self):
         manifest = self.valid_manifest()
-        manifest["cases"][0]["source"]["ggml_type"] = 30
+        for case in manifest["cases"]:
+            case["source"]["ggml_type"] = 30
         settings = projection_measure.validate_manifest(manifest)
         record = self.child_record(False, ggml_type=30, fmt="BF16")
         projection_measure.validate_result(record, settings["cases"][0], False)
@@ -84,7 +226,12 @@ class ProjectionManifestTests(unittest.TestCase):
         manifest["artifact_bytes"] = 64 * 1024 * 1024
         template = manifest["cases"][0]
         template["measured_calls"] = 32
-        manifest["cases"] = [dict(template, name=f"case-{index:02d}") for index in range(16)]
+        manifest["cases"] = [
+            dict(template, name=f"case-{group}-{tile}", comparison_group=f"group-{group}",
+                 token_tile=selector)
+            for group in range(4)
+            for tile, selector in (("base", None), ("32", 32), ("64", 64), ("128", 128))
+        ]
         with self.assertRaisesRegex(ValueError, "report metadata bound"):
             projection_measure.validate_manifest(manifest)
 
@@ -159,7 +306,8 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def test_per_input_dot_profile_rejects_input_transpose(self):
         manifest = self.valid_manifest()
-        manifest["cases"][0]["batch"] = 2
+        for case in manifest["cases"]:
+            case["batch"] = 2
         settings = projection_measure.validate_manifest(manifest)
         record = self.child_record(True, batch=2)
         record["profile_calls"][0]["input_transpose_ns"] = 10
@@ -203,12 +351,12 @@ class ProjectionManifestTests(unittest.TestCase):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         with mock.patch.object(projection_measure, "run_child", side_effect=self.complete_child):
             report = projection_measure.run_session(settings, self.output_dir)
-        self.assertEqual(report["schema"], 1)
-        self.assertEqual([sample["mode"] for sample in report["samples"]],
-                         ["unprofiled", "profiled", "profiled", "unprofiled",
+        self.assertEqual(report["schema"], 2)
+        self.assertEqual([sample["mode"] for sample in report["samples"][:6]],
+                         ["unprofiled", "profiled", "unprofiled", "profiled",
                           "unprofiled", "profiled"])
         self.assertTrue(all(sample["status"] == "complete" for sample in report["samples"]))
-        self.assertEqual(len(report["comparison"]["pairs"]), 3)
+        self.assertEqual(len(report["comparison"]["pairs"]), 12)
         self.assertTrue(all(pair["compatible"] for pair in report["comparison"]["pairs"]))
         profiled = next(sample for sample in report["samples"] if sample["mode"] == "profiled")
         self.assertEqual(profiled["profile_calls"][0]["workers"][0]["decode_ns"], 2)
@@ -224,11 +372,12 @@ class ProjectionManifestTests(unittest.TestCase):
         if fmt is None:
             fmt = projection_measure.SUPPORTED_TYPES[ggml_type][0]
         record = {
-            "schema": 1, "status": "complete", "source_kind": "synthetic",
+            "schema": 2, "status": "complete", "source_kind": "synthetic",
             "model_path": None, "tensor_name": None, "mapping_bytes": 0,
             "format": fmt, "ggml_type": ggml_type, "rows": rows, "cols": cols,
             "batch": batch, "branch": branch, "threads": 2,
-            "profile": profile, "activation_source": "synthetic_f32",
+            "profile": profile, "comparison_group": "synthetic-group", "token_tile": None,
+            "activation_source": "synthetic_f32",
             "setup_ns": 12, "call_wall_ns": [1000],
             "output_bits": [0x3F800000] * output_count if bits is None else bits,
             "all_calls_bit_identical": True,
@@ -252,9 +401,12 @@ class ProjectionManifestTests(unittest.TestCase):
         result_path = Path(argv[4])
         child_input = json.loads(input_path.read_bytes())
         source = child_input["source"]
-        result_path.write_text(json.dumps(self.child_record(
-            child_input["profile"], ggml_type=source["ggml_type"], rows=source["rows"],
-            cols=source["cols"], batch=child_input["batch"])))
+        record = self.child_record(child_input["profile"], ggml_type=source["ggml_type"],
+                                   rows=source["rows"], cols=source["cols"],
+                                   batch=child_input["batch"])
+        record.update(comparison_group=child_input["comparison_group"],
+                      token_tile=child_input["token_tile"])
+        result_path.write_text(json.dumps(record))
         result_path.chmod(0o600)
         return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                 "elapsed_seconds": 0.01, "rss_scope": "linux_owned_process_tree_sampled_100ms",
@@ -264,8 +416,9 @@ class ProjectionManifestTests(unittest.TestCase):
         manifest = self.valid_manifest()
         manifest["artifact_bytes"] = 32 * 1024 * 1024
         manifest["buffer_limit_bytes"] = 256 * 1024 * 1024
-        manifest["cases"][0].update(batch=32)
-        manifest["cases"][0]["source"].update(rows=8192)
+        for case in manifest["cases"]:
+            case.update(batch=32)
+            case["source"].update(rows=2048)
         settings = projection_measure.validate_manifest(manifest)
         launches = []
 
@@ -273,8 +426,10 @@ class ProjectionManifestTests(unittest.TestCase):
             launches.append(argv)
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(
-                child_input["profile"], ggml_type=0, rows=8192, cols=64, batch=32,
-                heap_bytes=64 * 1024 * 1024)
+                child_input["profile"], ggml_type=0, rows=2048, cols=64, batch=32,
+                heap_bytes=32 * 1024 * 1024)
+            record.update(comparison_group=child_input["comparison_group"],
+                          token_tile=child_input["token_tile"])
             result_path = Path(argv[4])
             result_path.write_text(json.dumps(record))
             result_path.chmod(0o600)
@@ -285,12 +440,12 @@ class ProjectionManifestTests(unittest.TestCase):
         with mock.patch.object(projection_measure, "run_child", side_effect=large_child):
             report = projection_measure.run_session(settings, self.output_dir)
 
-        self.assertEqual(len(launches), 6)
+        self.assertEqual(len(launches), 24)
         self.assertEqual(report["status"], "complete")
         self.assertTrue(all(pair["compatible"] and pair["output_bits_match"]
                             for pair in report["comparison"]["pairs"]))
         self.assertEqual(report["comparison"]["cases"]["synthetic-small"]["matched_repetitions"], 3)
-        expected_values = 32 * 8192
+        expected_values = 32 * 2048
         for sample in report["samples"]:
             self.assertNotIn("output_bits", sample)
             self.assertEqual(sample["output_bit_count"], expected_values)
@@ -300,7 +455,7 @@ class ProjectionManifestTests(unittest.TestCase):
         self.assertLess(len(report_bytes), projection_measure.MAX_RESULT_BYTES)
         self.assertNotIn(b'"output_bits"', report_bytes)
         results = list(self.output_dir.glob("sample-*/result.json"))
-        self.assertEqual(len(results), 6)
+        self.assertEqual(len(results), 24)
         self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in results))
         self.assertTrue(all(path.stat().st_size < projection_measure.MAX_RESULT_BYTES for path in results))
         total_artifacts = sum(path.stat().st_size for path in self.output_dir.rglob("*") if path.is_file())
@@ -315,7 +470,10 @@ class ProjectionManifestTests(unittest.TestCase):
             calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
             bits = [0x40000000] * 27 if calls == 2 else None
-            Path(argv[4]).write_text(json.dumps(self.child_record(child_input["profile"], bits=bits)))
+            record = self.child_record(child_input["profile"], bits=bits)
+            record.update(comparison_group=child_input["comparison_group"],
+                          token_tile=child_input["token_tile"])
+            Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled", "cleanup":
                     {"success": True, "reaped": True, "error": None}}
@@ -354,7 +512,8 @@ class ProjectionManifestTests(unittest.TestCase):
     def test_output_bit_arrays_are_released_at_each_pair_boundary(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         bit_refs = []
-        observations = []
+        retained_at_group_boundary = None
+        retained_indexes = None
         child_calls = 0
         original_validate = projection_measure.validate_result
 
@@ -369,15 +528,18 @@ class ProjectionManifestTests(unittest.TestCase):
             return validated
 
         def child(argv, *_args, **_kwargs):
-            nonlocal child_calls
-            if child_calls == 1:
-                observations.append(bit_refs[0]() is not None)
-            elif child_calls == 2:
+            nonlocal child_calls, retained_at_group_boundary, retained_indexes
+            if child_calls == 8:
                 gc.collect()
-                observations.append(all(ref() is None for ref in bit_refs))
+                retained_at_group_boundary = sum(ref() is not None for ref in bit_refs)
+                retained_indexes = [index for index, ref in enumerate(bit_refs)
+                                    if ref() is not None]
             child_calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
-            Path(argv[4]).write_text(json.dumps(self.child_record(child_input["profile"])))
+            record = self.child_record(child_input["profile"])
+            record.update(comparison_group=child_input["comparison_group"],
+                          token_tile=child_input["token_tile"])
+            Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
                     "cleanup": {"success": True, "reaped": True, "error": None}}
@@ -386,9 +548,9 @@ class ProjectionManifestTests(unittest.TestCase):
                 mock.patch.object(projection_measure, "run_child", side_effect=child):
             report = projection_measure.run_session(settings, self.output_dir)
 
-        self.assertEqual(child_calls, 6)
+        self.assertEqual(child_calls, 24)
         self.assertEqual(report["status"], "complete")
-        self.assertEqual(observations, [True, True])
+        self.assertEqual(retained_at_group_boundary, 0, retained_indexes)
 
     def test_nonfinite_bits_and_malformed_result_are_rejected(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
@@ -423,7 +585,10 @@ class ProjectionManifestTests(unittest.TestCase):
                         "elapsed_seconds": 0.1, "rss_scope": "sampled",
                         "cleanup": {"success": True, "reaped": True, "error": None}}
             child_input = json.loads(Path(argv[2]).read_bytes())
-            Path(argv[4]).write_text(json.dumps(self.child_record(child_input["profile"])))
+            record = self.child_record(child_input["profile"])
+            record.update(comparison_group=child_input["comparison_group"],
+                          token_tile=child_input["token_tile"])
+            Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
                     "cleanup": {"success": True, "reaped": True, "error": None}}

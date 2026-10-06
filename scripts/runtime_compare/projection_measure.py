@@ -37,12 +37,14 @@ CHILD_CLEANUP_RESERVE_SECONDS = 0.5
 MANIFEST_FIELDS = {"schema", "binary", "revision", "repetitions", "wall_seconds",
                    "session_seconds", "rss_bytes", "artifact_bytes", "buffer_limit_bytes",
                    "model_limit_bytes", "cases"}
-CASE_FIELDS = {"name", "batch", "source", "warmup_calls", "measured_calls"}
+CASE_FIELDS = {"name", "comparison_group", "token_tile", "batch", "source",
+               "warmup_calls", "measured_calls"}
 SYNTHETIC_FIELDS = {"kind", "ggml_type", "rows", "cols"}
 GGUF_FIELDS = {"kind", "model_path", "tensor"}
 RESULT_FIELDS = {"schema", "status", "source_kind", "model_path", "tensor_name",
                  "mapping_bytes", "format", "ggml_type", "rows", "cols", "batch",
-                 "branch", "threads", "profile", "activation_source", "setup_ns",
+                 "branch", "threads", "profile", "comparison_group", "token_tile",
+                 "activation_source", "setup_ns",
                  "call_wall_ns", "output_bits", "all_calls_bit_identical", "profile_calls",
                  "estimated_heap_bytes", "output_artifact_bound_bytes"}
 PROFILE_FIELDS = {"schema", "branch", "call_wall_ns", "validation_ns", "buffer_init_ns",
@@ -143,7 +145,7 @@ def _case_dimensions(case: dict) -> tuple[int | None, int | None]:
 def validate_manifest(value: dict) -> dict:
     if not isinstance(value, dict) or set(value) != MANIFEST_FIELDS:
         raise ValueError("manifest fields do not match schema")
-    if not _integer(value["schema"], minimum=1, maximum=1):
+    if not _integer(value["schema"], minimum=2, maximum=2):
         raise ValueError("unsupported manifest schema")
     binary = _absolute_path(value["binary"], "binary")
     revision = value["revision"]
@@ -177,6 +179,12 @@ def validate_manifest(value: dict) -> dict:
         if name in names:
             raise ValueError("case names must be unique")
         names.add(name)
+        group = case["comparison_group"]
+        if not isinstance(group, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):
+            raise ValueError("comparison_group must be a safe identifier")
+        token_tile = case["token_tile"]
+        if token_tile is not None and (not _integer(token_tile) or token_tile not in {32, 64, 128}):
+            raise ValueError("token_tile must be null or one of 32, 64, and 128")
         if not _integer(case["batch"], minimum=1, maximum=65):
             raise ValueError("batch must be an integer from 1 through 65")
         if not _integer(case["warmup_calls"], minimum=0, maximum=1):
@@ -220,7 +228,8 @@ def validate_manifest(value: dict) -> dict:
             allowed_case_fields = CASE_FIELDS
         if set(case) != allowed_case_fields:
             raise ValueError("case fields do not match source kind")
-        child_input = {"schema": 1, "source": source, "batch": case["batch"], "threads": 2,
+        child_input = {"schema": 2, "comparison_group": group, "token_tile": token_tile,
+                       "source": source, "batch": case["batch"], "threads": 2,
                        "profile": False, "warmup_calls": case["warmup_calls"],
                        "measured_calls": case["measured_calls"],
                        "buffer_limit_bytes": settings["buffer_limit_bytes"],
@@ -231,11 +240,25 @@ def validate_manifest(value: dict) -> dict:
             raise ValueError("predicted child result exceeds the 4 MiB result cap")
         dimensions = {"rows": rows, "cols": source.get("cols"),
                       "ggml_type": source.get("ggml_type")}
-        normalized.append({"name": name, "batch": case["batch"], "source": source,
+        normalized.append({"name": name, "comparison_group": group,
+                           "token_tile": token_tile, "batch": case["batch"], "source": source,
                            "warmup_calls": case["warmup_calls"],
                            "measured_calls": case["measured_calls"],
                            "expected_model_sha256": case.get("expected_model_sha256"),
                            **dimensions, "input": child_input})
+    groups = {}
+    for case in normalized:
+        groups.setdefault(case["comparison_group"], []).append(case)
+    expected_selectors = {None, 32, 64, 128}
+    for group, members in groups.items():
+        selectors = [member["token_tile"] for member in members]
+        if len(members) != 4 or set(selectors) != expected_selectors:
+            raise ValueError(f"comparison group {group} must have one baseline and selectors 32, 64, 128")
+        baseline = next(member for member in members if member["token_tile"] is None)
+        shared = ("batch", "source", "warmup_calls", "measured_calls", "expected_model_sha256")
+        if any(any(member.get(field) != baseline.get(field) for field in shared)
+               for member in members):
+            raise ValueError(f"comparison group {group} members must match workload settings")
     report_reserve = _report_reserve_bytes(normalized)
     if report_reserve > MAX_RESULT_BYTES:
         raise ValueError("report metadata bound exceeds the 4 MiB report cap")
@@ -245,7 +268,7 @@ def validate_manifest(value: dict) -> dict:
     if predicted > settings["artifact_bytes"]:
         raise ValueError("artifact budget cannot reserve bounded outputs and compact reports")
     settings.update({"binary": binary, "revision": revision.lower(), "cases": normalized,
-                     "schema": 1, "report_reserve_bytes": report_reserve})
+                     "schema": 2, "report_reserve_bytes": report_reserve})
     return settings
 
 
@@ -468,8 +491,12 @@ def _validate_profile(profile: Any, branch: str, calls: int, rows: int) -> None:
 def validate_result(value: Any, case: dict, profile: bool) -> dict:
     if not isinstance(value, dict) or set(value) != RESULT_FIELDS:
         raise ValueError("child result fields do not match schema")
-    if not _integer(value["schema"], minimum=1, maximum=1) or value["status"] != "complete":
+    if not _integer(value["schema"], minimum=2, maximum=2) or value["status"] != "complete":
         raise ValueError("child result status or schema is invalid")
+    if (value["comparison_group"] != case["comparison_group"]
+            or (value["token_tile"] is not None and not _integer(value["token_tile"]))
+            or value["token_tile"] != case["token_tile"]):
+        raise ValueError("child comparison identity mismatch")
     if value["source_kind"] != case["source"]["kind"] or value["profile"] is not profile:
         raise ValueError("child source or profile mode mismatch")
     if value["activation_source"] != "synthetic_f32":
@@ -638,6 +665,100 @@ def compare_pairs(samples: list[dict], exact_bit_matches: dict | None = None) ->
             "ratio_policy": "outer call wall totals; matched outputs, shape, branch, threads, and timer boundary only; faster profiled calls do not establish negative overhead"}
 
 
+def compare_workload_groups(samples: list[dict], groups: dict,
+                            exact_matches: dict) -> list[dict]:
+    indexed = {(sample["case"], sample["repetition"], sample["mode"]): sample
+               for sample in samples}
+    comparisons = []
+    metadata = ("source_kind", "rows", "cols", "batch", "format", "ggml_type",
+                "branch", "threads", "timer_boundary")
+    for group, members in groups.items():
+        baseline = next(case for case in members if case["token_tile"] is None)
+        variants = sorted((case for case in members if case["token_tile"] is not None),
+                          key=lambda case: case["token_tile"])
+        for repetition in range(3):
+            for variant in variants:
+                left = {mode: indexed.get((baseline["name"], repetition, mode))
+                        for mode in ("unprofiled", "profiled")}
+                right = {mode: indexed.get((variant["name"], repetition, mode))
+                         for mode in ("unprofiled", "profiled")}
+                statuses = {f"baseline_{mode}": None if item is None else item["status"]
+                            for mode, item in left.items()}
+                statuses.update({f"variant_{mode}": None if item is None else item["status"]
+                                 for mode, item in right.items()})
+                work_match = all(left[mode] is not None and right[mode] is not None
+                                 and all(left[mode].get(field) == right[mode].get(field)
+                                         for field in metadata)
+                                 for mode in left)
+                parity = {mode: exact_matches.get((variant["name"], repetition, mode))
+                          for mode in left}
+                children_succeeded = all(item is not None and item["status"] == "complete"
+                                         for item in (*left.values(), *right.values()))
+                compatible = (children_succeeded and work_match
+                              and all(value is True for value in parity.values())
+                              and all(item.get("comparison_status") == "matched"
+                                      for item in (*left.values(), *right.values())))
+                if (children_succeeded
+                        and (not work_match or any(value is False for value in parity.values()))):
+                    for item in (*left.values(), *right.values()):
+                        if item is not None and item["status"] == "complete":
+                            item["comparison_status"] = "mismatch"
+                comparisons.append({"comparison_group": group, "repetition": repetition,
+                                    "baseline_case": baseline["name"],
+                                    "variant_case": variant["name"],
+                                    "token_tile": variant["token_tile"],
+                                    "compatible": compatible, "work_settings_match": work_match,
+                                    "output_bits_match": parity, "sample_statuses": statuses,
+                                    "unprofiled_baseline_total_call_ns": (
+                                        sum(left["unprofiled"]["call_wall_ns"])
+                                        if compatible else None),
+                                    "unprofiled_variant_total_call_ns": (
+                                        sum(right["unprofiled"]["call_wall_ns"])
+                                        if compatible else None)})
+    return comparisons
+
+
+def summarize_measurements(samples: list[dict], comparisons: list[dict]) -> dict:
+    by_case = {}
+    for sample in samples:
+        by_case.setdefault(sample["case"], []).append(sample)
+    timings = {}
+    stages = PROFILE_FIELDS - {"schema", "branch", "workers"}
+    for case, case_samples in by_case.items():
+        unprofiled = [sum(sample["call_wall_ns"]) for sample in case_samples
+                      if sample["mode"] == "unprofiled" and sample["status"] == "complete"
+                      and sample.get("comparison_status") == "matched"]
+        profile_values = {stage: [call[stage] for sample in case_samples
+                                  if sample["mode"] == "profiled" and sample["status"] == "complete"
+                                  for call in (sample.get("profile_calls") or [])
+                                  if _integer(call.get(stage))]
+                          for stage in stages}
+        timings[case] = {
+            "unprofiled_full_call_total_ns": _range(unprofiled),
+            "profiled_diagnostic_stage_ns": {stage: _range(values)
+                                              for stage, values in profile_values.items()},
+        }
+    ratios = {}
+    by_variant = {}
+    for row in comparisons:
+        key = (row["comparison_group"], row["variant_case"], row["token_tile"])
+        by_variant.setdefault(key, []).append(row)
+    for (group, case, tile), rows in by_variant.items():
+        values = [row["unprofiled_variant_total_call_ns"] /
+                  row["unprofiled_baseline_total_call_ns"] for row in rows
+                  if row["compatible"] and row["unprofiled_baseline_total_call_ns"] > 0]
+        ratios[case] = {"comparison_group": group, "token_tile": tile,
+                        "paired_unprofiled_variant_to_baseline_ratio": _range(values)}
+    return {"cases": timings, "variant_ratios": ratios,
+            "profiled_stages_are_diagnostic_only": True}
+
+
+def _range(values: list[int | float]) -> dict | None:
+    if not values:
+        return None
+    return {"median": statistics.median(values), "min": min(values), "max": max(values)}
+
+
 def run_session(settings: dict, output_dir: Path) -> dict:
     output_dir = Path(output_dir)
     started = time.monotonic()
@@ -647,100 +768,115 @@ def run_session(settings: dict, output_dir: Path) -> dict:
     samples = []
     pending_pair_bits = {}
     exact_bit_matches = {}
+    group_output_bits = {}
+    group_bit_matches = {}
     stop_launching = False
     try:
-        for case_index, case in enumerate(settings["cases"]):
+        groups = {}
+        for case in settings["cases"]:
+            groups.setdefault(case["comparison_group"], []).append(case)
+        for group, members in groups.items():
+            baseline = next(case for case in members if case["token_tile"] is None)
+            variants = sorted((case for case in members if case["token_tile"] is not None),
+                              key=lambda case: case["token_tile"])
             for repetition in range(3):
-                for mode in _paired_order(repetition):
-                    if stop_launching:
-                        break
-                    sample_index = len(samples)
-                    pair_key = (case["name"], repetition)
-                    mode_order = _paired_order(repetition)
-                    sample = {"case": case["name"], "repetition": repetition, "mode": mode,
-                              "status": "not_started", "runner_status": None,
-                              "comparison_status": "not_comparable",
-                              "cleanup": None, "rss_scope": None, "call_wall_ns": None,
-                              "setup_ns": None, "profile_calls": None,
-                              "output_bit_count": None, "output_bits_sha256": None,
-                              "result_ref": None, "log_excerpt": ""}
-                    samples.append(sample)
-                    now = time.monotonic()
-                    allowance = min(settings["wall_seconds"], deadline - now)
-                    if allowance <= CHILD_CLEANUP_RESERVE_SECONDS:
-                        sample["status"] = "session_timeout"
-                        sample["runner_status"] = "session_timeout"
-                        continue
-                    folder = None
-                    try:
-                        folder = root.mkdir(f"sample-{sample_index:04d}")
-                        child_input = dict(case["input"])
-                        child_input["profile"] = mode == "profiled"
-                        input_data = json.dumps(child_input, separators=(",", ":"), allow_nan=False).encode()
-                        folder.write("input.json", input_data, MAX_MANIFEST_BYTES)
-                        result_name = "result.json"
-                        # Leave one MiB for the final JSON/Markdown reports; every child shares
-                        # the remaining artifact allowance through the supervisor callback.
-                        child_cap = settings["artifact_bytes"] - settings["report_reserve_bytes"]
-                        result = run_child(
-                            [str(settings["binary"]), "--input", str(folder.path / "input.json"),
-                             "--output", str(folder.path / result_name)],
-                            allowance - CHILD_CLEANUP_RESERVE_SECONDS, settings["rss_bytes"],
-                            MAX_CHANNEL_BYTES,
-                            artifact_size=lambda: root.size(child_cap),
-                            artifact_limit_bytes=child_cap)
-                        sample["runner_status"] = result.get("status")
-                        sample["rss_scope"] = result.get("rss_scope")
-                        cleanup = result.get("cleanup")
-                        if isinstance(cleanup, dict):
-                            cleanup_error = cleanup.get("error")
-                            sample["cleanup"] = {
-                                "success": cleanup.get("success") is True,
-                                "reaped": cleanup.get("reaped") is True,
-                                "error": None if cleanup_error is None else str(cleanup_error)[:256],
-                            }
-                        else:
-                            sample["cleanup"] = None
-                        sample["log_excerpt"] = (result.get("stdout", "") + result.get("stderr", ""))[-512:]
-                        sample["status"] = result.get("status", "supervisor_error")
-                        if not isinstance(sample["cleanup"], dict) or not sample["cleanup"].get("success"):
-                            sample["status"] = "cleanup_error"
-                            stop_launching = True
-                        elif sample["status"] == "complete":
-                            raw = folder.read(result_name, MAX_RESULT_BYTES)
-                            parsed = json.loads(raw, object_pairs_hook=_duplicate_rejecting_pairs)
-                            validated = validate_result(parsed, case, mode == "profiled")
-                            bits = validated["output_bits"]
-                            sample["result_ref"] = f"sample-{sample_index:04d}/{result_name}"
-                            sample["output_bit_count"] = len(bits)
-                            sample["output_bits_sha256"] = _output_bits_sha256(bits)
-                            previous = pending_pair_bits.pop(pair_key, None)
-                            if previous is None:
-                                pending_pair_bits[pair_key] = (mode, bits)
-                            else:
-                                _previous_mode, previous_bits = previous
-                                exact_bit_matches[pair_key] = previous_bits == bits
-                                del previous_bits, _previous_mode
-                            del previous
-                            sample.update({"status": "complete", "call_wall_ns": validated["call_wall_ns"],
-                                           "setup_ns": validated["setup_ns"],
-                                           "profile_calls": validated["profile_calls"],
-                                           "rows": validated["rows"], "cols": validated["cols"],
-                                           "format": validated["format"], "branch": validated["branch"],
-                                           "threads": validated["threads"],
-                                           "timer_boundary": "outer_call_wall_ns"})
-                            del parsed, validated, raw, bits
-                    except Exception as exc:
-                        sample["status"] = "result_error" if sample["runner_status"] == "complete" else "artifact_error"
-                        sample["error"] = str(exc)[:256]
-                        cleanup = sample.get("cleanup")
-                        if not isinstance(cleanup, dict) or cleanup.get("success") is not True:
-                            stop_launching = True
-                    finally:
-                        if folder is not None:
-                            folder.close()
-                        if mode_order.index(mode) == 1:
-                            pending_pair_bits.pop(pair_key, None)
+                ordered_members = ([baseline, *variants] if repetition % 2 == 0
+                                   else [*variants, baseline])
+                for case in ordered_members:
+                    for mode in _paired_order(repetition):
+                        if stop_launching:
+                            break
+                        sample_index = len(samples)
+                        pair_key = (case["name"], repetition)
+                        mode_order = _paired_order(repetition)
+                        sample = {"case": case["name"], "comparison_group": group,
+                                  "token_tile": case["token_tile"], "repetition": repetition,
+                                  "mode": mode, "status": "not_started", "runner_status": None,
+                                  "comparison_status": "not_comparable", "cleanup": None,
+                                  "rss_scope": None, "call_wall_ns": None, "setup_ns": None,
+                                  "profile_calls": None, "output_bit_count": None,
+                                  "output_bits_sha256": None, "result_ref": None, "log_excerpt": ""}
+                        samples.append(sample)
+                        allowance = min(settings["wall_seconds"], deadline - time.monotonic())
+                        if allowance <= CHILD_CLEANUP_RESERVE_SECONDS:
+                            sample["status"] = sample["runner_status"] = "session_timeout"
+                            continue
+                        folder = None
+                        try:
+                            folder = root.mkdir(f"sample-{sample_index:04d}")
+                            child_input = dict(case["input"])
+                            child_input.update(profile=mode == "profiled")
+                            input_data = json.dumps(child_input, separators=(",", ":"), allow_nan=False).encode()
+                            folder.write("input.json", input_data, MAX_MANIFEST_BYTES)
+                            result_name = "result.json"
+                            child_cap = settings["artifact_bytes"] - settings["report_reserve_bytes"]
+                            result = run_child(
+                                [str(settings["binary"]), "--input", str(folder.path / "input.json"),
+                                 "--output", str(folder.path / result_name)],
+                                allowance - CHILD_CLEANUP_RESERVE_SECONDS, settings["rss_bytes"],
+                                MAX_CHANNEL_BYTES,
+                                artifact_size=lambda: root.size(child_cap),
+                                artifact_limit_bytes=child_cap)
+                            sample["runner_status"] = result.get("status")
+                            sample["rss_scope"] = result.get("rss_scope")
+                            cleanup = result.get("cleanup")
+                            if isinstance(cleanup, dict):
+                                cleanup_error = cleanup.get("error")
+                                sample["cleanup"] = {"success": cleanup.get("success") is True,
+                                                     "reaped": cleanup.get("reaped") is True,
+                                                     "error": None if cleanup_error is None else str(cleanup_error)[:256]}
+                            sample["log_excerpt"] = (result.get("stdout", "") + result.get("stderr", ""))[-512:]
+                            sample["status"] = result.get("status", "supervisor_error")
+                            if not isinstance(sample["cleanup"], dict) or not sample["cleanup"].get("success"):
+                                sample["status"] = "cleanup_error"
+                                stop_launching = True
+                            elif sample["status"] == "complete":
+                                raw = folder.read(result_name, MAX_RESULT_BYTES)
+                                parsed = json.loads(raw, object_pairs_hook=_duplicate_rejecting_pairs)
+                                validated = validate_result(parsed, case, mode == "profiled")
+                                bits = validated["output_bits"]
+                                sample["result_ref"] = f"sample-{sample_index:04d}/{result_name}"
+                                sample["output_bit_count"] = len(bits)
+                                sample["output_bits_sha256"] = _output_bits_sha256(bits)
+                                previous = pending_pair_bits.pop(pair_key, None)
+                                if previous is None:
+                                    pending_pair_bits[pair_key] = (mode, bits)
+                                else:
+                                    _previous_mode, previous_bits = previous
+                                    exact_bit_matches[pair_key] = previous_bits == bits
+                                    del previous_bits, _previous_mode
+                                del previous
+                                group_key = (group, repetition, mode)
+                                member_bits = group_output_bits.setdefault(group_key, {})
+                                member_bits[case["name"]] = bits
+                                if len(member_bits) == 4:
+                                    base_bits = member_bits[baseline["name"]]
+                                    for variant in variants:
+                                        group_bit_matches[(variant["name"], repetition, mode)] = (
+                                            base_bits == member_bits[variant["name"]])
+                                    del group_output_bits[group_key]
+                                    del base_bits, member_bits
+                                sample.update({"status": "complete", "call_wall_ns": validated["call_wall_ns"],
+                                               "setup_ns": validated["setup_ns"],
+                                               "profile_calls": validated["profile_calls"],
+                                               "rows": validated["rows"], "cols": validated["cols"],
+                                               "batch": validated["batch"], "format": validated["format"],
+                                               "ggml_type": validated["ggml_type"],
+                                               "source_kind": validated["source_kind"],
+                                               "branch": validated["branch"], "threads": validated["threads"],
+                                               "timer_boundary": "outer_call_wall_ns"})
+                                del parsed, validated, raw, bits
+                        except Exception as exc:
+                            sample["status"] = "result_error" if sample["runner_status"] == "complete" else "artifact_error"
+                            sample["error"] = str(exc)[:256]
+                            cleanup = sample.get("cleanup")
+                            if not isinstance(cleanup, dict) or cleanup.get("success") is not True:
+                                stop_launching = True
+                        finally:
+                            if folder is not None:
+                                folder.close()
+                            if mode_order.index(mode) == 1:
+                                pending_pair_bits.pop(pair_key, None)
         cleanup_unverified = any(sample.get("runner_status") is not None and
                                  (not isinstance(sample.get("cleanup"), dict)
                                   or sample["cleanup"].get("success") is not True)
@@ -761,10 +897,11 @@ def run_session(settings: dict, output_dir: Path) -> dict:
                     profiled["comparison_status"] = unprofiled["comparison_status"] = "mismatch"
                 else:
                     profiled["comparison_status"] = unprofiled["comparison_status"] = "matched"
+        workload_comparisons = compare_workload_groups(samples, groups, group_bit_matches)
         retention = None
         if not cleanup_unverified and root.size(settings["artifact_bytes"]) > settings["artifact_bytes"] - settings["report_reserve_bytes"]:
             retention = root.limit_retained_artifacts(settings["artifact_bytes"] - settings["report_reserve_bytes"])
-        report = {"schema": 1, "status": "complete" if samples and all(s["status"] == "complete" for s in samples) else "partial",
+        report = {"schema": 2, "status": "complete" if samples and all(s["status"] == "complete" for s in samples) else "partial",
                   "settings": {"revision": settings["revision"], "binary_sha256": provenance["binary"]["sha256"],
                                "binary_bytes": provenance["binary"]["bytes"], "models": provenance["models"],
                                "repetitions": 3, "wall_seconds": settings["wall_seconds"],
@@ -772,9 +909,11 @@ def run_session(settings: dict, output_dir: Path) -> dict:
                                "artifact_bytes": settings["artifact_bytes"], "buffer_limit_bytes": settings["buffer_limit_bytes"],
                                "model_limit_bytes": settings["model_limit_bytes"], "threads": 2,
                                "report_reserve_bytes": settings["report_reserve_bytes"],
-                               "build_command_example": "Example only; not verified for this binary: CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo build --offline --release -j 1 -p mivi-model --features projection-diagnostics --example projection_measure"},
+                               "build_command_example": "Example only; not verified for this binary: CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo build --offline --release -j 1 -p mivi-model --features projection-locality-experiment --example projection_measure"},
                   "samples": samples, "summary": summarize_samples(samples),
-                  "comparison": compare_pairs(samples, exact_bit_matches),
+                  "measurement_summary": summarize_measurements(samples, workload_comparisons),
+                  "comparison": {**compare_pairs(samples, exact_bit_matches),
+                                 "groups": workload_comparisons},
                   "elapsed_wall_ns": round((time.monotonic() - started) * 1_000_000_000),
                   "content_quiescence_assumption": "The selected model and executable are assumed quiescent during measurement; preflight hashes do not freeze in-place content."}
         if retention is not None:
