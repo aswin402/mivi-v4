@@ -38,6 +38,25 @@ pub use avx2::hsum256_ps;
 
 pub use norm::{rms_norm_in_place_simd, rms_norm_simd};
 
+/// Token traversal width for the projection locality experiment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionTokenTile {
+    Tokens32,
+    Tokens64,
+    Tokens128,
+}
+
+impl ProjectionTokenTile {
+    #[inline]
+    const fn width(self) -> usize {
+        match self {
+            Self::Tokens32 => 32,
+            Self::Tokens64 => 64,
+            Self::Tokens128 => 128,
+        }
+    }
+}
+
 /// Column panel width for paired projection accumulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionColumnTile {
@@ -129,6 +148,26 @@ pub fn matmul_accumulate_transposed_simd(
     }
 }
 
+/// Accumulate a decoded row against column-major batches using an explicit
+/// token traversal width.
+///
+/// `transposed_inputs` is laid out as `[cols, batch]`, while `out` is `[batch]`.
+#[inline]
+pub fn matmul_accumulate_transposed_with_tile_simd(
+    out: &mut [f32],
+    weights: &[f32],
+    transposed_inputs: &[f32],
+    batch: usize,
+    cols: usize,
+    tile: ProjectionTokenTile,
+) {
+    let inputs_len = cols.checked_mul(batch).expect("batch dimensions overflow");
+    let out = &mut out[..batch];
+    let weights = &weights[..cols];
+    let inputs = &transposed_inputs[..inputs_len];
+    matmul_accumulate_transposed_with_tile_impl(out, weights, None, inputs, batch, cols, tile);
+}
+
 /// Accumulate two decoded rows while sharing the transposed input loads.
 /// Output slices are `[batch]`; inputs are `[cols, batch]`.
 ///
@@ -203,8 +242,193 @@ pub fn matmul_accumulate_transposed_pair_with_column_tile_simd(
     matmul_accumulate_transposed_simd(out1, weights1, inputs, batch, cols);
 }
 
+/// Accumulate two decoded rows with an explicit token traversal width.
+/// Output slices are `[batch]`; inputs are `[cols, batch]`.
+///
+/// # Panics
+/// Panics if either output/weight slice is too short, the input dimensions
+/// overflow, or the transposed input slice does not cover those dimensions.
+#[inline]
+pub fn matmul_accumulate_transposed_pair_with_tile_simd(
+    out0: &mut [f32],
+    out1: &mut [f32],
+    weights0: &[f32],
+    weights1: &[f32],
+    transposed_inputs: &[f32],
+    batch: usize,
+    cols: usize,
+    tile: ProjectionTokenTile,
+) {
+    let out0 = &mut out0[..batch];
+    let out1 = &mut out1[..batch];
+    let weights0 = &weights0[..cols];
+    let weights1 = &weights1[..cols];
+    let inputs_len = cols.checked_mul(batch).expect("batch dimensions overflow");
+    let inputs = &transposed_inputs[..inputs_len];
+    matmul_accumulate_transposed_pair_with_tile_impl(
+        out0, out1, weights0, weights1, inputs, batch, cols, tile,
+    );
+}
+
+#[inline]
+fn matmul_accumulate_transposed_with_tile_impl(
+    out0: &mut [f32],
+    weights0: &[f32],
+    mut second_row: Option<(&mut [f32], &[f32])>,
+    inputs: &[f32],
+    batch: usize,
+    cols: usize,
+    tile: ProjectionTokenTile,
+) {
+    #[cfg(target_arch = "x86_64")]
+    if *HAS_AVX2_FMA {
+        // SAFETY: runtime feature detection and the public entry points' slices
+        // guarantee AVX2/FMA support and valid bounds for the entire kernel.
+        unsafe {
+            avx2::matmul_accumulate_transposed_with_tile_avx2(
+                out0,
+                weights0,
+                second_row,
+                inputs,
+                batch,
+                cols,
+                tile.width(),
+            );
+        }
+        return;
+    }
+
+    let width = tile.width();
+    for token_start in (0..batch).step_by(width) {
+        let token_end = (token_start + width).min(batch);
+        for token in token_start..token_end {
+            let mut accumulator0 = out0[token];
+            let mut accumulator1 = second_row.as_ref().map(|(out, _)| out[token]);
+            for col in 0..cols {
+                let input = inputs[col * batch + token];
+                accumulator0 += weights0[col] * input;
+                if let (Some(accumulator1), Some((_, weights1))) =
+                    (accumulator1.as_mut(), second_row.as_ref())
+                {
+                    *accumulator1 += weights1[col] * input;
+                }
+            }
+            out0[token] = accumulator0;
+            if let (Some(accumulator1), Some((out1, _))) = (accumulator1, second_row.as_mut()) {
+                out1[token] = accumulator1;
+            }
+        }
+    }
+}
+
+#[inline]
+fn matmul_accumulate_transposed_pair_with_tile_impl(
+    out0: &mut [f32],
+    out1: &mut [f32],
+    weights0: &[f32],
+    weights1: &[f32],
+    inputs: &[f32],
+    batch: usize,
+    cols: usize,
+    tile: ProjectionTokenTile,
+) {
+    matmul_accumulate_transposed_with_tile_impl(
+        out0,
+        weights0,
+        Some((out1, weights1)),
+        inputs,
+        batch,
+        cols,
+        tile,
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn projection_token_tile_compatibility_matches_default_simd() {
+        for tile in [
+            super::ProjectionTokenTile::Tokens32,
+            super::ProjectionTokenTile::Tokens64,
+            super::ProjectionTokenTile::Tokens128,
+        ] {
+            for batch in [31, 33, 65] {
+                for cols in [1, 17, 257] {
+                    let weights0: Vec<f32> =
+                        (0..cols).map(|i| (i % 13) as f32 * 0.125 - 0.75).collect();
+                    let weights1: Vec<f32> =
+                        (0..cols).map(|i| (i % 17) as f32 * 0.0625 - 0.5).collect();
+                    let inputs: Vec<f32> = (0..cols * batch)
+                        .map(|i| (i % 19) as f32 * 0.0625 - 0.5)
+                        .collect();
+                    let mut expected0 = vec![0.25_f32; batch];
+                    let mut expected1 = vec![-0.5_f32; batch];
+                    let mut actual0 = expected0.clone();
+                    let mut actual1 = expected1.clone();
+
+                    super::matmul_accumulate_transposed_simd(
+                        &mut expected0,
+                        &weights0,
+                        &inputs,
+                        batch,
+                        cols,
+                    );
+                    super::matmul_accumulate_transposed_simd(
+                        &mut expected1,
+                        &weights1,
+                        &inputs,
+                        batch,
+                        cols,
+                    );
+                    super::matmul_accumulate_transposed_with_tile_simd(
+                        &mut actual0,
+                        &weights0,
+                        &inputs,
+                        batch,
+                        cols,
+                        tile,
+                    );
+                    assert_eq!(
+                        actual0
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>(),
+                        expected0
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect::<Vec<_>>(),
+                        "single: tile={tile:?}, batch={batch}, cols={cols}"
+                    );
+
+                    actual0.fill(0.25);
+                    super::matmul_accumulate_transposed_pair_with_tile_simd(
+                        &mut actual0,
+                        &mut actual1,
+                        &weights0,
+                        &weights1,
+                        &inputs,
+                        batch,
+                        cols,
+                        tile,
+                    );
+                    for (expected, actual) in [(&expected0, &actual0), (&expected1, &actual1)] {
+                        assert_eq!(
+                            expected
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>(),
+                            actual
+                                .iter()
+                                .map(|value| value.to_bits())
+                                .collect::<Vec<_>>(),
+                            "pair: tile={tile:?}, batch={batch}, cols={cols}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn projection_column_tile_matches_default_pair_bits_and_preserves_sentinels() {
         for tile in [
