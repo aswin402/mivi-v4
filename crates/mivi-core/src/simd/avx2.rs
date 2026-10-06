@@ -143,14 +143,14 @@ pub unsafe fn vec_fmadd_avx2(out: &mut [f32], scale: f32, src: &[f32]) {
     }
 }
 
-/// Accumulate two decoded rows, reusing each input vector for both rows.
+/// Accumulate two decoded rows within fixed-width column panels.
 ///
 /// # Safety
 /// Caller must ensure AVX2/FMA support, outputs of at least `batch`, weights
 /// of at least `cols`, and inputs of at least `cols * batch` elements.
 #[target_feature(enable = "avx2", enable = "fma")]
 #[inline]
-pub unsafe fn matmul_accumulate_transposed_pair_avx2(
+pub(super) unsafe fn pair_panel_avx2<const COLUMN_TILE: usize>(
     out0: &mut [f32],
     out1: &mut [f32],
     weights0: &[f32],
@@ -164,7 +164,6 @@ pub unsafe fn matmul_accumulate_transposed_pair_avx2(
     let w0 = weights0.as_ptr();
     let w1 = weights1.as_ptr();
     let inputs = transposed_inputs.as_ptr();
-    const COLUMN_TILE: usize = 128;
     for column_start in (0..cols).step_by(COLUMN_TILE) {
         let column_end = (column_start + COLUMN_TILE).min(cols);
         let mut offset = 0;
@@ -254,7 +253,10 @@ pub unsafe fn matmul_accumulate_transposed_avx2(
             for offset in (0..vector_end).step_by(8) {
                 let accumulator = _mm256_loadu_ps(out_ptr.add(offset));
                 let value = _mm256_loadu_ps(input.add(offset));
-                _mm256_storeu_ps(out_ptr.add(offset), _mm256_fmadd_ps(scale, value, accumulator));
+                _mm256_storeu_ps(
+                    out_ptr.add(offset),
+                    _mm256_fmadd_ps(scale, value, accumulator),
+                );
             }
             for b in vector_end..batch {
                 *out_ptr.add(b) += *weights_ptr.add(col) * *input.add(b);
@@ -329,76 +331,5 @@ pub unsafe fn matmul_accumulate_transposed_avx2(
             accumulator += *weights_ptr.add(col) * *inputs_ptr.add(col * batch + batch_idx);
         }
         *out_ptr.add(batch_idx) = accumulator;
-    }
-}
-
-/// Accumulate one or two decoded rows against transposed batch inputs.
-///
-/// # Safety
-/// Caller must ensure AVX2/FMA support, valid slice lengths, and a nonzero
-/// token tile width.
-#[target_feature(enable = "avx2", enable = "fma")]
-#[inline]
-pub unsafe fn matmul_accumulate_transposed_with_tile_avx2(
-    out: &mut [f32],
-    weights: &[f32],
-    second_row: Option<(&mut [f32], &[f32])>,
-    transposed_inputs: &[f32],
-    batch: usize,
-    cols: usize,
-    token_tile_width: usize,
-) {
-    let out0_ptr = out.as_mut_ptr();
-    let weights0_ptr = weights.as_ptr();
-    let (out1_ptr, weights1_ptr) = match second_row {
-        Some((out1, weights1)) => (Some(out1.as_mut_ptr()), Some(weights1.as_ptr())),
-        None => (None, None),
-    };
-    let inputs_ptr = transposed_inputs.as_ptr();
-
-    for token_start in (0..batch).step_by(token_tile_width) {
-        let token_end = (token_start + token_tile_width).min(batch);
-        let mut offset = token_start;
-        while offset + 8 <= token_end {
-            let mut accumulator0 = _mm256_loadu_ps(out0_ptr.add(offset));
-            let mut accumulator1 = out1_ptr.map(|ptr| _mm256_loadu_ps(ptr.add(offset)));
-            for col in 0..cols {
-                let input = _mm256_loadu_ps(inputs_ptr.add(col * batch + offset));
-                accumulator0 =
-                    _mm256_fmadd_ps(_mm256_set1_ps(*weights0_ptr.add(col)), input, accumulator0);
-                if let (Some(accumulator1), Some(weights1_ptr)) =
-                    (accumulator1.as_mut(), weights1_ptr)
-                {
-                    *accumulator1 = _mm256_fmadd_ps(
-                        _mm256_set1_ps(*weights1_ptr.add(col)),
-                        input,
-                        *accumulator1,
-                    );
-                }
-            }
-            _mm256_storeu_ps(out0_ptr.add(offset), accumulator0);
-            if let (Some(accumulator1), Some(out1_ptr)) = (accumulator1, out1_ptr) {
-                _mm256_storeu_ps(out1_ptr.add(offset), accumulator1);
-            }
-            offset += 8;
-        }
-
-        for token in offset..token_end {
-            let mut accumulator0 = *out0_ptr.add(token);
-            let mut accumulator1 = out1_ptr.map(|ptr| *ptr.add(token));
-            for col in 0..cols {
-                let input = *inputs_ptr.add(col * batch + token);
-                accumulator0 += *weights0_ptr.add(col) * input;
-                if let (Some(accumulator1), Some(weights1_ptr)) =
-                    (accumulator1.as_mut(), weights1_ptr)
-                {
-                    *accumulator1 += *weights1_ptr.add(col) * input;
-                }
-            }
-            *out0_ptr.add(token) = accumulator0;
-            if let (Some(accumulator1), Some(out1_ptr)) = (accumulator1, out1_ptr) {
-                *out1_ptr.add(token) = accumulator1;
-            }
-        }
     }
 }
