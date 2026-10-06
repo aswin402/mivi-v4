@@ -1,7 +1,8 @@
 //! Opt-in diagnostics for the shared quantized row projection kernel.
 
 use crate::{
-    quantized_matmul_rows_impl, GgmlType, ProjectionProfileInternal, Result, WorkerWorkInternal,
+    quantized_matmul_rows_impl, quantized_matmul_rows_with_tile_impl, GgmlType,
+    ProjectionProfileInternal, Result, WorkerWorkInternal,
 };
 
 /// Timed work performed by one existing output-row worker chunk.
@@ -43,6 +44,34 @@ pub fn quantized_matmul_rows_profiled(
     let profile =
         quantized_matmul_rows_impl::<true>(out, ggml_type, weights, inputs, batch, rows, cols)?
             .expect("profiled kernel invocation returns diagnostics");
+    Ok(from_internal(profile))
+}
+
+/// Run the checked projection kernel with an explicit token traversal width
+/// while collecting opt-in stage timings.
+#[cfg(feature = "projection-locality-experiment")]
+#[allow(clippy::too_many_arguments)]
+pub fn quantized_matmul_rows_profiled_with_token_tile(
+    out: &mut [f32],
+    ggml_type: GgmlType,
+    weights: &[u8],
+    inputs: &[f32],
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    tile: mivi_core::simd::ProjectionTokenTile,
+) -> Result<ProjectionProfile> {
+    let profile = quantized_matmul_rows_with_tile_impl::<true>(
+        out,
+        ggml_type,
+        weights,
+        inputs,
+        batch,
+        rows,
+        cols,
+        Some(tile),
+    )?
+    .expect("profiled kernel invocation returns diagnostics");
     Ok(from_internal(profile))
 }
 

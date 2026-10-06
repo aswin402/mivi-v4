@@ -8,6 +8,8 @@ use case::{CaseInput, Source};
 #[cfg(feature = "projection-locality-experiment")]
 use mivi_core::simd::ProjectionTokenTile;
 use mivi_model::gguf::GgufFile;
+#[cfg(feature = "projection-locality-experiment")]
+use mivi_quant::projection_diagnostics::quantized_matmul_rows_profiled_with_token_tile;
 use mivi_quant::projection_diagnostics::{quantized_matmul_rows_profiled, ProjectionProfile};
 use mivi_quant::{quantized_matmul_rows, GgmlType};
 use std::error::Error;
@@ -359,8 +361,43 @@ fn invoke(
     let inputs = std::hint::black_box(inputs);
     let out = std::hint::black_box(out);
     if input.profile {
-        let profile =
-            quantized_matmul_rows_profiled(out, format, weights, inputs, input.batch, rows, cols)?;
+        let profile = match input.token_tile {
+            None => quantized_matmul_rows_profiled(
+                out,
+                format,
+                weights,
+                inputs,
+                input.batch,
+                rows,
+                cols,
+            )?,
+            Some(tile) => {
+                #[cfg(feature = "projection-locality-experiment")]
+                {
+                    let selector = match tile {
+                        32 => ProjectionTokenTile::Tokens32,
+                        64 => ProjectionTokenTile::Tokens64,
+                        128 => ProjectionTokenTile::Tokens128,
+                        _ => return Err("unsupported token tile selector".into()),
+                    };
+                    quantized_matmul_rows_profiled_with_token_tile(
+                        out,
+                        format,
+                        weights,
+                        inputs,
+                        input.batch,
+                        rows,
+                        cols,
+                        selector,
+                    )?
+                }
+                #[cfg(not(feature = "projection-locality-experiment"))]
+                {
+                    let _ = tile;
+                    return Err("token tile selector requires the experiment feature".into());
+                }
+            }
+        };
         std::hint::black_box(&*out);
         Ok(Some(profile))
     } else {
@@ -568,6 +605,25 @@ mod tests {
                 profile.get(field).is_some(),
                 "missing profile field {field}"
             );
+        }
+    }
+
+    #[cfg(feature = "projection-locality-experiment")]
+    #[test]
+    fn profiled_synthetic_measurements_use_each_explicit_token_tile() {
+        for tile in [32, 64, 128] {
+            let input = case::CaseInput::from_json(
+                format!(r#"{{"schema":2,"comparison_group":"test-group","token_tile":{tile},"source":{{"kind":"synthetic","ggml_type":0,"rows":3,"cols":16}},"batch":33,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
+            )
+            .unwrap();
+            let result = measure_case(input).unwrap();
+            assert_eq!(result["token_tile"], tile);
+            assert_eq!(result["branch"], "across_batch_pair");
+            assert_eq!(result["profile_calls"].as_array().unwrap().len(), 1);
+            assert_eq!(result["profile_calls"][0]["branch"], "across_batch_pair");
+            assert!(result["profile_calls"][0]["workers"]
+                .as_array()
+                .is_some_and(|workers| !workers.is_empty()));
         }
     }
 

@@ -2,6 +2,7 @@
 
 use half::{bf16, f16};
 use mivi_core::simd::ProjectionTokenTile::{Tokens128, Tokens32, Tokens64};
+use mivi_quant::projection_diagnostics::quantized_matmul_rows_profiled_with_token_tile;
 use mivi_quant::{
     quantized_matmul_rows, quantized_matmul_rows_with_token_tile, GgmlType, QuantError,
 };
@@ -176,4 +177,51 @@ fn explicit_token_tiles_preserve_checked_validation() {
         call(&mut [], &[], &[], 1, 1, usize::MAX, GgmlType::F32),
         Err(QuantError::ArithmeticOverflow)
     ));
+}
+
+#[test]
+fn profiled_token_tiles_match_baseline_and_report_across_batch_work() {
+    let rows = 3;
+    let cols = 16;
+    let batch = 33;
+    let weights = encoded_weights(GgmlType::F32, rows, cols);
+    let inputs: Vec<f32> = (0..batch * cols)
+        .map(|i| ((i % 31) as f32 - 15.0) * 0.0625)
+        .collect();
+    let mut baseline = vec![f32::NAN; batch * rows];
+    quantized_matmul_rows(
+        &mut baseline,
+        GgmlType::F32,
+        &weights,
+        &inputs,
+        batch,
+        rows,
+        cols,
+    )
+    .unwrap();
+
+    for tile in TILES {
+        let mut profiled = vec![f32::NAN; batch * rows];
+        let profile = quantized_matmul_rows_profiled_with_token_tile(
+            &mut profiled,
+            GgmlType::F32,
+            &weights,
+            &inputs,
+            batch,
+            rows,
+            cols,
+            tile,
+        )
+        .unwrap();
+
+        assert_bits_equal(&baseline, &profiled, &format!("profiled tile={tile:?}"));
+        assert_eq!(profile.branch, "across_batch_pair");
+        assert!(profile.input_transpose_ns.is_some());
+        assert!(profile.rows_wall_ns.is_some());
+        assert!(!profile.workers.is_empty());
+        assert!(profile
+            .workers
+            .iter()
+            .any(|worker| worker.accumulate_ns > 0));
+    }
 }
