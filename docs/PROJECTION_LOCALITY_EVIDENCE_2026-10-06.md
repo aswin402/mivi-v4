@@ -1,6 +1,10 @@
-# Projection locality pilot evidence — corrected rerun, 2026-10-07
+# Projection locality experiment evidence — historical and fresh pilots
 
-**Status: accepted corrected measurement session.** The earlier pilot was withdrawn after review found that its ordinary SIMD baseline had entered the experimental tile traversal. Those timings are excluded and were not reused. This report contains only the fresh run against the restored ordinary production path. A separate historical pair rejected by the earlier timer-contract validation also remains excluded.
+> Evidence status: the fresh schema-3 bounded pilot below is the sole evidence for the column-panel comparison. Earlier corrected-rerun figures in this document are historical; withdrawn token-width measurements remain historical context and are not evidence for this comparison. No private model, tensor, file-path, binary, activation, or raw-log identities are included.
+
+## Historical corrected token-width pilot — 2026-10-07 (not column-panel evidence)
+
+**Historical status only.** The earlier pilot was withdrawn after review found that its ordinary SIMD baseline had entered the experimental tile traversal. Those timings are excluded and were not reused. The corrected token-width run below was valid for that superseded token-width experiment, but it is not evidence for the redesigned column-panel variants. A separate historical pair rejected by the earlier timer-contract validation also remains excluded.
 
 ## Result
 
@@ -78,3 +82,54 @@ The large real-weight gap appears in the profiled `Rows wall` stage as well as t
 This is an operator pilot using deterministic synthetic activations, including for the real-weight case. It does not measure real-model inference, captured-activation behavior, model quality, or agent utility, and it does not establish an end-to-end performance result.
 
 **Decision: do not promote the selector path.** Keep the restored ordinary baseline as production dispatch and investigate the explicit selector path's repeatable slowdown before considering another locality pilot or any P1-A end-to-end evaluation.
+
+## Fresh schema-3 bounded pilot — 2026-10-07
+
+This section uses only the fresh schema-3 session. The committed implementation revision matched the manifest revision. Ordinary projection calls continue through the default selector path; explicit selectors are available only through the experiment feature. The default and explicit 128 paths reach the same `pair_panel_avx2::<128>` const-generic column loop.
+
+### Workloads and acceptance
+
+| Workload | Shape | Batch | Selectors |
+|---|---:|---:|---|
+| Synthetic Q8_0 | 257x256 | 64 | baseline, 32, 64, 128 |
+| Descriptor-verified Q6_K | 2048x8192 | 64 | baseline, 32, 64, 128 |
+
+Each case used one warmup call, one measured call per child, two threads, profiled and unprofiled modes, and three repetitions. The driver completed all 48 sequential attempts. All 24 profiled/unprofiled pairs and all 36 baseline-to-variant comparisons had exact full-vector output parity and matching non-selector work metadata. All child processes were reaped successfully.
+
+### Paired unprofiled full-call timings
+
+Milliseconds across three repetitions; selector rows show median [min, max]. Paired ratios are variant/baseline median [min, max].
+
+| Workload | Selector | Time (ms) | Paired ratio |
+|---|---:|---:|---:|
+| Q8_0 synthetic 257x256 | baseline | 0.161 [0.146, 0.184] | 1.000 |
+| Q8_0 synthetic 257x256 | 32 | 0.145 [0.137, 0.207] | 0.937 [0.901, 1.123] |
+| Q8_0 synthetic 257x256 | 64 | 0.176 [0.172, 0.177] | 1.097 [0.954, 1.173] |
+| Q8_0 synthetic 257x256 | 128 | 0.153 [0.141, 0.236] | 0.964 [0.952, 1.280] |
+| Q6_K verified 2048x8192 | baseline | 23.873 [23.336, 29.856] | 1.000 |
+| Q6_K verified 2048x8192 | 32 | 21.869 [21.221, 23.734] | 0.909 [0.795, 0.916] |
+| Q6_K verified 2048x8192 | 64 | 22.420 [21.812, 25.794] | 0.935 [0.751, 1.080] |
+| Q6_K verified 2048x8192 | 128 | 22.405 [21.479, 23.273] | 0.920 [0.750, 0.975] |
+
+### Profile diagnostics
+
+Median per-call milliseconds. Profiled timings are diagnostic only and do not contribute to the unprofiled ratios.
+
+| Workload | Selector | Buffer init | Input transpose | Rows wall | Output layout |
+|---|---:|---:|---:|---:|---:|
+| Q8_0 synthetic | baseline | 0.006 | 0.020 | 0.157 | 0.015 |
+| Q8_0 synthetic | 32 | 0.005 | 0.024 | 0.123 | 0.017 |
+| Q8_0 synthetic | 64 | 0.004 | 0.016 | 0.131 | 0.013 |
+| Q8_0 synthetic | 128 | 0.007 | 0.024 | 0.133 | 0.017 |
+| Q6_K verified | baseline | 0.060 | 1.872 | 21.619 | 0.448 |
+| Q6_K verified | 32 | 0.039 | 1.272 | 19.024 | 0.449 |
+| Q6_K verified | 64 | 0.041 | 1.348 | 20.513 | 0.503 |
+| Q6_K verified | 128 | 0.046 | 1.309 | 21.911 | 0.518 |
+
+### Control, resources, and decision
+
+The baseline max/min timing spread was 25.9% for Q8_0 and 27.9% for Q6_K. Paired 128/baseline ratios ranged from 0.952 to 1.280 for Q8_0 and 0.750 to 0.975 for Q6_K. One Q8_0 repetition was a high outlier, about two percentage points beyond the baseline max/min spread; Q6_K had a broad baseline spread and its 128 ratios remained within that spread. Source control flow converges on the same 128-column const-generic loop. The release executable was stripped, so its inlined kernel had no symbol table for symbol-scoped disassembly. The timing observations do not show a material control-flow discrepancy, but the short pilot and broad variation make performance conclusions low confidence.
+
+The plan was 48 attempts, 180 seconds per child, 2 GiB sampled RSS, 900 seconds total, and a 64 MiB artifact cap. Total elapsed time was 8.829 seconds. Predicted artifacts were 53,034,316 bytes; actual run artifacts were 39,107,542 bytes. Permission audit covered 100 files and 49 subdirectories: all data files were mode 0600, directories mode 0700, and the owner-only executable mode 0700. The driver recorded Linux owned-process-tree sampled-RSS scope for every child and enforced the cap; it does not retain peak RSS values.
+
+Host caveats: one host and three repetitions, without cache flushing or overlapping inference/build work. Scheduling and thermal variation were not controlled. No selector is promoted; this run establishes parity and bounded execution, while its timing data remains a low-confidence pilot.
