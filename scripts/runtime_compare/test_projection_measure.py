@@ -32,7 +32,7 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def valid_manifest(self):
         return {
-            "schema": 2,
+            "schema": 3,
             "binary": str(self.binary),
             "revision": "0123456789abcdef0123456789abcdef01234567",
             "repetitions": 3,
@@ -43,7 +43,7 @@ class ProjectionManifestTests(unittest.TestCase):
             "buffer_limit_bytes": 8 * 1024 * 1024,
             "model_limit_bytes": 1024 * 1024 * 1024,
             "cases": [
-                {"name": name, "comparison_group": "synthetic-group", "token_tile": tile,
+                {"name": name, "comparison_group": "synthetic-group", "column_tile": tile,
                  "batch": 9,
                  "source": {"kind": "synthetic", "ggml_type": 0, "rows": 3, "cols": 64},
                  "warmup_calls": 0, "measured_calls": 1}
@@ -55,15 +55,41 @@ class ProjectionManifestTests(unittest.TestCase):
     def paired_manifest(self):
         return self.valid_manifest()
 
-    def test_valid_baseline_and_explicit_token_tile_selectors_are_accepted(self):
+    def column_manifest(self):
+        return self.valid_manifest()
+
+    def test_schema_three_accepts_baseline_and_each_column_tile(self):
+        settings = projection_measure.validate_manifest(self.column_manifest())
+        self.assertEqual([case["column_tile"] for case in settings["cases"]],
+                         [None, 32, 64, 128])
+        self.assertEqual(settings["schema"], 3)
+        self.assertTrue(all(case["input"]["schema"] == 3 for case in settings["cases"]))
+
+    def test_schema_two_and_legacy_token_tile_are_rejected(self):
+        manifest = self.valid_manifest()
+        manifest["schema"] = 2
+        with self.assertRaisesRegex(ValueError, "schema"):
+            projection_measure.validate_manifest(manifest)
+        manifest = self.column_manifest()
+        manifest["cases"][0]["token_tile"] = None
+        with self.assertRaisesRegex(ValueError, "fields"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_unknown_column_tile_is_rejected(self):
+        manifest = self.column_manifest()
+        manifest["cases"][1]["column_tile"] = 16
+        with self.assertRaisesRegex(ValueError, "column_tile"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_valid_baseline_and_explicit_column_tile_selectors_are_accepted(self):
         settings = projection_measure.validate_manifest(self.paired_manifest())
-        self.assertEqual([case["token_tile"] for case in settings["cases"]],
+        self.assertEqual([case["column_tile"] for case in settings["cases"]],
                          [None, 32, 64, 128])
 
-    def test_unknown_token_tile_selector_is_rejected(self):
+    def test_unknown_column_tile_selector_is_rejected(self):
         manifest = self.paired_manifest()
-        manifest["cases"][1]["token_tile"] = 16
-        with self.assertRaisesRegex(ValueError, "token_tile"):
+        manifest["cases"][1]["column_tile"] = 16
+        with self.assertRaisesRegex(ValueError, "column_tile"):
             projection_measure.validate_manifest(manifest)
 
     def test_missing_or_duplicate_baseline_and_variant_members_are_rejected(self):
@@ -79,7 +105,7 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def test_duplicate_variant_selectors_are_rejected(self):
         manifest = self.paired_manifest()
-        manifest["cases"][2]["token_tile"] = 32
+        manifest["cases"][2]["column_tile"] = 32
         with self.assertRaisesRegex(ValueError, "member|selector|group"):
             projection_measure.validate_manifest(manifest)
 
@@ -102,13 +128,13 @@ class ProjectionManifestTests(unittest.TestCase):
         def child(argv, *_args, **_kwargs):
             child_input = json.loads(Path(argv[2]).read_bytes())
             child_input_fields.append(set(child_input))
-            launches.append((child_input["token_tile"], child_input["profile"],
+            launches.append((child_input["column_tile"], child_input["profile"],
                              len(launches) // 8))
             source = child_input["source"]
             record = self.child_record(child_input["profile"], ggml_type=source["ggml_type"],
                                        rows=source["rows"], cols=source["cols"],
                                        batch=child_input["batch"])
-            record.update(token_tile=child_input["token_tile"],
+            record.update(column_tile=child_input["column_tile"],
                           comparison_group=child_input["comparison_group"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
@@ -126,11 +152,11 @@ class ProjectionManifestTests(unittest.TestCase):
                     expected.append((tile, mode == "profiled", repetition))
         self.assertEqual(launches, expected)
         self.assertTrue(all(fields == {
-            "schema", "comparison_group", "token_tile", "source", "batch", "threads",
+            "schema", "comparison_group", "column_tile", "source", "batch", "threads",
             "profile", "warmup_calls", "measured_calls", "buffer_limit_bytes",
             "model_limit_bytes",
         } for fields in child_input_fields))
-        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["schema"], 3)
 
     def test_failed_and_timed_out_group_members_are_retained_and_not_compared(self):
         settings = projection_measure.validate_manifest(self.paired_manifest())
@@ -140,7 +166,7 @@ class ProjectionManifestTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
-            if child_input["token_tile"] == 32:
+            if child_input["column_tile"] == 32:
                 return {"status": "timeout", "stdout": "bounded", "stderr": "",
                         "returncode": -15, "elapsed_seconds": 1.0, "rss_scope": "sampled",
                         "cleanup": {"success": True, "reaped": True, "error": None}}
@@ -148,7 +174,7 @@ class ProjectionManifestTests(unittest.TestCase):
             record = self.child_record(child_input["profile"], ggml_type=source["ggml_type"],
                                        rows=source["rows"], cols=source["cols"],
                                        batch=child_input["batch"])
-            record.update(token_tile=child_input["token_tile"],
+            record.update(column_tile=child_input["column_tile"],
                           comparison_group=child_input["comparison_group"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
@@ -172,11 +198,11 @@ class ProjectionManifestTests(unittest.TestCase):
             calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
             source = child_input["source"]
-            bits = [0x40000000] * 27 if child_input["token_tile"] == 64 else None
+            bits = [0x40000000] * 27 if child_input["column_tile"] == 64 else None
             record = self.child_record(child_input["profile"], bits=bits,
                                        ggml_type=source["ggml_type"], rows=source["rows"],
                                        cols=source["cols"], batch=child_input["batch"])
-            record.update(token_tile=child_input["token_tile"],
+            record.update(column_tile=child_input["column_tile"],
                           comparison_group=child_input["comparison_group"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
@@ -228,7 +254,7 @@ class ProjectionManifestTests(unittest.TestCase):
         template["measured_calls"] = 32
         manifest["cases"] = [
             dict(template, name=f"case-{group}-{tile}", comparison_group=f"group-{group}",
-                 token_tile=selector)
+                 column_tile=selector)
             for group in range(4)
             for tile, selector in (("base", None), ("32", 32), ("64", 64), ("128", 128))
         ]
@@ -351,7 +377,7 @@ class ProjectionManifestTests(unittest.TestCase):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         with mock.patch.object(projection_measure, "run_child", side_effect=self.complete_child):
             report = projection_measure.run_session(settings, self.output_dir)
-        self.assertEqual(report["schema"], 2)
+        self.assertEqual(report["schema"], 3)
         self.assertEqual([sample["mode"] for sample in report["samples"][:6]],
                          ["unprofiled", "profiled", "unprofiled", "profiled",
                           "unprofiled", "profiled"])
@@ -372,11 +398,11 @@ class ProjectionManifestTests(unittest.TestCase):
         if fmt is None:
             fmt = projection_measure.SUPPORTED_TYPES[ggml_type][0]
         record = {
-            "schema": 2, "status": "complete", "source_kind": "synthetic",
+            "schema": 3, "status": "complete", "source_kind": "synthetic",
             "model_path": None, "tensor_name": None, "mapping_bytes": 0,
             "format": fmt, "ggml_type": ggml_type, "rows": rows, "cols": cols,
             "batch": batch, "branch": branch, "threads": 2,
-            "profile": profile, "comparison_group": "synthetic-group", "token_tile": None,
+            "profile": profile, "comparison_group": "synthetic-group", "column_tile": None,
             "activation_source": "synthetic_f32",
             "setup_ns": 12, "call_wall_ns": [1000],
             "output_bits": [0x3F800000] * output_count if bits is None else bits,
@@ -405,7 +431,7 @@ class ProjectionManifestTests(unittest.TestCase):
                                    rows=source["rows"], cols=source["cols"],
                                    batch=child_input["batch"])
         record.update(comparison_group=child_input["comparison_group"],
-                      token_tile=child_input["token_tile"])
+                      column_tile=child_input["column_tile"])
         result_path.write_text(json.dumps(record))
         result_path.chmod(0o600)
         return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
@@ -429,7 +455,7 @@ class ProjectionManifestTests(unittest.TestCase):
                 child_input["profile"], ggml_type=0, rows=2048, cols=64, batch=32,
                 heap_bytes=32 * 1024 * 1024)
             record.update(comparison_group=child_input["comparison_group"],
-                          token_tile=child_input["token_tile"])
+                          column_tile=child_input["column_tile"])
             result_path = Path(argv[4])
             result_path.write_text(json.dumps(record))
             result_path.chmod(0o600)
@@ -472,7 +498,7 @@ class ProjectionManifestTests(unittest.TestCase):
             bits = [0x40000000] * 27 if calls == 2 else None
             record = self.child_record(child_input["profile"], bits=bits)
             record.update(comparison_group=child_input["comparison_group"],
-                          token_tile=child_input["token_tile"])
+                          column_tile=child_input["column_tile"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled", "cleanup":
@@ -538,7 +564,7 @@ class ProjectionManifestTests(unittest.TestCase):
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(child_input["profile"])
             record.update(comparison_group=child_input["comparison_group"],
-                          token_tile=child_input["token_tile"])
+                          column_tile=child_input["column_tile"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
@@ -587,7 +613,7 @@ class ProjectionManifestTests(unittest.TestCase):
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(child_input["profile"])
             record.update(comparison_group=child_input["comparison_group"],
-                          token_tile=child_input["token_tile"])
+                          column_tile=child_input["column_tile"])
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",

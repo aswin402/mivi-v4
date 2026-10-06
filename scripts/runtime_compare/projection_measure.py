@@ -37,13 +37,13 @@ CHILD_CLEANUP_RESERVE_SECONDS = 0.5
 MANIFEST_FIELDS = {"schema", "binary", "revision", "repetitions", "wall_seconds",
                    "session_seconds", "rss_bytes", "artifact_bytes", "buffer_limit_bytes",
                    "model_limit_bytes", "cases"}
-CASE_FIELDS = {"name", "comparison_group", "token_tile", "batch", "source",
+CASE_FIELDS = {"name", "comparison_group", "column_tile", "batch", "source",
                "warmup_calls", "measured_calls"}
 SYNTHETIC_FIELDS = {"kind", "ggml_type", "rows", "cols"}
 GGUF_FIELDS = {"kind", "model_path", "tensor"}
 RESULT_FIELDS = {"schema", "status", "source_kind", "model_path", "tensor_name",
                  "mapping_bytes", "format", "ggml_type", "rows", "cols", "batch",
-                 "branch", "threads", "profile", "comparison_group", "token_tile",
+                 "branch", "threads", "profile", "comparison_group", "column_tile",
                  "activation_source", "setup_ns",
                  "call_wall_ns", "output_bits", "all_calls_bit_identical", "profile_calls",
                  "estimated_heap_bytes", "output_artifact_bound_bytes"}
@@ -145,7 +145,7 @@ def _case_dimensions(case: dict) -> tuple[int | None, int | None]:
 def validate_manifest(value: dict) -> dict:
     if not isinstance(value, dict) or set(value) != MANIFEST_FIELDS:
         raise ValueError("manifest fields do not match schema")
-    if not _integer(value["schema"], minimum=2, maximum=2):
+    if not _integer(value["schema"], minimum=3, maximum=3):
         raise ValueError("unsupported manifest schema")
     binary = _absolute_path(value["binary"], "binary")
     revision = value["revision"]
@@ -182,9 +182,9 @@ def validate_manifest(value: dict) -> dict:
         group = case["comparison_group"]
         if not isinstance(group, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):
             raise ValueError("comparison_group must be a safe identifier")
-        token_tile = case["token_tile"]
-        if token_tile is not None and (not _integer(token_tile) or token_tile not in {32, 64, 128}):
-            raise ValueError("token_tile must be null or one of 32, 64, and 128")
+        column_tile = case["column_tile"]
+        if column_tile is not None and (not _integer(column_tile) or column_tile not in {32, 64, 128}):
+            raise ValueError("column_tile must be null or one of 32, 64, and 128")
         if not _integer(case["batch"], minimum=1, maximum=65):
             raise ValueError("batch must be an integer from 1 through 65")
         if not _integer(case["warmup_calls"], minimum=0, maximum=1):
@@ -228,7 +228,7 @@ def validate_manifest(value: dict) -> dict:
             allowed_case_fields = CASE_FIELDS
         if set(case) != allowed_case_fields:
             raise ValueError("case fields do not match source kind")
-        child_input = {"schema": 2, "comparison_group": group, "token_tile": token_tile,
+        child_input = {"schema": 3, "comparison_group": group, "column_tile": column_tile,
                        "source": source, "batch": case["batch"], "threads": 2,
                        "profile": False, "warmup_calls": case["warmup_calls"],
                        "measured_calls": case["measured_calls"],
@@ -241,7 +241,7 @@ def validate_manifest(value: dict) -> dict:
         dimensions = {"rows": rows, "cols": source.get("cols"),
                       "ggml_type": source.get("ggml_type")}
         normalized.append({"name": name, "comparison_group": group,
-                           "token_tile": token_tile, "batch": case["batch"], "source": source,
+                           "column_tile": column_tile, "batch": case["batch"], "source": source,
                            "warmup_calls": case["warmup_calls"],
                            "measured_calls": case["measured_calls"],
                            "expected_model_sha256": case.get("expected_model_sha256"),
@@ -251,10 +251,10 @@ def validate_manifest(value: dict) -> dict:
         groups.setdefault(case["comparison_group"], []).append(case)
     expected_selectors = {None, 32, 64, 128}
     for group, members in groups.items():
-        selectors = [member["token_tile"] for member in members]
+        selectors = [member["column_tile"] for member in members]
         if len(members) != 4 or set(selectors) != expected_selectors:
             raise ValueError(f"comparison group {group} must have one baseline and selectors 32, 64, 128")
-        baseline = next(member for member in members if member["token_tile"] is None)
+        baseline = next(member for member in members if member["column_tile"] is None)
         shared = ("batch", "source", "warmup_calls", "measured_calls", "expected_model_sha256")
         if any(any(member.get(field) != baseline.get(field) for field in shared)
                for member in members):
@@ -268,7 +268,7 @@ def validate_manifest(value: dict) -> dict:
     if predicted > settings["artifact_bytes"]:
         raise ValueError("artifact budget cannot reserve bounded outputs and compact reports")
     settings.update({"binary": binary, "revision": revision.lower(), "cases": normalized,
-                     "schema": 2, "report_reserve_bytes": report_reserve})
+                     "schema": 3, "report_reserve_bytes": report_reserve})
     return settings
 
 
@@ -491,11 +491,11 @@ def _validate_profile(profile: Any, branch: str, calls: int, rows: int) -> None:
 def validate_result(value: Any, case: dict, profile: bool) -> dict:
     if not isinstance(value, dict) or set(value) != RESULT_FIELDS:
         raise ValueError("child result fields do not match schema")
-    if not _integer(value["schema"], minimum=2, maximum=2) or value["status"] != "complete":
+    if not _integer(value["schema"], minimum=3, maximum=3) or value["status"] != "complete":
         raise ValueError("child result status or schema is invalid")
     if (value["comparison_group"] != case["comparison_group"]
-            or (value["token_tile"] is not None and not _integer(value["token_tile"]))
-            or value["token_tile"] != case["token_tile"]):
+            or (value["column_tile"] is not None and not _integer(value["column_tile"]))
+            or value["column_tile"] != case["column_tile"]):
         raise ValueError("child comparison identity mismatch")
     if value["source_kind"] != case["source"]["kind"] or value["profile"] is not profile:
         raise ValueError("child source or profile mode mismatch")
@@ -673,9 +673,9 @@ def compare_workload_groups(samples: list[dict], groups: dict,
     metadata = ("source_kind", "rows", "cols", "batch", "format", "ggml_type",
                 "branch", "threads", "timer_boundary")
     for group, members in groups.items():
-        baseline = next(case for case in members if case["token_tile"] is None)
-        variants = sorted((case for case in members if case["token_tile"] is not None),
-                          key=lambda case: case["token_tile"])
+        baseline = next(case for case in members if case["column_tile"] is None)
+        variants = sorted((case for case in members if case["column_tile"] is not None),
+                          key=lambda case: case["column_tile"])
         for repetition in range(3):
             for variant in variants:
                 left = {mode: indexed.get((baseline["name"], repetition, mode))
@@ -706,7 +706,7 @@ def compare_workload_groups(samples: list[dict], groups: dict,
                 comparisons.append({"comparison_group": group, "repetition": repetition,
                                     "baseline_case": baseline["name"],
                                     "variant_case": variant["name"],
-                                    "token_tile": variant["token_tile"],
+                                    "column_tile": variant["column_tile"],
                                     "compatible": compatible, "work_settings_match": work_match,
                                     "output_bits_match": parity, "sample_statuses": statuses,
                                     "unprofiled_baseline_total_call_ns": (
@@ -741,13 +741,13 @@ def summarize_measurements(samples: list[dict], comparisons: list[dict]) -> dict
     ratios = {}
     by_variant = {}
     for row in comparisons:
-        key = (row["comparison_group"], row["variant_case"], row["token_tile"])
+        key = (row["comparison_group"], row["variant_case"], row["column_tile"])
         by_variant.setdefault(key, []).append(row)
     for (group, case, tile), rows in by_variant.items():
         values = [row["unprofiled_variant_total_call_ns"] /
                   row["unprofiled_baseline_total_call_ns"] for row in rows
                   if row["compatible"] and row["unprofiled_baseline_total_call_ns"] > 0]
-        ratios[case] = {"comparison_group": group, "token_tile": tile,
+        ratios[case] = {"comparison_group": group, "column_tile": tile,
                         "paired_unprofiled_variant_to_baseline_ratio": _range(values)}
     return {"cases": timings, "variant_ratios": ratios,
             "profiled_stages_are_diagnostic_only": True}
@@ -776,9 +776,9 @@ def run_session(settings: dict, output_dir: Path) -> dict:
         for case in settings["cases"]:
             groups.setdefault(case["comparison_group"], []).append(case)
         for group, members in groups.items():
-            baseline = next(case for case in members if case["token_tile"] is None)
-            variants = sorted((case for case in members if case["token_tile"] is not None),
-                              key=lambda case: case["token_tile"])
+            baseline = next(case for case in members if case["column_tile"] is None)
+            variants = sorted((case for case in members if case["column_tile"] is not None),
+                              key=lambda case: case["column_tile"])
             for repetition in range(3):
                 ordered_members = ([baseline, *variants] if repetition % 2 == 0
                                    else [*variants, baseline])
@@ -790,7 +790,7 @@ def run_session(settings: dict, output_dir: Path) -> dict:
                         pair_key = (case["name"], repetition)
                         mode_order = _paired_order(repetition)
                         sample = {"case": case["name"], "comparison_group": group,
-                                  "token_tile": case["token_tile"], "repetition": repetition,
+                                  "column_tile": case["column_tile"], "repetition": repetition,
                                   "mode": mode, "status": "not_started", "runner_status": None,
                                   "comparison_status": "not_comparable", "cleanup": None,
                                   "rss_scope": None, "call_wall_ns": None, "setup_ns": None,
@@ -901,7 +901,7 @@ def run_session(settings: dict, output_dir: Path) -> dict:
         retention = None
         if not cleanup_unverified and root.size(settings["artifact_bytes"]) > settings["artifact_bytes"] - settings["report_reserve_bytes"]:
             retention = root.limit_retained_artifacts(settings["artifact_bytes"] - settings["report_reserve_bytes"])
-        report = {"schema": 2, "status": "complete" if samples and all(s["status"] == "complete" for s in samples) else "partial",
+        report = {"schema": 3, "status": "complete" if samples and all(s["status"] == "complete" for s in samples) else "partial",
                   "settings": {"revision": settings["revision"], "binary_sha256": provenance["binary"]["sha256"],
                                "binary_bytes": provenance["binary"]["bytes"], "models": provenance["models"],
                                "repetitions": 3, "wall_seconds": settings["wall_seconds"],

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct CaseInput {
     pub schema: u32,
     pub comparison_group: String,
-    pub token_tile: Option<u32>,
+    pub column_tile: Option<u32>,
     pub source: Source,
     pub batch: usize,
     pub threads: usize,
@@ -41,7 +41,7 @@ impl CaseInput {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != 2 {
+        if self.schema != 3 {
             return Err("unsupported case schema".into());
         }
         if self.comparison_group.is_empty()
@@ -57,15 +57,12 @@ impl CaseInput {
         {
             return Err("invalid comparison group".into());
         }
-        if self
-            .token_tile
-            .is_some_and(|tile| !matches!(tile, 32 | 64 | 128))
-        {
-            return Err("unsupported token tile selector".into());
+        if self.column_tile.is_some_and(|tile| !matches!(tile, 32 | 64 | 128)) {
+            return Err("unsupported column tile selector".into());
         }
         #[cfg(not(feature = "projection-locality-experiment"))]
-        if self.token_tile.is_some() {
-            return Err("token tile selector requires the experiment feature".into());
+        if self.column_tile.is_some() {
+            return Err("column tile selector requires the experiment feature".into());
         }
         if !(1..=65).contains(&self.batch) || !(1..=2).contains(&self.threads) {
             return Err("batch or thread count is outside the allowed range".into());
@@ -211,12 +208,16 @@ pub fn validate_alignment(format: GgmlType, cols: usize) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const VALID: &[u8] = br#"{"schema":2,"comparison_group":"group-1","token_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#;
+    const VALID: &[u8] = br#"{"schema":3,"comparison_group":"group-1","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#;
 
     #[test]
     fn input_rejects_unknown_fields_and_boolean_counts() {
-        let unknown = br#"{"schema":2,"comparison_group":"group-1","token_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576,"extra":0}"#;
+        let unknown = br#"{"schema":3,"comparison_group":"group-1","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":4},"batch":2,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576,"extra":0}"#;
         assert!(CaseInput::from_json(unknown).is_err());
+        let schema_two = std::str::from_utf8(VALID).unwrap().replace("\"schema\":3", "\"schema\":2");
+        let legacy_selector = std::str::from_utf8(VALID).unwrap().replace("column_tile", "token_tile");
+        assert!(CaseInput::from_json(schema_two.as_bytes()).is_err());
+        assert!(CaseInput::from_json(legacy_selector.as_bytes()).is_err());
         let boolean_count = std::str::from_utf8(VALID)
             .unwrap()
             .replace("\"batch\":2", "\"batch\":true");
