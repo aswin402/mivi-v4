@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.71] - 2026-10-07
+
+### Faithful Projection Column-Panel Experiment (Opt-In)
+
+#### Ideas, Inspirations & Sources
+
+- The paired, alternating benchmark design and reporting of inconclusive results were inspired by [Colibri's benchmarking methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Preserving the existing accumulation order and CPU behavior was informed by the pinned [GGML CPU implementation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cpu/ggml-cpu.c). No GGML code was copied.
+- See the [column-panel design](docs/superpowers/specs/2026-10-07-faithful-column-panel-experiment-design.md), [implementation plan](docs/superpowers/plans/2026-10-07-faithful-column-panel-experiment.md), and [redacted pilot evidence](docs/PROJECTION_LOCALITY_EVIDENCE_2026-10-06.md).
+
+#### Added and Measured
+
+- Replace the experimental token-width selector with explicit 32/64/128-column panel selectors behind `projection-locality-experiment`. The experimental API and private manifest field were corrected to match their actual meaning; the strict manifest/result/report protocol moved from schema 2 to schema 3 and rejects the removed `token_tile` field. This experiment code was not copied from GGML.
+- In the fresh bounded three-repetition pilot, Q6_K 2048x8192 batch-64 selector medians were 21.869–22.420 ms versus 23.873 ms baseline (paired median ratios 0.909–0.935). Synthetic Q8_0 257x256 batch-64 results were mixed: panel 32 was 0.145 ms versus 0.161 ms baseline, panel 64 was 0.176 ms, and panel 128 was 0.153 ms. All 48 attempts completed; profiled/unprofiled and baseline/selector output vectors were bit-identical.
+- These are operator-level pilot timings from one host and three repetitions. The Q8_0 panel-128 paired ratio reached 1.280, baseline timing spreads were broad, and scheduler/thermal variation was uncontrolled. No selector is promoted; no model-quality or end-to-end speedup claim follows.
+- Ordinary APIs and production dispatch remain on the existing default 128-column kernel. Raw artifacts and identifying paths remain private. Reference-matrix, scratch-reuse, model-level parity, end-to-end evaluation, and optimization-promotion gates remain open.
+
 ## [v0.2.70] - 2026-10-07
 
 ### Faithful Projection Locality Experiment (Opt-In)
