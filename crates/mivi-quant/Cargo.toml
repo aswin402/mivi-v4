@@ -8,6 +8,7 @@ description = "Quantization types (Q4_K_M, Q8_0, F16), block layouts, dequantiza
 
 [features]
 projection-diagnostics = []
+projection-locality-experiment = []
 
 [dependencies]
 mivi-core.workspace = true
