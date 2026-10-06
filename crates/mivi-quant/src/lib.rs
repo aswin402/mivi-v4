@@ -155,11 +155,11 @@ pub fn quantized_matmul_rows(
         .map(|_| ())
 }
 
-/// Quantized matrix-matrix multiplication with an explicit projection token
-/// traversal width for the large-batch accumulation kernel.
+/// Quantized matrix-matrix multiplication with an explicit projection column
+/// panel width for paired large-batch accumulation.
 #[cfg(feature = "projection-locality-experiment")]
 #[allow(clippy::too_many_arguments)]
-pub fn quantized_matmul_rows_with_token_tile(
+pub fn quantized_matmul_rows_with_column_tile(
     out: &mut [f32],
     ggml_type: GgmlType,
     weights: &[u8],
@@ -167,7 +167,7 @@ pub fn quantized_matmul_rows_with_token_tile(
     batch: usize,
     rows: usize,
     cols: usize,
-    tile: mivi_core::simd::ProjectionTokenTile,
+    tile: mivi_core::simd::ProjectionColumnTile,
 ) -> Result<()> {
     quantized_matmul_rows_with_tile_impl::<false>(
         out,
@@ -274,7 +274,7 @@ fn quantized_matmul_rows_with_tile_impl<const PROFILE: bool>(
     batch: usize,
     rows: usize,
     cols: usize,
-    token_tile: Option<mivi_core::simd::ProjectionTokenTile>,
+    column_tile: Option<mivi_core::simd::ProjectionColumnTile>,
 ) -> Result<Option<ProjectionProfileInternal>> {
     let call_started = if PROFILE {
         Some(std::time::Instant::now())
@@ -419,7 +419,7 @@ fn quantized_matmul_rows_with_tile_impl<const PROFILE: bool>(
                         inputs,
                         &transposed_inputs,
                         accumulation_mode,
-                        token_tile,
+                        column_tile,
                     )
                 })
                 .collect::<Result<Vec<_>>>()
@@ -436,7 +436,7 @@ fn quantized_matmul_rows_with_tile_impl<const PROFILE: bool>(
                 inputs,
                 &transposed_inputs,
                 accumulation_mode,
-                token_tile,
+                column_tile,
             )
             .map(|worker| vec![worker])
         }
@@ -467,7 +467,7 @@ fn quantized_matmul_rows_with_tile_impl<const PROFILE: bool>(
                     inputs,
                     &transposed_inputs,
                     accumulation_mode,
-                    token_tile,
+                    column_tile,
                 )
                 .map(|_| ())
             })?;
@@ -485,7 +485,7 @@ fn quantized_matmul_rows_with_tile_impl<const PROFILE: bool>(
             inputs,
             &transposed_inputs,
             accumulation_mode,
-            token_tile,
+            column_tile,
         )?;
         Vec::new()
     };
@@ -519,7 +519,7 @@ fn compute_batched_rows<const PROFILE: bool>(
     inputs: &[f32],
     transposed_inputs: &[f32],
     accumulation_mode: BatchAccumulationMode,
-    token_tile: Option<mivi_core::simd::ProjectionTokenTile>,
+    column_tile: Option<mivi_core::simd::ProjectionColumnTile>,
 ) -> Result<WorkerWorkInternal> {
     let mut work = WorkerWorkInternal {
         rows: row_end - row_start,
@@ -555,9 +555,9 @@ fn compute_batched_rows<const PROFILE: bool>(
                 decode_result?;
                 add_elapsed::<PROFILE>(&mut work.decode_ns, decode_ns);
                 let (out0, out1) = output.split_at_mut(batch);
-                let (_, accumulate_ns) = measured::<PROFILE, _>(|| match token_tile {
+                let (_, accumulate_ns) = measured::<PROFILE, _>(|| match column_tile {
                     Some(tile) => {
-                        mivi_core::simd::matmul_accumulate_transposed_pair_with_tile_simd(
+                        mivi_core::simd::matmul_accumulate_transposed_pair_with_column_tile_simd(
                             out0,
                             out1,
                             first,
@@ -580,22 +580,14 @@ fn compute_batched_rows<const PROFILE: bool>(
                 });
                 add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);
             } else {
-                let (_, accumulate_ns) = measured::<PROFILE, _>(|| match token_tile {
-                    Some(tile) => mivi_core::simd::matmul_accumulate_transposed_with_tile_simd(
+                let (_, accumulate_ns) = measured::<PROFILE, _>(|| {
+                    mivi_core::simd::matmul_accumulate_transposed_simd(
                         output,
                         first,
                         transposed_inputs,
                         batch,
                         cols,
-                        tile,
-                    ),
-                    None => mivi_core::simd::matmul_accumulate_transposed_simd(
-                        output,
-                        first,
-                        transposed_inputs,
-                        batch,
-                        cols,
-                    ),
+                    )
                 });
                 add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);
             }
@@ -630,32 +622,13 @@ fn compute_batched_rows<const PROFILE: bool>(
                 }
             }
             BatchAccumulationMode::AcrossBatchFma => {
-                match token_tile {
-                    Some(tile) if batch >= 32 => {
-                        mivi_core::simd::matmul_accumulate_transposed_with_tile_simd(
-                            &mut row_output,
-                            &decoded_row,
-                            transposed_inputs,
-                            batch,
-                            cols,
-                            tile,
-                        )
-                    }
-                    None => mivi_core::simd::matmul_accumulate_transposed_simd(
-                        &mut row_output,
-                        &decoded_row,
-                        transposed_inputs,
-                        batch,
-                        cols,
-                    ),
-                    Some(_) => mivi_core::simd::matmul_accumulate_transposed_simd(
-                        &mut row_output,
-                        &decoded_row,
-                        transposed_inputs,
-                        batch,
-                        cols,
-                    ),
-                };
+                mivi_core::simd::matmul_accumulate_transposed_simd(
+                    &mut row_output,
+                    &decoded_row,
+                    transposed_inputs,
+                    batch,
+                    cols,
+                );
             }
         });
         add_elapsed::<PROFILE>(&mut work.accumulate_ns, accumulate_ns);

@@ -1,10 +1,10 @@
 #![cfg(feature = "projection-locality-experiment")]
 
 use half::{bf16, f16};
-use mivi_core::simd::ProjectionTokenTile::{Tokens128, Tokens32, Tokens64};
-use mivi_quant::projection_diagnostics::quantized_matmul_rows_profiled_with_token_tile;
+use mivi_core::simd::ProjectionColumnTile::{Columns128, Columns32, Columns64};
+use mivi_quant::projection_diagnostics::quantized_matmul_rows_profiled_with_column_tile;
 use mivi_quant::{
-    quantized_matmul_rows, quantized_matmul_rows_with_token_tile, GgmlType, QuantError,
+    quantized_matmul_rows, quantized_matmul_rows_with_column_tile, GgmlType, QuantError,
 };
 
 const TYPES: [GgmlType; 6] = [
@@ -15,7 +15,7 @@ const TYPES: [GgmlType; 6] = [
     GgmlType::Q4_K,
     GgmlType::Q6_K,
 ];
-const TILES: [mivi_core::simd::ProjectionTokenTile; 3] = [Tokens32, Tokens64, Tokens128];
+const TILES: [mivi_core::simd::ProjectionColumnTile; 3] = [Columns32, Columns64, Columns128];
 
 fn encoded_weights(ggml_type: GgmlType, rows: usize, cols: usize) -> Vec<u8> {
     let row_bytes = cols / ggml_type.block_size().unwrap() * ggml_type.type_size().unwrap();
@@ -71,7 +71,7 @@ fn assert_bits_equal(left: &[f32], right: &[f32], context: &str) {
 }
 
 #[test]
-fn explicit_token_tiles_match_baseline_bits_for_supported_formats_and_batches() {
+fn explicit_column_tiles_match_baseline_bits_for_supported_formats_and_batches() {
     let rows = 5;
     for ggml_type in TYPES {
         let block = ggml_type.block_size().unwrap();
@@ -94,7 +94,7 @@ fn explicit_token_tiles_match_baseline_bits_for_supported_formats_and_batches() 
                 .unwrap();
                 for tile in TILES {
                     let mut actual = vec![f32::NAN; batch * rows];
-                    quantized_matmul_rows_with_token_tile(
+                    quantized_matmul_rows_with_column_tile(
                         &mut actual,
                         ggml_type,
                         &weights,
@@ -117,13 +117,13 @@ fn explicit_token_tiles_match_baseline_bits_for_supported_formats_and_batches() 
 }
 
 #[test]
-fn explicit_token_tiles_preserve_checked_validation() {
-    let tile = Tokens64;
+fn explicit_column_tiles_preserve_checked_validation() {
+    let tile = Columns64;
     let weights = encoded_weights(GgmlType::F32, 2, 4);
     let inputs = vec![0.25; 32 * 4];
     let mut output = vec![0.0; 32 * 2];
     let call = |out: &mut [f32], weight: &[u8], input: &[f32], batch, rows, cols, kind| {
-        quantized_matmul_rows_with_token_tile(out, kind, weight, input, batch, rows, cols, tile)
+        quantized_matmul_rows_with_column_tile(out, kind, weight, input, batch, rows, cols, tile)
     };
 
     assert!(matches!(
@@ -180,7 +180,7 @@ fn explicit_token_tiles_preserve_checked_validation() {
 }
 
 #[test]
-fn profiled_token_tiles_match_baseline_and_report_across_batch_work() {
+fn profiled_column_tiles_match_baseline_and_report_across_batch_work() {
     let rows = 3;
     let cols = 16;
     let batch = 33;
@@ -202,7 +202,7 @@ fn profiled_token_tiles_match_baseline_and_report_across_batch_work() {
 
     for tile in TILES {
         let mut profiled = vec![f32::NAN; batch * rows];
-        let profile = quantized_matmul_rows_profiled_with_token_tile(
+        let profile = quantized_matmul_rows_profiled_with_column_tile(
             &mut profiled,
             GgmlType::F32,
             &weights,

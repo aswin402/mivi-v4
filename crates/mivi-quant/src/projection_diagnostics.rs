@@ -47,11 +47,11 @@ pub fn quantized_matmul_rows_profiled(
     Ok(from_internal(profile))
 }
 
-/// Run the checked projection kernel with an explicit token traversal width
-/// while collecting opt-in stage timings.
+/// Run the checked projection kernel with an explicit column panel width while
+/// collecting opt-in stage timings.
 #[cfg(feature = "projection-locality-experiment")]
 #[allow(clippy::too_many_arguments)]
-pub fn quantized_matmul_rows_profiled_with_token_tile(
+pub fn quantized_matmul_rows_profiled_with_column_tile(
     out: &mut [f32],
     ggml_type: GgmlType,
     weights: &[u8],
@@ -59,7 +59,7 @@ pub fn quantized_matmul_rows_profiled_with_token_tile(
     batch: usize,
     rows: usize,
     cols: usize,
-    tile: mivi_core::simd::ProjectionTokenTile,
+    tile: mivi_core::simd::ProjectionColumnTile,
 ) -> Result<ProjectionProfile> {
     let profile = quantized_matmul_rows_with_tile_impl::<true>(
         out,
