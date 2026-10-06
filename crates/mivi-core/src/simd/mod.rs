@@ -110,14 +110,34 @@ pub fn matmul_accumulate_transposed_simd(
     batch: usize,
     cols: usize,
 ) {
-    matmul_accumulate_transposed_with_tile_simd(
-        out,
-        weights,
-        transposed_inputs,
-        batch,
-        cols,
-        ProjectionTokenTile::Tokens64,
-    );
+    debug_assert!(out.len() >= batch);
+    debug_assert!(weights.len() >= cols);
+    debug_assert!(transposed_inputs.len() >= cols * batch);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if *HAS_AVX2_FMA {
+            // SAFETY: the feature flag guarantees AVX2/FMA support and the debug
+            // assertions document the slice requirements for this internal kernel.
+            unsafe {
+                avx2::matmul_accumulate_transposed_avx2(
+                    &mut out[..batch],
+                    &weights[..cols],
+                    &transposed_inputs[..cols * batch],
+                    batch,
+                    cols,
+                );
+            }
+            return;
+        }
+    }
+
+    for (col, &scale) in weights.iter().take(cols).enumerate() {
+        let input_start = col * batch;
+        for batch_idx in 0..batch {
+            out[batch_idx] += scale * transposed_inputs[input_start + batch_idx];
+        }
+    }
 }
 
 /// Accumulate a decoded row against column-major batches using an explicit
@@ -162,16 +182,19 @@ pub fn matmul_accumulate_transposed_pair_simd(
     let weights1 = &weights1[..cols];
     let inputs_len = cols.checked_mul(batch).expect("batch dimensions overflow");
     let inputs = &transposed_inputs[..inputs_len];
-    matmul_accumulate_transposed_pair_with_tile_impl(
-        out0,
-        out1,
-        weights0,
-        weights1,
-        inputs,
-        batch,
-        cols,
-        ProjectionTokenTile::Tokens64,
-    );
+    #[cfg(target_arch = "x86_64")]
+    if batch >= 32 && *HAS_AVX2_FMA {
+        // SAFETY: runtime detection guarantees AVX2/FMA; slices above enforce
+        // every input/output bound and mutable borrows cannot overlap.
+        unsafe {
+            avx2::matmul_accumulate_transposed_pair_avx2(
+                out0, out1, weights0, weights1, inputs, batch, cols,
+            );
+        }
+        return;
+    }
+    matmul_accumulate_transposed_simd(out0, weights0, inputs, batch, cols);
+    matmul_accumulate_transposed_simd(out1, weights1, inputs, batch, cols);
 }
 
 /// Accumulate two decoded rows with an explicit token traversal width.

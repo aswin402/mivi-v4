@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.70] - 2026-10-07
+
+### Faithful Projection Locality Experiment (Opt-In)
+
+#### Ideas, Inspirations & Sources
+
+- The paired, alternating benchmark design and reporting of negative/inconclusive results were inspired by [Colibri's benchmarking methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Preserving the existing accumulation order and CPU behavior was informed by the pinned [GGML CPU implementation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cpu/ggml-cpu.c). No GGML code was copied.
+- The selectors are an experiment in this repository; see the [design](docs/superpowers/specs/2026-10-06-faithful-projection-locality-design.md), [implementation plan](docs/superpowers/plans/2026-10-06-faithful-projection-locality.md), and [pilot evidence](docs/PROJECTION_LOCALITY_EVIDENCE_2026-10-06.md).
+
+#### Added and Measured
+
+- Add typed 32/64/128-token traversal selectors behind the `projection-locality-experiment` feature, preserving ascending-column FMA order and exact output bits. Existing APIs and production dispatch remain unchanged.
+- Extend the bounded private measurement harness with selector-aware profiled/unprofiled paired comparisons, exact full-vector parity, alternating run order, and artifact preflight.
+- The corrected three-repetition pilot compared explicit variants against the restored production baseline. Every selector was slower: real-weight Q6_K medians were 2.34–2.39× baseline, with exact output parity. No selector is promoted; investigate the experimental traversal before further performance claims or end-to-end evaluation.
+- Focused SIMD, quantized-matmul, locality, Python supervisor/driver and example tests passed; the opt-in release example built cleanly. Cargo used one job, test execution one thread, and Rayon two threads; no full-workspace check/build/test ran.
+- Raw experiment artifacts and identifying paths remain private. The default kernel is unchanged; broader scratch reuse, model-level parity, and end-to-end P1-A gates remain outstanding.
+
 ## [v0.2.69] - 2026-10-05
 
 ### Projection Cost Diagnostics — P1-A Measurement Slice

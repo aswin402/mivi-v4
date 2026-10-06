@@ -87,6 +87,7 @@ Names without a directory in a table cell belong to the directory of its first f
 **Boundary:** keep `quantized_matmul_rows(out, ggml_type, weights, inputs, batch, rows, cols) -> Result<()>` checked and available. A new scratch-taking variant must preserve the old wrapper and use caller-owned buffers, not mutable globals or per-model-name dispatch.
 
 - [x] Measure allocation/transpose/weight decoding separately using short synthetic shapes and observed real tensor shapes. The [bounded projection cost evidence](../../PROJECTION_COST_EVIDENCE_2026-10-05.md) separates allocation-plus-initialization, stage wall time, and worker work; allocation alone is not isolated. Fifteen accepted pairs select a faithful locality experiment as a hypothesis, not a production optimization or speedup claim.
+- [x] Complete the bounded, exact-parity [faithful locality selector experiment](../../PROJECTION_LOCALITY_EVIDENCE_2026-10-06.md) against the restored production baseline. Every selector was slower (real-weight Q6_K medians 2.34–2.39× baseline); do not pursue promotion before diagnosing the experimental path. All broader P1-A gates below remain open.
 - [ ] Write reference comparisons for batch 1/2/8/9/32/64/65, odd output rows, valid format block widths, and invalid buffers/overflow.
 - [ ] Define scratch ownership/capacity checks and demonstrate reuse across successive projections.
 - [ ] Implement one blocked F32-activation path without changing activation precision.
