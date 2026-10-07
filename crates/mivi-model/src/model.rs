@@ -16,6 +16,10 @@ use crate::transformer::{
     attention_forward_profiled, attention_forward_tile_profiled, AttentionStageProfile,
 };
 use crate::weights::{LayerWeights, ModelWeights};
+
+#[cfg(all(test, feature = "q4-cached-sums-experiment"))]
+#[path = "model/cached_sums_tests.rs"]
+mod cached_sums_tests;
 use mivi_core::arena::{ArenaConfig, RunState};
 use mivi_kv::{compute_chunk_hash, KvCache};
 use mivi_tokenizer::{Tokenizer, EOS_TOKEN_ID};

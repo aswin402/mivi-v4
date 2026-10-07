@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.74] - 2026-10-07
+
+### Faithful Q4 FFN Cached-Sum Experiment (Opt-In)
+
+#### Ideas, Inspirations & Sources
+
+- Cache activation-only minimum-correction sums identified in Mivi's existing Q4 kernel; preserve its F32 arithmetic and route-specific accumulation order. The [v0.2.73 decode evidence](docs/DECODE_SUBSTAGE_EVIDENCE_2026-10-07.md) identified FFN work as the next candidate.
+- Alternating one-variable comparisons, declared cache state, and explicit measurement limits follow [Colibri's benchmarking protocol](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference code was copied.
+- See the [design](docs/superpowers/specs/2026-10-07-q4-cached-sums-design.md), [implementation plan](docs/superpowers/plans/2026-10-07-q4-cached-sums-experiment.md), and [pilot evidence](docs/Q4_CACHED_SUMS_EVIDENCE_2026-10-07.md).
+
+#### Added and Measured
+
+- Add a checked Q4 scratch-taking candidate behind `q4-cached-sums-experiment`. Reuse scalar/AVX2 activation sums across output rows; preserve ordinary kernels and other quantization formats. Reject invalid dimensions/buffers before writes.
+- Add feature-gated, preallocated RunState scratch and an explicit default-off selector for single-token FFN gate/up/down projections. Retain LoRA behavior, per-call scratch refresh, portable scalar fallback and read-only worker sharing; no model-name rules or new dependencies.
+- Add operator, scratch/arena, mixed-format FFN/LoRA controls and an ignored real-model diagnostic checking bit-exact full logits and final KV/convolution/SSM state with profiling disabled.
+- The local 1.2B Instruct GGUF passed all paired real-model comparisons. Forty Q4 FFN tensors used the candidate and eight Q6 tensors retained baseline behavior; each candidate member executed 640 projections over 16 forwards using 1,024 bytes of scratch.
+- In three alternating short-context pairs, candidate/baseline wall ratios were 0.915259, 0.914447 and 0.913469 (median 8.56% lower fixed-work decode time). Separate medians were 1.571224s baseline and 1.438076s candidate. The evidence document records workload/cache state and all measured pairs.
+- This is a bounded same-engine pilot, not an agent-quality, TTFT, RSS, cross-engine or general speedup claim. Default dispatch remains unchanged; no server/CLI selector or production promotion is included. Chunked batch prefill is not optimized here, and broader CPU-plan gates remain open.
+- Targeted debug/release controls and the release live diagnostic used one Cargo job and two inference threads; no workspace-wide Cargo check/build/test ran.
+
 ## [v0.2.73] - 2026-10-07
 
 ### Single-Token Decode Substage Diagnostics

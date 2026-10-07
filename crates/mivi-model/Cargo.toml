@@ -7,6 +7,7 @@ license.workspace = true
 description = "GGUF parser, hybrid LFM architecture (SSM+GQA), LoRA adapters, forward pass, and sampling"
 
 [features]
+q4-cached-sums-experiment = ["mivi-quant/q4-cached-sums-experiment"]
 fixture-diagnostics = []
 projection-diagnostics = ["fixture-diagnostics", "mivi-quant/projection-diagnostics"]
 projection-locality-experiment = ["projection-diagnostics", "mivi-quant/projection-locality-experiment"]

@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description = "Core tensor operations, SIMD acceleration, RunState memory arena, and math primitives for mivi"
 
+[features]
+q4-cached-sums-experiment = []
+
 [dependencies]
 rayon.workspace = true
 thiserror.workspace = true

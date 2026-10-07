@@ -8,6 +8,11 @@ pub const Q4_K_BYTES: usize = 144;
 #[cfg(test)]
 mod packed_prefill;
 
+#[cfg(feature = "q4-cached-sums-experiment")]
+mod cached_sums;
+#[cfg(feature = "q4-cached-sums-experiment")]
+pub use cached_sums::try_matvec_q4_k_m_cached;
+
 #[inline(always)]
 fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
     if j < 4 {

@@ -59,6 +59,16 @@ pub struct RunState {
 
     // LoRA intermediate buffer
     pub lora_down: Box<[f32]>,
+
+    /// Transient per-projection sums; never part of cached recurrent state.
+    #[cfg(feature = "q4-cached-sums-experiment")]
+    pub q4_activation_sums: Box<[f32]>,
+    /// Explicit experimental selector, off even when the feature is compiled.
+    #[cfg(feature = "q4-cached-sums-experiment")]
+    pub q4_cached_sums_enabled: bool,
+    /// Eligibility evidence for explicit diagnostic runs only.
+    #[cfg(feature = "q4-cached-sums-experiment")]
+    pub q4_cached_sums_calls: usize,
 }
 
 impl RunState {
@@ -83,6 +93,13 @@ impl RunState {
                 .into_boxed_slice(),
             shortconv_in: vec![0.0f32; 3 * cfg.dim].into_boxed_slice(),
             lora_down: vec![0.0f32; cfg.max_lora_rank].into_boxed_slice(),
+            #[cfg(feature = "q4-cached-sums-experiment")]
+            q4_activation_sums: vec![0.0; cfg.dim.max(cfg.hidden_dim).div_ceil(32)]
+                .into_boxed_slice(),
+            #[cfg(feature = "q4-cached-sums-experiment")]
+            q4_cached_sums_enabled: false,
+            #[cfg(feature = "q4-cached-sums-experiment")]
+            q4_cached_sums_calls: 0,
         }
     }
 
@@ -105,6 +122,11 @@ impl RunState {
         self.conv_states.fill(0.0);
         self.shortconv_in.fill(0.0);
         self.lora_down.fill(0.0);
+        #[cfg(feature = "q4-cached-sums-experiment")]
+        {
+            self.q4_activation_sums.fill(0.0);
+            self.q4_cached_sums_calls = 0;
+        }
     }
 
     /// Export SSM recurrent state buffers for hybrid prefix caching and snapshotting.
@@ -120,5 +142,44 @@ impl RunState {
         if ssm.len() == self.ssm_states.len() {
             self.ssm_states.copy_from_slice(ssm);
         }
+    }
+}
+
+#[cfg(all(test, feature = "q4-cached-sums-experiment"))]
+mod cached_sums_tests {
+    use super::*;
+
+    #[test]
+    fn cached_sums_arena_capacity_and_reset() {
+        let cfg = ArenaConfig {
+            dim: 256,
+            hidden_dim: 513,
+            n_layers: 1,
+            n_heads: 1,
+            n_kv_heads: 1,
+            head_dim: 256,
+            kv_dim: 256,
+            vocab_size: 8,
+            max_seq_len: 4,
+            ssm_state_dim: 0,
+            ssm_conv_kernel: 0,
+            max_lora_rank: 0,
+            n_experts: 0,
+        };
+        let mut state = RunState::new(&cfg);
+        assert_eq!(state.q4_activation_sums.len(), 17);
+        assert!(!state.q4_cached_sums_enabled);
+        state.q4_activation_sums.fill(7.0);
+        state.q4_cached_sums_enabled = true;
+        state.q4_cached_sums_calls = 9;
+        let ptr = state.q4_activation_sums.as_ptr();
+        state.reset();
+        assert!(state.q4_activation_sums.iter().all(|&x| x == 0.0));
+        assert_eq!(state.q4_cached_sums_calls, 0);
+        assert!(
+            state.q4_cached_sums_enabled,
+            "reset must retain explicit selector"
+        );
+        assert_eq!(state.q4_activation_sums.as_ptr(), ptr);
     }
 }
