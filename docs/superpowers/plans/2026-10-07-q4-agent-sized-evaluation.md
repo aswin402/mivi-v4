@@ -57,7 +57,9 @@ gates remain open regardless of this pilot's outcome.
   ratios, actual prefix reuse, eligible/candidate calls, limitations and decision.
 - [x] Verify release measurement controls, formatting and whitespace; update
   changelog with ideas/sources and increment the patch version when complete.
-- [ ] Commit/push scoped changes only; verify the branch is synchronized.
+- [x] Commit/push scoped changes only; verify the branch is synchronized.
+  Implementation/evidence `227b2c7` was pushed successfully; only the unrelated
+  `.gitignore` edit remained unstaged.
 
 Sources: the [approved mechanism design](../specs/2026-10-07-q4-cached-sums-design.md),
 [short-prefix evidence](../../Q4_CACHED_SUMS_EVIDENCE_2026-10-07.md), Mivi's existing
