@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.72] - 2026-10-07
+
+### Decode-Stage Profiling for Focused Model Benchmarks
+
+#### Ideas, Inspirations & Sources
+
+- The separation of prefill and decode measurements and explicit cache-state reporting follow [Colibri's benchmarking methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md).
+- Decode-stage attribution reuses Mivi's opt-in forward profiler; no external inference code or kernels were copied.
+
+#### Added and Verified
+
+- Capture the profile at the exact prefill/decode boundary and report decode forward-stage time and shares separately from prefill in `mivi bench`.
+- Preserve existing normal inference behavior; profiling remains opt-in. Profile subtraction saturates at zero to avoid negative durations from timer granularity.
+- Verified with the 1.2B Q4_K_M GGUF, two Rayon threads, and a 1,557-token synthetic agent-style prompt. One profiled run attributed 1.059s (42.0%) to attention, 1.214s (48.1%) to SSM, and 0.249s (9.9%) to logits over 24 decode forward passes; a warm shared-prefix run attributed 0.675s/0.761s/0.158s over 15 passes.
+- These are single diagnostic samples, not stable performance claims; measured stage time excludes sampling and streaming overhead. The new profile reports the existing aggregate attention/SSM split for decode; detailed inner attention/SSM sub-stages remain available for chunked prefill only.
+- Targeted profile-subtraction tests, the scoped release build, formatting, and the real-model benchmark passed. Cargo used one job; no workspace-wide check/build/test was run.
+
 ## [v0.2.71] - 2026-10-07
 
 ### Faithful Projection Column-Panel Experiment (Opt-In)

@@ -86,6 +86,7 @@ pub struct Model {
     pub prefix_cache: mivi_kv::PrefixCache,
     prefill_strategy: PrefillStrategy,
     forward_profile: Option<ForwardProfileSnapshot>,
+    last_prefill_profile: Option<ForwardProfileSnapshot>,
     #[cfg(feature = "fixture-diagnostics")]
     fixture_recorder: Option<ModelRecorder>,
 }
@@ -227,6 +228,7 @@ impl Model {
             prefix_cache: mivi_kv::PrefixCache::default(),
             prefill_strategy: PrefillStrategy::default(),
             forward_profile: None,
+            last_prefill_profile: None,
             #[cfg(feature = "fixture-diagnostics")]
             fixture_recorder: None,
         })
@@ -316,6 +318,15 @@ impl Model {
     #[inline]
     pub fn forward_profile(&self) -> Option<ForwardProfileSnapshot> {
         self.forward_profile
+    }
+
+    /// Return the cumulative forward-stage profile captured immediately after the most recent prefill.
+    ///
+    /// This is available only when forward profiling was enabled. Reset the profile before
+    /// generation when the snapshot must be isolated to one call.
+    #[inline]
+    pub fn last_prefill_profile(&self) -> Option<ForwardProfileSnapshot> {
+        self.last_prefill_profile
     }
 
     #[inline]
@@ -1052,6 +1063,7 @@ impl Model {
         F: FnMut(u32, &str) -> bool,
         C: FnMut() -> bool,
     {
+        self.last_prefill_profile = None;
         if prompt_tokens.is_empty() && start_pos == 0 {
             return Ok((String::new(), Vec::new()));
         }
@@ -1121,8 +1133,9 @@ impl Model {
             &mut chained_hash,
             &mut should_cancel,
         );
+        self.last_prefill_profile = self.forward_profile();
         #[cfg(feature = "fixture-diagnostics")]
-        let prefill_profile = self.forward_profile();
+        let prefill_profile = self.last_prefill_profile;
         #[cfg(feature = "fixture-diagnostics")]
         if let Some(recorder) = self.fixture_recorder.as_mut() {
             use crate::fixture_diagnostics::StageOutcome;

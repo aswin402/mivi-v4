@@ -15,6 +15,7 @@ struct GenerationMeasurement {
     generated_tokens: usize,
     first_output_latency: Option<Duration>,
     total: Duration,
+    decode_profile: Option<mivi_model::ForwardProfileSnapshot>,
     output: String,
 }
 
@@ -40,6 +41,63 @@ fn decode_tokens_per_second(
     let decode_tokens = generated_tokens.saturating_sub(1);
     let decode_elapsed = total.saturating_sub(first_output_latency);
     tokens_per_second(decode_tokens, decode_elapsed)
+}
+
+fn subtract_forward_profiles(
+    total: mivi_model::ForwardProfileSnapshot,
+    prefill: mivi_model::ForwardProfileSnapshot,
+) -> mivi_model::ForwardProfileSnapshot {
+    use mivi_model::ssm::SsmStageProfile;
+    use mivi_model::{AttentionStageProfile, ForwardProfileSnapshot};
+
+    ForwardProfileSnapshot {
+        tokens: total.tokens.saturating_sub(prefill.tokens),
+        embedding: total.embedding.saturating_sub(prefill.embedding),
+        attention: total.attention.saturating_sub(prefill.attention),
+        attention_stages: AttentionStageProfile {
+            norm: total
+                .attention_stages
+                .norm
+                .saturating_sub(prefill.attention_stages.norm),
+            qkv_projection: total
+                .attention_stages
+                .qkv_projection
+                .saturating_sub(prefill.attention_stages.qkv_projection),
+            causal_attention: total
+                .attention_stages
+                .causal_attention
+                .saturating_sub(prefill.attention_stages.causal_attention),
+            output_projection: total
+                .attention_stages
+                .output_projection
+                .saturating_sub(prefill.attention_stages.output_projection),
+            ffn: total
+                .attention_stages
+                .ffn
+                .saturating_sub(prefill.attention_stages.ffn),
+        },
+        ssm: total.ssm.saturating_sub(prefill.ssm),
+        ssm_stages: SsmStageProfile {
+            norm: total
+                .ssm_stages
+                .norm
+                .saturating_sub(prefill.ssm_stages.norm),
+            input_projection: total
+                .ssm_stages
+                .input_projection
+                .saturating_sub(prefill.ssm_stages.input_projection),
+            convolution: total
+                .ssm_stages
+                .convolution
+                .saturating_sub(prefill.ssm_stages.convolution),
+            output_projection: total
+                .ssm_stages
+                .output_projection
+                .saturating_sub(prefill.ssm_stages.output_projection),
+            ffn: total.ssm_stages.ffn.saturating_sub(prefill.ssm_stages.ffn),
+        },
+        logits: total.logits.saturating_sub(prefill.logits),
+    }
 }
 
 fn parse_prefill_strategy(
@@ -126,6 +184,7 @@ fn measure_generation(
     max_tokens: usize,
 ) -> Result<GenerationMeasurement> {
     model.reset_context();
+    model.reset_forward_profile();
     let start = Instant::now();
     let mut first_output_latency = None;
     let (output, generated_ids) =
@@ -137,12 +196,17 @@ fn measure_generation(
         })?;
     let total = start.elapsed();
     let prompt_tokens = model.current_pos().saturating_sub(generated_ids.len());
+    let decode_profile = model
+        .forward_profile()
+        .zip(model.last_prefill_profile())
+        .map(|(total, prefill)| subtract_forward_profiles(total, prefill));
 
     Ok(GenerationMeasurement {
         prompt_tokens,
         generated_tokens: generated_ids.len(),
         first_output_latency,
         total,
+        decode_profile,
         output,
     })
 }
@@ -235,6 +299,31 @@ fn print_generation_measurement(
                 ssm_percent(profile.ssm_stages.ffn),
             );
         }
+    }
+    if let Some(profile) = measurement.decode_profile {
+        let stage_total = profile.total_stage_time();
+        let stage_percent = |duration: Duration| {
+            if stage_total.is_zero() {
+                0.0
+            } else {
+                duration.as_secs_f64() * 100.0 / stage_total.as_secs_f64()
+            }
+        };
+        println!("  Decode profiled forwards   : {}", profile.tokens);
+        println!(
+            "  Decode stages (embed/attn/ssm/logits): {:.3}/{:.3}/{:.3}/{:.3} s",
+            profile.embedding.as_secs_f64(),
+            profile.attention.as_secs_f64(),
+            profile.ssm.as_secs_f64(),
+            profile.logits.as_secs_f64(),
+        );
+        println!(
+            "  Decode stage share         : {:.1}%/{:.1}%/{:.1}%/{:.1}%",
+            stage_percent(profile.embedding),
+            stage_percent(profile.attention),
+            stage_percent(profile.ssm),
+            stage_percent(profile.logits),
+        );
     }
     println!("  First emitted text latency  : {ttft_display}");
     println!(
@@ -414,9 +503,11 @@ pub fn run_bench(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_synthetic_prompt, decode_tokens_per_second, parse_prefill_strategy, tokens_per_second,
+        build_synthetic_prompt, decode_tokens_per_second, parse_prefill_strategy,
+        subtract_forward_profiles, tokens_per_second,
     };
-    use mivi_model::PrefillStrategy;
+    use mivi_model::ssm::SsmStageProfile;
+    use mivi_model::{AttentionStageProfile, ForwardProfileSnapshot, PrefillStrategy};
     use std::time::Duration;
 
     #[test]
@@ -469,6 +560,75 @@ mod tests {
             decode_tokens_per_second(1, Some(Duration::from_secs(1)), Duration::from_secs(1)),
             0.0
         );
+    }
+
+    #[test]
+    fn decode_profile_subtracts_prefill_stage_timings_saturating_at_zero() {
+        let total = ForwardProfileSnapshot {
+            tokens: 12,
+            embedding: Duration::from_millis(12),
+            attention: Duration::from_millis(120),
+            attention_stages: AttentionStageProfile {
+                norm: Duration::from_millis(10),
+                qkv_projection: Duration::from_millis(20),
+                causal_attention: Duration::from_millis(30),
+                output_projection: Duration::from_millis(40),
+                ffn: Duration::from_millis(50),
+            },
+            ssm: Duration::from_millis(60),
+            ssm_stages: SsmStageProfile {
+                norm: Duration::from_millis(5),
+                input_projection: Duration::from_millis(10),
+                convolution: Duration::from_millis(15),
+                output_projection: Duration::from_millis(20),
+                ffn: Duration::from_millis(25),
+            },
+            logits: Duration::from_millis(24),
+        };
+        let prefill = ForwardProfileSnapshot {
+            tokens: 10,
+            embedding: Duration::from_millis(10),
+            attention: Duration::from_millis(100),
+            attention_stages: AttentionStageProfile {
+                norm: Duration::from_millis(8),
+                qkv_projection: Duration::from_millis(15),
+                causal_attention: Duration::from_millis(25),
+                output_projection: Duration::from_millis(30),
+                ffn: Duration::from_millis(40),
+            },
+            ssm: Duration::from_millis(50),
+            ssm_stages: SsmStageProfile {
+                norm: Duration::from_millis(4),
+                input_projection: Duration::from_millis(8),
+                convolution: Duration::from_millis(12),
+                output_projection: Duration::from_millis(16),
+                ffn: Duration::from_millis(20),
+            },
+            logits: Duration::from_millis(20),
+        };
+
+        let decode = subtract_forward_profiles(total, prefill);
+
+        assert_eq!(decode.tokens, 2);
+        assert_eq!(decode.embedding, Duration::from_millis(2));
+        assert_eq!(decode.attention, Duration::from_millis(20));
+        assert_eq!(decode.attention_stages.ffn, Duration::from_millis(10));
+        assert_eq!(decode.ssm, Duration::from_millis(10));
+        assert_eq!(decode.ssm_stages.ffn, Duration::from_millis(5));
+        assert_eq!(decode.logits, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn decode_profile_subtraction_saturates_when_stage_timer_variance_is_negative() {
+        let decode = subtract_forward_profiles(
+            ForwardProfileSnapshot::default(),
+            ForwardProfileSnapshot {
+                attention: Duration::from_millis(1),
+                ..ForwardProfileSnapshot::default()
+            },
+        );
+
+        assert_eq!(decode.attention, Duration::ZERO);
     }
 
     #[test]
