@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.75] - 2026-10-07
+
+### Agent-Sized Q4 First-Output and Decode Evaluation
+
+#### Ideas, Inspirations & Sources
+
+- Extend the [v0.2.74 cached-sum pilot](docs/Q4_CACHED_SUMS_EVIDENCE_2026-10-07.md) using Mivi's existing bounded fixture recorder and chunked prefill, separating engine first nonempty delivery from continuation decode.
+- Cache-state declarations, alternating fixed-work pairs and retaining negative results follow [Colibri's benchmarking protocol](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference source was copied.
+- See the [evaluation plan](docs/superpowers/plans/2026-10-07-q4-agent-sized-evaluation.md) and [complete pair evidence](docs/Q4_AGENT_SIZED_EVIDENCE_2026-10-07.md).
+
+#### Added and Verified
+
+- Add a test-only diagnostic requiring both `q4-cached-sums-experiment` and `fixture-diagnostics`, with one warmup and three alternating measured pairs for each cold-prefix/warm-prefix case. Add nonignored measurement controls for timer boundaries, complete work/cache accounting, nonempty delivery, truncation/overflow and accidental profiling rejection.
+- Test the local 1.2B Instruct GGUF with 1,557 input IDs (1,558 effective with BOS), F32 KV, context 2,048, tile 64, a greedy first callback, and 16 fixed continuation forwards. All members passed bit-exact complete final-prefill and continuation-logit vectors, first token/text and final KV/SSM-state comparisons. Intermediate prompt logits are not produced or claimed.
+- Cold-prefix baseline/candidate first-output medians were 45.833226s/47.440989s; warm-prefix medians were 2.894534s/2.947387s with 1,536 tokens restored and 22 processed. Both ran zero candidate projections during prefill. This selector does not optimize chunked prefill or resolve the initial agent wait; timing differences in that unchanged path are not optimization gains.
+- Decode paired-ratio medians were 0.932190 cold and 0.903398 warm (6.78% and 9.66% lower). Preserve the negative cold pair where candidate decode was 2.81% slower; do not infer general superiority or default-promotion readiness from this single-host pilot.
+- No runtime kernels, provider configuration or server behavior changed. The candidate remains default-off; model coverage, RSS and real HTTP/tool-loop gates remain open. Cargo used one job and inference two threads; no workspace-wide check/build/test ran.
+
 ## [v0.2.74] - 2026-10-07
 
 ### Faithful Q4 FFN Cached-Sum Experiment (Opt-In)
