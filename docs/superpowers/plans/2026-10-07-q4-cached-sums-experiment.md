@@ -46,4 +46,4 @@ Files: `docs/Q4_CACHED_SUMS_EVIDENCE_2026-10-07.md`, `CHANGELOG.md`, root `Cargo
 - [x] Run targeted existing Q4 controls without the feature, format touched Rust files, and run `git diff --check`.
 - [x] Document measured results and remaining end-to-end/RSS/model-coverage gates; mark completed steps here only after verification.
 - [x] Bump workspace package version to `0.2.74` and update the fourteen local lockfile package versions; add changelog sources and scope.
-- [ ] Commit only scoped files and push `feat/runtime-parity-profiling`; leave `.gitignore` untouched.
+- [x] Commit only scoped files and push `feat/runtime-parity-profiling`; leave `.gitignore` untouched. Implementation `05a6cac` was pushed successfully.
