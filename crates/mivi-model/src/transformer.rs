@@ -13,7 +13,7 @@ use mivi_kv::KvCache;
 use mivi_quant::quantized_matmul_rows;
 use std::time::{Duration, Instant};
 
-/// Optional chunked-prefill timings for the stages within an attention block.
+/// Optional timings for the stages within an attention block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AttentionStageProfile {
     pub norm: Duration,
@@ -52,7 +52,12 @@ pub struct AttentionParams<'a> {
 
 /// Compute Q, K, V projections, apply RoPE, and store in KV cache.
 #[inline]
-fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams) -> Result<()> {
+fn compute_qkv(
+    state: &mut RunState,
+    kv: &mut KvCache,
+    params: &AttentionParams,
+    mut profile: Option<&mut AttentionStageProfile>,
+) -> Result<()> {
     let cfg = params.config;
     let w = params.weights;
     let dim = cfg.dim;
@@ -60,6 +65,7 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
     let mmap = params.mmap;
     let adapters = params.adapters;
 
+    let stage_start = profile.is_some().then(Instant::now);
     let mut project =
         |out: &mut [f32], weight: &crate::weights::QuantizedTensor, rows: usize, name: &str| {
             let p = LinearParams {
@@ -77,7 +83,11 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
     project(&mut state.q, &w.wq, dim, &w.q_name)?;
     project(&mut state.k, &w.wk, kv_dim, &w.k_name)?;
     project(&mut state.v, &w.wv, kv_dim, &w.v_name)?;
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.qkv_projection += start.elapsed();
+    }
 
+    let stage_start = profile.is_some().then(Instant::now);
     // Apply QK-Norm per head if weights are present
     let head_dim = cfg.head_dim;
     if let Some(ref q_norm_w) = w.q_norm {
@@ -106,6 +116,9 @@ fn compute_qkv(state: &mut RunState, kv: &mut KvCache, params: &AttentionParams)
 
     // Store K, V in KV cache
     kv.store(params.layer, params.pos, &state.k, &state.v)?;
+    if let (Some(profile), Some(start)) = (profile, stage_start) {
+        profile.causal_attention += start.elapsed();
+    }
     Ok(())
 }
 
@@ -306,6 +319,16 @@ pub fn attention_forward(
     kv: &mut KvCache,
     params: &AttentionParams,
 ) -> Result<()> {
+    attention_forward_profiled(state, kv, params, None)
+}
+
+/// Run the same single-token arithmetic with optional stage timing.
+pub(crate) fn attention_forward_profiled(
+    state: &mut RunState,
+    kv: &mut KvCache,
+    params: &AttentionParams,
+    mut profile: Option<&mut AttentionStageProfile>,
+) -> Result<()> {
     let cfg = params.config;
     let w = params.weights;
     let dim = cfg.dim;
@@ -314,15 +337,24 @@ pub fn attention_forward(
     let adapters = params.adapters;
 
     // 1. Attention Pre-Norm (SIMD accelerated)
+    let stage_start = profile.is_some().then(Instant::now);
     rms_norm_simd(&mut state.xb, &state.x, &w.attn_norm, cfg.rms_norm_eps);
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.norm += start.elapsed();
+    }
 
     // 2-4. Q, K, V projections + RoPE + Cache store
-    compute_qkv(state, kv, params)?;
+    compute_qkv(state, kv, params, profile.as_deref_mut())?;
 
     // 5. Multi-head Attention with GQA
+    let stage_start = profile.is_some().then(Instant::now);
     compute_gqa_attention(state, kv, params.layer, params.pos, cfg)?;
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.causal_attention += start.elapsed();
+    }
 
     // 6. Output projection: xb = W_o * attn_out + LoRA
+    let stage_start = profile.is_some().then(Instant::now);
     let out_params = LinearParams {
         weight: &w.wo,
         input: &state.attn_out,
@@ -336,8 +368,12 @@ pub fn attention_forward(
 
     // 7. Residual connection: x = x + xb
     vec_add(&mut state.x, &state.xb);
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.output_projection += start.elapsed();
+    }
 
     // 8-11. Shared FFN SwiGLU forward
+    let stage_start = profile.is_some().then(Instant::now);
     let ffn_params = FfnSwigluParams {
         weights: &w.ffn,
         dim,
@@ -346,7 +382,11 @@ pub fn attention_forward(
         adapters,
         eps: cfg.rms_norm_eps,
     };
-    ffn_swiglu_forward(state, &ffn_params)
+    ffn_swiglu_forward(state, &ffn_params)?;
+    if let (Some(profile), Some(start)) = (profile, stage_start) {
+        profile.ffn += start.elapsed();
+    }
+    Ok(())
 }
 
 /// Forward an attention block over a prompt tile.
@@ -726,6 +766,30 @@ mod tests {
         let (tile_k, tile_v) = tile_kv.export_state(inputs.len()).unwrap();
         assert_eq!(token_k, tile_k);
         assert_eq!(token_v, tile_v);
+
+        let mut profiled_token_state = RunState::new(&arena);
+        let mut profiled_token_kv =
+            KvCache::try_new_selective(1, cfg.max_seq_len, dim, &[0]).unwrap();
+        let mut token_profile = AttentionStageProfile::default();
+        for (pos, input) in inputs.iter().enumerate() {
+            profiled_token_state.x.copy_from_slice(input);
+            let token_params = AttentionParams { pos, ..params };
+            attention_forward_profiled(
+                &mut profiled_token_state,
+                &mut profiled_token_kv,
+                &token_params,
+                Some(&mut token_profile),
+            )
+            .unwrap();
+            assert_eq!(profiled_token_state.x.as_ref(), expected[pos].as_slice());
+        }
+        assert_eq!(
+            profiled_token_kv.export_state(inputs.len()).unwrap(),
+            (token_k, token_v)
+        );
+        assert!(!token_profile.qkv_projection.is_zero());
+        assert!(!token_profile.causal_attention.is_zero());
+        assert!(!token_profile.ffn.is_zero());
 
         let expected_tile = tile.current.clone();
         for (row, input) in inputs.iter().enumerate() {

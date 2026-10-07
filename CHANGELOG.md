@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.73] - 2026-10-07
+
+### Single-Token Decode Substage Diagnostics
+
+#### Ideas, Inspirations & Sources
+
+- Reuse Mivi's existing attention/SSM stage profiles and the v0.2.72 prefill boundary snapshot to attribute single-token work.
+- Alternating profiled/unprofiled pairs, fixed continuation work, and reporting measured limits follow [Colibri's benchmarking methodology](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference code was copied.
+
+#### Added
+
+- Profile normalization, Q/K/V projections, causal attention, output projection and FFN on the single-token attention path; profile normalization, input projection, gated convolution, output projection and FFN on the single-token SSM path.
+- Extend `mivi bench` to print decode substages and combined FFN share. Timers are enabled only through the existing opt-in forward profiler.
+- Add exact profiling-on/off output and KV/convolution-state checks to the synthetic fixtures, and an ignored release diagnostic with one warmup and three alternating real-model pairs using identical continuation tokens.
+
+#### Verification and Evidence
+
+- The two synthetic fixtures and the real 1.2B Q4_K_M model passed exact paired logit/state parity. With a retained 257-token effective prefix and 16 fixed continuation forwards, median decode FFN share was 66.50%; outer wall medians were 1.5707s unprofiled and 1.6134s profiled. See the [decode evidence](docs/DECODE_SUBSTAGE_EVIDENCE_2026-10-07.md) for all pair timings, boundaries, and the earlier discrepant pilot.
+- These are three small diagnostic samples on one host, not agent-quality or kernel-speedup claims. No optimization is promoted. Cargo used one job and inference two threads.
+- The scoped root release binary built, profile-subtraction tests passed, and a short real-model `mivi bench` smoke run printed the new attention/SSM substages and combined FFN share. Formatting and whitespace checks passed; no workspace-wide Cargo check/build/test ran.
+
 ## [v0.2.72] - 2026-10-07
 
 ### Decode-Stage Profiling for Focused Model Benchmarks

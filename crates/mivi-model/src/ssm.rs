@@ -12,7 +12,7 @@ use mivi_core::simd::rms_norm_simd;
 use mivi_quant::quantized_matmul_rows;
 use std::time::{Duration, Instant};
 
-/// Optional diagnostic timing for the major SSM tile stages.
+/// Optional diagnostic timing for the major SSM stages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SsmStageProfile {
     pub norm: Duration,
@@ -49,6 +49,15 @@ pub struct SsmParams<'a> {
 
 /// Forward pass through an LFM2 Gated ShortConv block.
 pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
+    ssm_forward_profiled(state, params, None)
+}
+
+/// Run the same single-token arithmetic with optional stage timing.
+pub(crate) fn ssm_forward_profiled(
+    state: &mut RunState,
+    params: &SsmParams,
+    mut profile: Option<&mut SsmStageProfile>,
+) -> Result<()> {
     let cfg = params.config;
     let w = params.weights;
     let layer = params.layer;
@@ -62,9 +71,14 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
     }
 
     // 1. Pre-Norm: xb = rms_norm(x, ssm_norm) (SIMD accelerated)
+    let stage_start = profile.is_some().then(Instant::now);
     rms_norm_simd(&mut state.xb, &state.x, &w.ssm_norm, cfg.rms_norm_eps);
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.norm += start.elapsed();
+    }
 
     // 2. In-projection: shortconv_in (3 * dim) = W_in (3*dim x dim) * xb + LoRA
+    let stage_start = profile.is_some().then(Instant::now);
     let in_rows = 3 * dim;
     let in_params = LinearParams {
         weight: &w.in_proj,
@@ -76,7 +90,11 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
         module_name: &w.in_name,
     };
     linear_forward(&mut state.shortconv_in, &in_params, &mut state.lora_down)?;
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.input_projection += start.elapsed();
+    }
 
+    let stage_start = profile.is_some().then(Instant::now);
     // 3. Chunk into B (dim), C (dim), X (dim) and compute bx[d] = B[d] * X[d]
     let (b_slice, rest) = state.shortconv_in.split_at(dim);
     let (c_slice, x_slice) = rest.split_at(dim);
@@ -139,7 +157,12 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
         }
     }
 
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.convolution += start.elapsed();
+    }
+
     // 5. Output projection: xb = W_out (dim x dim) * xb2 + LoRA
+    let stage_start = profile.is_some().then(Instant::now);
     let out_params = LinearParams {
         weight: &w.out_proj,
         input: &state.xb2,
@@ -153,8 +176,12 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
 
     // 6. Residual connection: x = x + xb
     vec_add(&mut state.x, &state.xb);
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), stage_start) {
+        profile.output_projection += start.elapsed();
+    }
 
     // 7-10. Shared FFN SwiGLU forward
+    let stage_start = profile.is_some().then(Instant::now);
     let ffn_params = FfnSwigluParams {
         weights: &w.ffn,
         dim,
@@ -163,7 +190,11 @@ pub fn ssm_forward(state: &mut RunState, params: &SsmParams) -> Result<()> {
         adapters,
         eps: cfg.rms_norm_eps,
     };
-    ffn_swiglu_forward(state, &ffn_params)
+    ffn_swiglu_forward(state, &ffn_params)?;
+    if let (Some(profile), Some(start)) = (profile, stage_start) {
+        profile.ffn += start.elapsed();
+    }
+    Ok(())
 }
 
 /// Forward an SSM block over a prompt tile.
@@ -538,5 +569,17 @@ mod tests {
             }
         }
         assert_eq!(tile_state.conv_states, token_state.conv_states);
+
+        let mut profiled_state = RunState::new(&arena);
+        let mut profile = SsmStageProfile::default();
+        for (row, input) in inputs.iter().enumerate() {
+            profiled_state.x.copy_from_slice(input);
+            ssm_forward_profiled(&mut profiled_state, &params, Some(&mut profile)).unwrap();
+            assert_eq!(profiled_state.x.as_ref(), expected[row].as_slice());
+        }
+        assert_eq!(profiled_state.conv_states, token_state.conv_states);
+        assert!(!profile.input_projection.is_zero());
+        assert!(!profile.convolution.is_zero());
+        assert!(!profile.ffn.is_zero());
     }
 }

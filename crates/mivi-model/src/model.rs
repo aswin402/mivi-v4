@@ -9,9 +9,11 @@ use crate::loader::{extract_merges, extract_model_config, extract_vocab, resolve
 use crate::lora::ActiveAdapters;
 use crate::prefill::TileActivations;
 use crate::sampler::Sampler;
-use crate::ssm::{ssm_forward, ssm_forward_tile, ssm_forward_tile_profiled, SsmStageProfile};
+use crate::ssm::{
+    ssm_forward_profiled, ssm_forward_tile, ssm_forward_tile_profiled, SsmStageProfile,
+};
 use crate::transformer::{
-    attention_forward, attention_forward_tile_profiled, AttentionStageProfile,
+    attention_forward_profiled, attention_forward_tile_profiled, AttentionStageProfile,
 };
 use crate::weights::{LayerWeights, ModelWeights};
 use mivi_core::arena::{ArenaConfig, RunState};
@@ -408,6 +410,8 @@ impl Model {
         // 2. Iterate through layers
         let mut attention_elapsed = Duration::ZERO;
         let mut ssm_elapsed = Duration::ZERO;
+        let mut attention_stages = AttentionStageProfile::default();
+        let mut ssm_stages = SsmStageProfile::default();
         for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
             match layer {
                 LayerWeights::Attention(w) => {
@@ -421,7 +425,12 @@ impl Model {
                         adapters: &self.active_adapters,
                         rope: &self.rope_cache,
                     };
-                    attention_forward(&mut self.state, &mut self.kv_cache, &params)?;
+                    attention_forward_profiled(
+                        &mut self.state,
+                        &mut self.kv_cache,
+                        &params,
+                        profile_enabled.then_some(&mut attention_stages),
+                    )?;
                     if let Some(start) = stage_start {
                         attention_elapsed += start.elapsed();
                     }
@@ -435,12 +444,21 @@ impl Model {
                         config: &self.config,
                         adapters: &self.active_adapters,
                     };
-                    ssm_forward(&mut self.state, &params)?;
+                    ssm_forward_profiled(
+                        &mut self.state,
+                        &params,
+                        profile_enabled.then_some(&mut ssm_stages),
+                    )?;
                     if let Some(start) = stage_start {
                         ssm_elapsed += start.elapsed();
                     }
                 }
             }
+        }
+
+        if let Some(profile) = self.forward_profile.as_mut() {
+            profile.attention_stages.add_assign(attention_stages);
+            profile.ssm_stages.add_assign(ssm_stages);
         }
 
         if !compute_logits {
@@ -2158,6 +2176,151 @@ mod prefix_cache_integration_tests {
         assert_eq!(
             profile.total_stage_time(),
             std::time::Duration::from_millis(10)
+        );
+    }
+
+    /// Bounded teacher-forced decode diagnostics; never runs in the default test suite.
+    #[test]
+    #[ignore = "requires MIVI_TEST_MODEL and explicit release execution"]
+    fn decode_substage_profile_parity_and_measurement() {
+        assert!(
+            !cfg!(debug_assertions),
+            "run this diagnostic in release mode"
+        );
+        assert_eq!(rayon::current_num_threads(), 2, "set RAYON_NUM_THREADS=2");
+        let model_path = std::env::var("MIVI_TEST_MODEL").unwrap();
+        let mut model =
+            Model::load_with_ctx(std::path::Path::new(&model_path), Some(1024)).unwrap();
+        model
+            .set_prefill_strategy(PrefillStrategy::Chunked { tile_tokens: 64 })
+            .unwrap();
+        let prompt =
+            "Read the workspace files and explain how to handle a parsing error. ".repeat(32);
+        let prompt_ids: Vec<_> = model
+            .tokenizer
+            .encode(&prompt)
+            .into_iter()
+            .take(256)
+            .collect();
+        let continuation = model.tokenizer.encode(
+            "Inspect the input, return a useful error, and preserve the original file contents before making changes.",
+        );
+        assert!(prompt_ids.len() == 256 && continuation.len() >= 16);
+        let continuation = &continuation[..16];
+        let mut profiles = Vec::new();
+        let mut profiled_walls = Vec::new();
+        let mut unprofiled_walls = Vec::new();
+        model.prefix_cache.clear();
+
+        // One warmup pair followed by three pairs; alternate order to reduce order bias.
+        for repetition in 0..4 {
+            let mut expected = None;
+            for profile_enabled in [repetition % 2 == 0, repetition % 2 != 0] {
+                model.disable_forward_profile();
+                model.reset_context();
+                // Prefill is outside the timed region. Retain its prefix cache to avoid
+                // repeating expensive cold prefill for every fixed-work decode member.
+                model
+                    .generate_tokens_incremental(&prompt_ids, 0, 0, |_, _| true)
+                    .unwrap();
+                let start_pos = model.current_pos();
+                if profile_enabled {
+                    model.enable_forward_profile();
+                }
+                let started = Instant::now();
+                let mut logits = Vec::new();
+                for (offset, &id) in continuation.iter().enumerate() {
+                    let values = model.forward(id, start_pos + offset).unwrap().to_vec();
+                    assert!(values.iter().all(|value| value.is_finite()));
+                    logits.push(values);
+                }
+                let wall = started.elapsed();
+                if repetition > 0 {
+                    println!(
+                        "decode pair={} profile={} effective_prefix={} forwards=16 wall_s={:.4}",
+                        repetition,
+                        profile_enabled,
+                        start_pos,
+                        wall.as_secs_f64(),
+                    );
+                }
+                let actual = (
+                    logits,
+                    model.state.conv_states.clone(),
+                    model.state.ssm_states.clone(),
+                    model
+                        .kv_cache
+                        .export_state(start_pos + continuation.len())
+                        .unwrap(),
+                    model.current_pos(),
+                );
+                if let Some(expected) = &expected {
+                    assert_eq!(
+                        &actual, expected,
+                        "profiling changed logits or recurrent/KV state"
+                    );
+                } else {
+                    expected = Some(actual);
+                }
+                if profile_enabled {
+                    let profile = model.forward_profile().unwrap();
+                    assert_eq!(profile.tokens, continuation.len());
+                    assert!(profile.attention_stages.total() <= profile.attention);
+                    assert!(profile.ssm_stages.total() <= profile.ssm);
+                    if model.config.block_types.contains(&BlockType::Attention) {
+                        assert!(!profile.attention_stages.ffn.is_zero());
+                    }
+                    if model.config.block_types.contains(&BlockType::SSM) {
+                        assert!(!profile.ssm_stages.ffn.is_zero());
+                    }
+                    if repetition > 0 {
+                        profiles.push(profile);
+                        profiled_walls.push(wall.as_secs_f64());
+                    }
+                } else {
+                    assert!(model.forward_profile().is_none());
+                    if repetition > 0 {
+                        unprofiled_walls.push(wall.as_secs_f64());
+                    }
+                }
+            }
+        }
+        let median = |mut values: Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        let stage_ms = |select: fn(&ForwardProfileSnapshot) -> Duration| {
+            median(
+                profiles
+                    .iter()
+                    .map(|p| select(p).as_secs_f64() * 1000.0 / 16.0)
+                    .collect(),
+            )
+        };
+        println!(
+            "decode_substage: prefix=256 continuation=16 pairs=3 warmup_pairs=1 threads=2 parity=exact profiled_wall_median_s={:.4} unprofiled_wall_median_s={:.4}",
+            median(profiled_walls), median(unprofiled_walls),
+        );
+        println!(
+            "decode median ms/forward: attention(norm/qkv/causal/out/ffn)={:.4}/{:.4}/{:.4}/{:.4}/{:.4} SSM(norm/in/conv/out/ffn)={:.4}/{:.4}/{:.4}/{:.4}/{:.4} logits={:.4}",
+            stage_ms(|p| p.attention_stages.norm), stage_ms(|p| p.attention_stages.qkv_projection),
+            stage_ms(|p| p.attention_stages.causal_attention), stage_ms(|p| p.attention_stages.output_projection),
+            stage_ms(|p| p.attention_stages.ffn), stage_ms(|p| p.ssm_stages.norm),
+            stage_ms(|p| p.ssm_stages.input_projection), stage_ms(|p| p.ssm_stages.convolution),
+            stage_ms(|p| p.ssm_stages.output_projection), stage_ms(|p| p.ssm_stages.ffn), stage_ms(|p| p.logits),
+        );
+        println!(
+            "decode FFN share median={:.2}%",
+            median(
+                profiles
+                    .iter()
+                    .map(|p| {
+                        (p.attention_stages.ffn + p.ssm_stages.ffn).as_secs_f64()
+                            / p.total_stage_time().as_secs_f64()
+                            * 100.0
+                    })
+                    .collect()
+            )
         );
     }
 

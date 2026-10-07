@@ -324,6 +324,28 @@ fn print_generation_measurement(
             stage_percent(profile.ssm),
             stage_percent(profile.logits),
         );
+        let attention = profile.attention_stages;
+        let ssm = profile.ssm_stages;
+        println!(
+            "  Decode attention (norm/qkv/causal/out/ffn): {:.4}/{:.4}/{:.4}/{:.4}/{:.4} s",
+            attention.norm.as_secs_f64(),
+            attention.qkv_projection.as_secs_f64(),
+            attention.causal_attention.as_secs_f64(),
+            attention.output_projection.as_secs_f64(),
+            attention.ffn.as_secs_f64(),
+        );
+        println!(
+            "  Decode SSM (norm/in/conv/out/ffn): {:.4}/{:.4}/{:.4}/{:.4}/{:.4} s",
+            ssm.norm.as_secs_f64(),
+            ssm.input_projection.as_secs_f64(),
+            ssm.convolution.as_secs_f64(),
+            ssm.output_projection.as_secs_f64(),
+            ssm.ffn.as_secs_f64(),
+        );
+        println!(
+            "  Decode FFN share           : {:.1}% of forward-stage time",
+            stage_percent(attention.ffn + ssm.ffn),
+        );
     }
     println!("  First emitted text latency  : {ttft_display}");
     println!(
