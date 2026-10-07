@@ -63,10 +63,15 @@ fn main() -> std::process::ExitCode {
             println!("projection measurement complete; private result written");
             std::process::ExitCode::SUCCESS
         }
-        Err(_) => {
-            eprintln!(
-                "projection measurement failed; check the private case input and result location"
-            );
+        Err(error) => {
+            let message = error.to_string();
+            if message.starts_with("explicit column panel requires") {
+                eprintln!("projection measurement failed: {message}");
+            } else {
+                eprintln!(
+                    "projection measurement failed; check the private case input and result location"
+                );
+            }
             std::process::ExitCode::FAILURE
         }
     }
@@ -113,6 +118,14 @@ fn measure_case(input: CaseInput) -> Result<serde_json::Value, AnyError> {
     let setup_started = Instant::now();
     input.validate().map_err(std::io::Error::other)?;
     let loaded = load_case(&input)?;
+    let kernel_route = resolve_kernel_route(
+        input.column_tile,
+        input.batch,
+        loaded.rows,
+        loaded.cols,
+        runtime_avx2_fma_available(),
+    )
+    .map_err(std::io::Error::other)?;
     let output_count = input
         .batch
         .checked_mul(loaded.rows)
@@ -207,6 +220,7 @@ fn measure_case(input: CaseInput) -> Result<serde_json::Value, AnyError> {
         "schema": 3,
         "comparison_group": input.comparison_group,
         "column_tile": input.column_tile,
+        "kernel_route": kernel_route,
         "status": "complete",
         "source_kind": loaded.source_kind,
         "model_path": model_path,
@@ -507,6 +521,42 @@ fn branch_for(batch: usize) -> &'static str {
     }
 }
 
+fn runtime_avx2_fma_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        *mivi_core::simd::HAS_AVX2_FMA
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+fn resolve_kernel_route(
+    selector: Option<u32>,
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    avx2_fma_available: bool,
+) -> Result<&'static str, String> {
+    if selector.is_none() {
+        return Ok("ordinary");
+    }
+    if batch < 32 {
+        return Err("explicit column panel requires batch >= 32".into());
+    }
+    if rows < 2 {
+        return Err("explicit column panel requires at least two rows".into());
+    }
+    if cols <= 128 {
+        return Err("explicit column panel requires columns > 128".into());
+    }
+    if !avx2_fma_available {
+        return Err("explicit column panel requires runtime AVX2 and FMA support".into());
+    }
+    Ok("avx2_column_panel")
+}
+
 fn format_name(format: GgmlType) -> &'static str {
     match format {
         GgmlType::F32 => "F32",
@@ -584,6 +634,7 @@ mod tests {
         .unwrap();
         input.validate().unwrap();
         let result = measure_case(input).unwrap();
+        assert_eq!(result["kernel_route"], "ordinary");
         assert_eq!(result["all_calls_bit_identical"], true);
         assert_eq!(result["output_bits"].as_array().unwrap().len(), 6);
         assert_eq!(result["call_wall_ns"].as_array().unwrap().len(), 2);
@@ -612,21 +663,32 @@ mod tests {
     #[test]
     fn profiled_synthetic_measurements_use_each_explicit_column_tile() {
         let baseline = case::CaseInput::from_json(
-            br#"{"schema":3,"comparison_group":"test-group","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":16},"batch":33,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
+            br#"{"schema":3,"comparison_group":"test-group","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":2,"cols":256},"batch":33,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
         ).unwrap();
         let baseline_result = measure_case(baseline).unwrap();
         let unprofiled_baseline = case::CaseInput::from_json(
-            br#"{"schema":3,"comparison_group":"test-group","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":3,"cols":16},"batch":33,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
+            br#"{"schema":3,"comparison_group":"test-group","column_tile":null,"source":{"kind":"synthetic","ggml_type":0,"rows":2,"cols":256},"batch":33,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}"#,
         ).unwrap();
         let unprofiled_baseline_result = measure_case(unprofiled_baseline).unwrap();
         for tile in [32, 64, 128] {
             let input = case::CaseInput::from_json(
-                format!(r#"{{"schema":3,"comparison_group":"test-group","column_tile":{tile},"source":{{"kind":"synthetic","ggml_type":0,"rows":3,"cols":16}},"batch":33,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
+                format!(r#"{{"schema":3,"comparison_group":"test-group","column_tile":{tile},"source":{{"kind":"synthetic","ggml_type":0,"rows":2,"cols":256}},"batch":33,"threads":1,"profile":true,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
             )
             .unwrap();
+            if !runtime_avx2_fma_available() {
+                let error = measure_case(input).expect_err("explicit panel must reject fallback");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("explicit column panel requires runtime AVX2 and FMA support"),
+                    "unexpected error for panel {tile}: {error}"
+                );
+                continue;
+            }
             let result = measure_case(input).unwrap();
             assert_eq!(result["schema"], 3);
             assert_eq!(result["column_tile"], tile);
+            assert_eq!(result["kernel_route"], "avx2_column_panel");
             assert_eq!(result["output_bits"], baseline_result["output_bits"]);
             assert_eq!(result["branch"], "across_batch_pair");
             assert_eq!(result["profile_calls"].as_array().unwrap().len(), 1);
@@ -637,13 +699,40 @@ mod tests {
             assert_eq!(result["profile_calls"][0]["schema"], 1);
 
             let input = case::CaseInput::from_json(
-                format!(r#"{{"schema":3,"comparison_group":"test-group","column_tile":{tile},"source":{{"kind":"synthetic","ggml_type":0,"rows":3,"cols":16}},"batch":33,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
+                format!(r#"{{"schema":3,"comparison_group":"test-group","column_tile":{tile},"source":{{"kind":"synthetic","ggml_type":0,"rows":2,"cols":256}},"batch":33,"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
             ).unwrap();
             let result = measure_case(input).unwrap();
             assert_eq!(result["column_tile"], tile);
-            assert_eq!(result["output_bits"], unprofiled_baseline_result["output_bits"]);
+            assert_eq!(result["kernel_route"], "avx2_column_panel");
+            assert_eq!(
+                result["output_bits"],
+                unprofiled_baseline_result["output_bits"]
+            );
             assert!(result["profile_calls"].as_array().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn explicit_panel_cases_reject_shapes_that_fall_back_to_ordinary_kernel() {
+        for (batch, rows, cols) in [(31, 2, 256), (33, 1, 256), (33, 2, 128)] {
+            let input = case::CaseInput::from_json(
+                format!(r#"{{"schema":3,"comparison_group":"test-group","column_tile":32,"source":{{"kind":"synthetic","ggml_type":0,"rows":{rows},"cols":{cols}}},"batch":{batch},"threads":1,"profile":false,"warmup_calls":0,"measured_calls":1,"buffer_limit_bytes":1048576,"model_limit_bytes":1048576}}"#).as_bytes(),
+            ).unwrap();
+            assert!(
+                measure_case(input).is_err(),
+                "accepted batch={batch}, rows={rows}, cols={cols}"
+            );
+        }
+    }
+
+    #[cfg(feature = "projection-locality-experiment")]
+    #[test]
+    fn explicit_panel_route_rejects_missing_avx2_fma_capability() {
+        assert!(resolve_kernel_route(Some(32), 33, 2, 256, false).is_err());
+        assert_eq!(
+            resolve_kernel_route(Some(32), 33, 2, 256, true).unwrap(),
+            "avx2_column_panel"
+        );
     }
 
     #[test]

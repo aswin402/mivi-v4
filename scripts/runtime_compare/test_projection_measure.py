@@ -44,8 +44,8 @@ class ProjectionManifestTests(unittest.TestCase):
             "model_limit_bytes": 1024 * 1024 * 1024,
             "cases": [
                 {"name": name, "comparison_group": "synthetic-group", "column_tile": tile,
-                 "batch": 9,
-                 "source": {"kind": "synthetic", "ggml_type": 0, "rows": 3, "cols": 64},
+                 "batch": 33,
+                 "source": {"kind": "synthetic", "ggml_type": 0, "rows": 2, "cols": 256},
                  "warmup_calls": 0, "measured_calls": 1}
                 for name, tile in (("synthetic-small", None), ("synthetic-tile-32", 32),
                                    ("synthetic-tile-64", 64), ("synthetic-tile-128", 128))
@@ -86,6 +86,27 @@ class ProjectionManifestTests(unittest.TestCase):
         self.assertEqual([case["column_tile"] for case in settings["cases"]],
                          [None, 32, 64, 128])
 
+    def test_explicit_panel_group_rejects_batch_below_pair_kernel_threshold(self):
+        manifest = self.paired_manifest()
+        for case in manifest["cases"]:
+            case["batch"] = 31
+        with self.assertRaisesRegex(ValueError, "panel.*batch|batch.*panel"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_explicit_panel_group_rejects_single_row(self):
+        manifest = self.paired_manifest()
+        for case in manifest["cases"]:
+            case["source"]["rows"] = 1
+        with self.assertRaisesRegex(ValueError, "panel.*rows|rows.*panel"):
+            projection_measure.validate_manifest(manifest)
+
+    def test_explicit_panel_group_rejects_columns_without_distinct_panel_boundary(self):
+        manifest = self.paired_manifest()
+        for case in manifest["cases"]:
+            case["source"]["cols"] = 128
+        with self.assertRaisesRegex(ValueError, "panel.*columns|columns.*panel"):
+            projection_measure.validate_manifest(manifest)
+
     def test_unknown_column_tile_selector_is_rejected(self):
         manifest = self.paired_manifest()
         manifest["cases"][1]["column_tile"] = 16
@@ -113,7 +134,7 @@ class ProjectionManifestTests(unittest.TestCase):
         for field, value in (("batch", 8), ("warmup_calls", 1), ("measured_calls", 2)):
             manifest = self.paired_manifest()
             manifest["cases"][1][field] = value
-            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "match|group|settings"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "match|group|settings|panel"):
                 projection_measure.validate_manifest(manifest)
         manifest = self.paired_manifest()
         manifest["cases"][1]["source"]["rows"] = 4
@@ -135,7 +156,9 @@ class ProjectionManifestTests(unittest.TestCase):
                                        rows=source["rows"], cols=source["cols"],
                                        batch=child_input["batch"])
             record.update(column_tile=child_input["column_tile"],
-                          comparison_group=child_input["comparison_group"])
+                          comparison_group=child_input["comparison_group"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
@@ -175,7 +198,9 @@ class ProjectionManifestTests(unittest.TestCase):
                                        rows=source["rows"], cols=source["cols"],
                                        batch=child_input["batch"])
             record.update(column_tile=child_input["column_tile"],
-                          comparison_group=child_input["comparison_group"])
+                          comparison_group=child_input["comparison_group"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
@@ -198,12 +223,14 @@ class ProjectionManifestTests(unittest.TestCase):
             calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
             source = child_input["source"]
-            bits = [0x40000000] * 27 if child_input["column_tile"] == 64 else None
+            bits = [0x40000000] * 66 if child_input["column_tile"] == 64 else None
             record = self.child_record(child_input["profile"], bits=bits,
                                        ggml_type=source["ggml_type"], rows=source["rows"],
                                        cols=source["cols"], batch=child_input["batch"])
             record.update(column_tile=child_input["column_tile"],
-                          comparison_group=child_input["comparison_group"])
+                          comparison_group=child_input["comparison_group"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
@@ -299,7 +326,7 @@ class ProjectionManifestTests(unittest.TestCase):
         settings = projection_measure.validate_manifest(self.valid_manifest())
         case = settings["cases"][0]
         record = self.child_record(True)
-        record["profile_calls"][0]["workers"][0]["rows"] = 2
+        record["profile_calls"][0]["workers"][0]["rows"] = 1
         with self.assertRaises(ValueError):
             projection_measure.validate_result(record, case, True)
 
@@ -332,14 +359,13 @@ class ProjectionManifestTests(unittest.TestCase):
 
     def test_per_input_dot_profile_rejects_input_transpose(self):
         manifest = self.valid_manifest()
-        for case in manifest["cases"]:
-            case["batch"] = 2
         settings = projection_measure.validate_manifest(manifest)
+        case = dict(settings["cases"][0], batch=2, column_tile=None)
         record = self.child_record(True, batch=2)
         record["profile_calls"][0]["input_transpose_ns"] = 10
 
         with self.assertRaisesRegex(ValueError, "input transpose stage is"):
-            projection_measure.validate_result(record, settings["cases"][0], True)
+            projection_measure.validate_result(record, case, True)
 
     def test_across_batch_profile_rejects_missing_input_transpose(self):
         settings = projection_measure.validate_manifest(self.valid_manifest())
@@ -355,6 +381,46 @@ class ProjectionManifestTests(unittest.TestCase):
         record["mapping_bytes"] = 1
         with self.assertRaises(ValueError):
             projection_measure.validate_result(record, settings["cases"][0], False)
+
+    def test_result_requires_actual_kernel_route_matching_selector(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        case = settings["cases"][1]
+        record = self.child_record(False)
+        record.update(column_tile=32, comparison_group=case["comparison_group"],
+                      kernel_route="ordinary")
+        with self.assertRaisesRegex(ValueError, "route"):
+            projection_measure.validate_result(record, case, False)
+
+        record["kernel_route"] = "avx2_column_panel"
+        self.assertEqual(projection_measure.validate_result(record, case, False)["kernel_route"],
+                         "avx2_column_panel")
+
+    def test_gguf_descriptor_preflight_rejects_non_panel_shape_before_launch(self):
+        model = self.root / "tiny.gguf"
+        header = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, 0))
+        name = b"fixture.tensor"
+        header += struct.pack("<Q", len(name)) + name
+        header += struct.pack("<IQQIQ", 2, 64, 3, 0, 0)
+        header += b"\0" * ((32 - len(header) % 32) % 32)
+        model.write_bytes(header + b"\0" * (64 * 3 * 4))
+
+        manifest = self.valid_manifest()
+        for case in manifest["cases"]:
+            case["source"] = {"kind": "gguf", "model_path": str(model),
+                               "tensor": "fixture.tensor"}
+            case["expected_model_sha256"] = hashlib.sha256(model.read_bytes()).hexdigest()
+        settings = projection_measure.validate_manifest(manifest)
+        with self.assertRaisesRegex(ValueError, "panel.*columns|columns.*panel"):
+            projection_measure._metadata_hashes(settings)
+
+    def test_baseline_result_requires_ordinary_kernel_route(self):
+        settings = projection_measure.validate_manifest(self.valid_manifest())
+        case = settings["cases"][0]
+        record = self.child_record(False)
+        record.update(column_tile=None, comparison_group=case["comparison_group"],
+                      kernel_route="avx2_column_panel")
+        with self.assertRaisesRegex(ValueError, "route"):
+            projection_measure.validate_result(record, case, False)
 
     def test_duplicate_json_keys_rejected(self):
         manifest = self.root / "duplicate.json"
@@ -391,7 +457,7 @@ class ProjectionManifestTests(unittest.TestCase):
         self.assertNotIn("build_command", report["settings"])
 
     def child_record(self, profile, *, bits=None, ggml_type=0, fmt=None,
-                     rows=3, cols=64, batch=9, heap_bytes=4096):
+                     rows=2, cols=256, batch=33, heap_bytes=4096):
         branch = ("matvec" if batch == 1 else "per_input_dot" if batch <= 8
                   else "across_batch" if batch <= 31 else "across_batch_pair")
         output_count = batch * rows
@@ -403,6 +469,7 @@ class ProjectionManifestTests(unittest.TestCase):
             "format": fmt, "ggml_type": ggml_type, "rows": rows, "cols": cols,
             "batch": batch, "branch": branch, "threads": 2,
             "profile": profile, "comparison_group": "synthetic-group", "column_tile": None,
+            "kernel_route": "ordinary",
             "activation_source": "synthetic_f32",
             "setup_ns": 12, "call_wall_ns": [1000],
             "output_bits": [0x3F800000] * output_count if bits is None else bits,
@@ -431,7 +498,9 @@ class ProjectionManifestTests(unittest.TestCase):
                                    rows=source["rows"], cols=source["cols"],
                                    batch=child_input["batch"])
         record.update(comparison_group=child_input["comparison_group"],
-                      column_tile=child_input["column_tile"])
+                      column_tile=child_input["column_tile"],
+                      kernel_route=("ordinary" if child_input["column_tile"] is None
+                                    else "avx2_column_panel"))
         result_path.write_text(json.dumps(record))
         result_path.chmod(0o600)
         return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
@@ -452,10 +521,12 @@ class ProjectionManifestTests(unittest.TestCase):
             launches.append(argv)
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(
-                child_input["profile"], ggml_type=0, rows=2048, cols=64, batch=32,
+                child_input["profile"], ggml_type=0, rows=2048, cols=256, batch=32,
                 heap_bytes=32 * 1024 * 1024)
             record.update(comparison_group=child_input["comparison_group"],
-                          column_tile=child_input["column_tile"])
+                          column_tile=child_input["column_tile"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             result_path = Path(argv[4])
             result_path.write_text(json.dumps(record))
             result_path.chmod(0o600)
@@ -495,10 +566,12 @@ class ProjectionManifestTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             child_input = json.loads(Path(argv[2]).read_bytes())
-            bits = [0x40000000] * 27 if calls == 2 else None
+            bits = [0x40000000] * 66 if calls == 2 else None
             record = self.child_record(child_input["profile"], bits=bits)
             record.update(comparison_group=child_input["comparison_group"],
-                          column_tile=child_input["column_tile"])
+                          column_tile=child_input["column_tile"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled", "cleanup":
@@ -564,7 +637,9 @@ class ProjectionManifestTests(unittest.TestCase):
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(child_input["profile"])
             record.update(comparison_group=child_input["comparison_group"],
-                          column_tile=child_input["column_tile"])
+                          column_tile=child_input["column_tile"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",
@@ -613,7 +688,9 @@ class ProjectionManifestTests(unittest.TestCase):
             child_input = json.loads(Path(argv[2]).read_bytes())
             record = self.child_record(child_input["profile"])
             record.update(comparison_group=child_input["comparison_group"],
-                          column_tile=child_input["column_tile"])
+                          column_tile=child_input["column_tile"],
+                          kernel_route=("ordinary" if child_input["column_tile"] is None
+                                        else "avx2_column_panel"))
             Path(argv[4]).write_text(json.dumps(record))
             return {"status": "complete", "stdout": "", "stderr": "", "returncode": 0,
                     "elapsed_seconds": 0.01, "rss_scope": "sampled",

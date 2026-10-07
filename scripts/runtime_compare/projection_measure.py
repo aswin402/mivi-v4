@@ -44,6 +44,7 @@ GGUF_FIELDS = {"kind", "model_path", "tensor"}
 RESULT_FIELDS = {"schema", "status", "source_kind", "model_path", "tensor_name",
                  "mapping_bytes", "format", "ggml_type", "rows", "cols", "batch",
                  "branch", "threads", "profile", "comparison_group", "column_tile",
+                 "kernel_route",
                  "activation_source", "setup_ns",
                  "call_wall_ns", "output_bits", "all_calls_bit_identical", "profile_calls",
                  "estimated_heap_bytes", "output_artifact_bound_bytes"}
@@ -259,6 +260,9 @@ def validate_manifest(value: dict) -> dict:
         if any(any(member.get(field) != baseline.get(field) for field in shared)
                for member in members):
             raise ValueError(f"comparison group {group} members must match workload settings")
+        if any(member["column_tile"] is not None for member in members):
+            for member in members:
+                _validate_panel_workload(member)
     report_reserve = _report_reserve_bytes(normalized)
     if report_reserve > MAX_RESULT_BYTES:
         raise ValueError("report metadata bound exceeds the 4 MiB report cap")
@@ -287,6 +291,15 @@ def _hash_descriptor(fd: int, limit: int | None = None) -> tuple[str, int]:
         if limit is not None and offset > limit:
             raise ValueError("file grew beyond configured size limit while hashing")
     return digest.hexdigest(), offset
+
+
+def _validate_panel_workload(case: dict) -> None:
+    if case["batch"] < 32:
+        raise ValueError("explicit panel comparison requires batch >= 32")
+    if case["rows"] is not None and case["rows"] < 2:
+        raise ValueError("explicit panel comparison requires at least two rows")
+    if case["cols"] is not None and case["cols"] <= 128:
+        raise ValueError("explicit panel comparison requires columns > 128")
 
 
 class _GGUFDescriptorReader:
@@ -446,6 +459,8 @@ def _metadata_hashes(settings: dict) -> dict:
             raise ValueError("predicted child result exceeds the 4 MiB result cap")
         models[case["name"]] = {"sha256": actual, "bytes": size, **descriptor}
         case.update(descriptor, model_bytes=size)
+        if case["column_tile"] is not None:
+            _validate_panel_workload(case)
     predicted = _predicted_artifact_bytes(settings["cases"], settings["report_reserve_bytes"])
     if predicted > settings["artifact_bytes"]:
         raise ValueError("artifact budget cannot reserve descriptor-sized outputs and compact reports")
@@ -497,6 +512,9 @@ def validate_result(value: Any, case: dict, profile: bool) -> dict:
             or (value["column_tile"] is not None and not _integer(value["column_tile"]))
             or value["column_tile"] != case["column_tile"]):
         raise ValueError("child comparison identity mismatch")
+    expected_route = "ordinary" if case["column_tile"] is None else "avx2_column_panel"
+    if value["kernel_route"] != expected_route:
+        raise ValueError("child kernel route does not match the requested selector")
     if value["source_kind"] != case["source"]["kind"] or value["profile"] is not profile:
         raise ValueError("child source or profile mode mismatch")
     if value["activation_source"] != "synthetic_f32":
