@@ -489,6 +489,15 @@ The endpoint also accepts the validated sampling controls `temperature`, `top_p`
 `repetition_penalty`, `presence_penalty`, `frequency_penalty`, and `seed`; these options are applied to each
 generation step without embedding model-specific values in the agent route.
 
+The server's `request_timeout_secs` is one budget for the whole native-agent task,
+including model turns, tool execution and SSE delivery; it does not restart each turn.
+Timeouts and closed response streams request cooperative cancellation. Blocking chat
+generation also observes a dropped request future. Cancellation cannot interrupt a
+currently running synchronous operation or undo tool side effects; legacy tool handlers
+may continue until they return, retaining their tool-execution slot. Timeout error and
+termination events are best-effort: a full SSE buffer is not allowed to hold the task
+slot indefinitely, so a stalled client may receive an incomplete stream.
+
 ---
 
 ## 🧪 Two-Engine Verification Strategy

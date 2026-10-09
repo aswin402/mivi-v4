@@ -1362,6 +1362,23 @@ impl Model {
         prompt: &str,
         max_tokens: usize,
     ) -> Result<String> {
+        self.generate_with_json_grammar_and_cancel(prompt, max_tokens, || false)
+    }
+
+    /// Generate syntax-constrained JSON with cancellation before each model forward.
+    /// Cancellation may return partial JSON; callers must not publish it as success.
+    pub fn generate_with_json_grammar_and_cancel<C>(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        mut should_cancel: C,
+    ) -> Result<String>
+    where
+        C: FnMut() -> bool,
+    {
+        if should_cancel() {
+            return Ok(String::new());
+        }
         let mut grammar = crate::grammar::JsonGrammar::new();
         let token_ids = self.tokenizer.encode(prompt);
         if token_ids.is_empty() {
@@ -1377,6 +1394,9 @@ impl Model {
 
         // 1. Prefill
         for (i, &tok) in token_ids.iter().enumerate() {
+            if should_cancel() {
+                return Ok(String::new());
+            }
             let is_last = i + 1 == token_ids.len();
             let _ = self.forward_step(tok, i, is_last)?;
         }
@@ -1396,7 +1416,7 @@ impl Model {
 
         // 2. Generation with grammar logit masking
         for _ in 0..max_tokens {
-            if pos >= self.config.max_seq_len || grammar.completed {
+            if should_cancel() || pos >= self.config.max_seq_len || grammar.completed {
                 break;
             }
 
@@ -1435,6 +1455,9 @@ impl Model {
                 }
             }
 
+            if should_cancel() {
+                break;
+            }
             let _ = self.forward_step(next_token, pos, true)?;
             pos += 1;
         }

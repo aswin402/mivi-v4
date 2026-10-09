@@ -22,7 +22,8 @@ pub struct ServerConfig {
     pub max_concurrent_requests: usize,
     /// Maximum number of blocking tool handlers allowed to run at once.
     pub max_concurrent_tool_executions: usize,
-    /// Maximum wall-clock time for one inference request, including streaming generation.
+    /// Request deadline, including streaming generation. Native agents share one
+    /// deadline across all generations, tools and SSE delivery; cancellation is cooperative.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
     /// Maximum wall-clock time before the first model output is produced.

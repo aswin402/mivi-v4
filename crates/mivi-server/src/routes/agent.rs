@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[cfg(test)]
+#[path = "agent_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
 mod context_tests {
     use super::*;
     use std::path::Path;
@@ -196,6 +200,44 @@ impl Drop for AgentGenerationCancellation {
     }
 }
 
+/// Bound the complete sequence, including enqueueing, tools, token accounting,
+/// retries and SSE backpressure. Dropping `sequence` runs its cancellation guards.
+async fn run_agent_sequence<F>(
+    sequence: F,
+    deadline: tokio::time::Instant,
+    output: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
+    id: &str,
+    model: &str,
+    metrics: &crate::state::ServerMetrics,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let timed_out = tokio::select! {
+        biased;
+        _ = output.closed() => return,
+        _ = tokio::time::sleep_until(deadline) => true,
+        _ = sequence => false,
+    };
+    if timed_out {
+        metrics.record_inference_error();
+        // Never extend the expired task by waiting on a stalled client. Error
+        // termination is best effort; a full buffer can yield an incomplete stream.
+        for event in [
+            create_error_chunk_event(
+                id,
+                model,
+                "Agent task timed out. Tool side-effect status may be unknown.",
+            ),
+            create_done_chunk_event(id, model, "error"),
+            create_done_event(),
+        ] {
+            if output.try_send(Ok(event)).is_err() {
+                break;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn generate_agent_step(
     engine: &crate::engine_actor::EngineHandle,
@@ -297,6 +339,17 @@ pub async fn run_agent_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AgentRunRequest>,
 ) -> Response {
+    let task_deadline = match tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(state.config.request_timeout_secs))
+    {
+        Some(deadline) => deadline,
+        None => {
+            return crate::types::AppError::InvalidRequest(
+                "configured agent task timeout is too large".to_string(),
+            )
+            .into_response()
+        }
+    };
     if !state.engine.has_model() {
         return crate::types::AppError::ServiceUnavailable("No model is loaded".to_string())
             .into_response();
@@ -411,177 +464,188 @@ pub async fn run_agent_task(
             .with_required_tool_call(require_tool_call);
         let thinking_msg = format!("Initializing agent for task: '{}'", req.task);
 
-        send_sse_sequence_with_finish(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
-            let mut finish_reason = "stop";
-            let mut native_messages = vec![native_agent_user_message(&req.task, &context_prompt)];
-            let mut tool_call_retries_remaining =
-                req.tool_call_retries.min(MAX_AGENT_TOOL_CALL_RETRIES);
-            let mut current_prompt =
-                match profile.render_prompt(&native_messages, &canonical_tools, false) {
-                    Ok(prompt) => prompt,
-                    Err(error) => {
-                        metrics.record_inference_error();
-                        let _ = tx
-                            .send(Ok(create_error_chunk_event(&cid_clone, &mname, &error)))
-                            .await;
-                        return "error";
-                    }
-                };
-
-            let mut agent_steps = 0;
-            while agent_steps < max_steps {
-                let admitted_prompt_tokens = match crate::routes::admit_model_context(
-                    &engine,
-                    &current_prompt,
-                    agent_gen_tokens,
-                )
-                .await
-                {
-                    Ok(prompt_tokens) => prompt_tokens,
-                    Err(error) => {
-                        metrics.record_inference_error();
-                        tracing::warn!(%error, "Agent prompt exceeds model context");
-                        let _ = tx
-                            .send(Ok(create_error_chunk_event(
-                                &cid_clone,
-                                &mname,
-                                &error.to_string(),
-                            )))
-                            .await;
-                        finish_reason = "error";
-                        break;
-                    }
-                };
-
-                let generation_started = Instant::now();
-                let generation_options = if agent.last_tool_results().is_empty() {
-                    agent_generation_options.clone()
-                } else {
-                    let mut options = agent_generation_options.clone();
-                    options.forced_output_prefix = None;
-                    options
-                };
-                match generate_agent_step(
-                    &engine,
-                    &current_prompt,
-                    agent_gen_tokens,
-                    admitted_prompt_tokens,
-                    generation_options,
-                    request_timeout,
-                    first_token_timeout,
-                    generation_started,
-                    &tx,
-                )
-                .await
-                {
-                    Ok((model_out, prompt_tokens, completion_tokens, first_token_latency)) => {
-                        metrics.record_generation(generation_started.elapsed());
-                        if let Some(first_token_latency) = first_token_latency {
-                            metrics.record_time_to_first_token(first_token_latency);
-                        }
-                        metrics.record_tokens(prompt_tokens, completion_tokens);
-                        let result = agent.step(&model_out).await;
-
-                        if agent.required_tool_call_missing() && tool_call_retries_remaining > 0 {
-                            tool_call_retries_remaining -= 1;
-                            let _ = agent.retry_required_tool_call();
-                            native_messages.push(native_agent_tool_retry_message());
-                            match profile.render_prompt(&native_messages, &canonical_tools, false) {
-                                Ok(prompt) => {
-                                    current_prompt = prompt;
-                                    continue;
-                                }
-                                Err(error) => {
-                                    metrics.record_inference_error();
-                                    let _ = tx
-                                        .send(Ok(create_error_chunk_event(
-                                            &cid_clone, &mname, &error,
-                                        )))
-                                        .await;
-                                    finish_reason = "error";
-                                    break;
-                                }
-                            }
-                        }
-
-                        agent_steps += 1;
-                        if tx
-                            .send(Ok(create_content_chunk_event(&cid_clone, &mname, &result)))
-                            .await
-                            .is_err()
-                        {
-                            if agent.state.phase == mivi_agent::AgentPhase::Failed {
-                                finish_reason = "error";
-                            }
-                            break;
-                        }
-
-                        if agent.state.phase == mivi_agent::AgentPhase::Failed {
-                            finish_reason = "error";
-                            break;
-                        }
-                        if agent.state.phase == mivi_agent::AgentPhase::Completed {
-                            break;
-                        }
-
-                        if let Err(error) = append_native_agent_turn(
-                            &mut native_messages,
-                            &profile,
-                            &model_out,
-                            agent.last_tool_results(),
-                        ) {
+        let sequence =
+            send_sse_sequence_with_finish(&tx, &cid_clone, &mname, Some(&thinking_msg), || async {
+                let mut finish_reason = "stop";
+                let mut native_messages =
+                    vec![native_agent_user_message(&req.task, &context_prompt)];
+                let mut tool_call_retries_remaining =
+                    req.tool_call_retries.min(MAX_AGENT_TOOL_CALL_RETRIES);
+                let mut current_prompt =
+                    match profile.render_prompt(&native_messages, &canonical_tools, false) {
+                        Ok(prompt) => prompt,
+                        Err(error) => {
                             metrics.record_inference_error();
                             let _ = tx
                                 .send(Ok(create_error_chunk_event(&cid_clone, &mname, &error)))
                                 .await;
+                            return "error";
+                        }
+                    };
+
+                let mut agent_steps = 0;
+                while agent_steps < max_steps {
+                    let admitted_prompt_tokens = match crate::routes::admit_model_context(
+                        &engine,
+                        &current_prompt,
+                        agent_gen_tokens,
+                    )
+                    .await
+                    {
+                        Ok(prompt_tokens) => prompt_tokens,
+                        Err(error) => {
+                            metrics.record_inference_error();
+                            tracing::warn!(%error, "Agent prompt exceeds model context");
+                            let _ = tx
+                                .send(Ok(create_error_chunk_event(
+                                    &cid_clone,
+                                    &mname,
+                                    &error.to_string(),
+                                )))
+                                .await;
                             finish_reason = "error";
                             break;
-                        } else {
-                            match profile.render_prompt(&native_messages, &canonical_tools, false) {
-                                Ok(prompt) => current_prompt = prompt,
-                                Err(error) => {
-                                    metrics.record_inference_error();
-                                    let _ = tx
-                                        .send(Ok(create_error_chunk_event(
-                                            &cid_clone, &mname, &error,
-                                        )))
-                                        .await;
+                        }
+                    };
+
+                    let generation_started = Instant::now();
+                    let generation_options = if agent.last_tool_results().is_empty() {
+                        agent_generation_options.clone()
+                    } else {
+                        let mut options = agent_generation_options.clone();
+                        options.forced_output_prefix = None;
+                        options
+                    };
+                    match generate_agent_step(
+                        &engine,
+                        &current_prompt,
+                        agent_gen_tokens,
+                        admitted_prompt_tokens,
+                        generation_options,
+                        request_timeout,
+                        first_token_timeout,
+                        generation_started,
+                        &tx,
+                    )
+                    .await
+                    {
+                        Ok((model_out, prompt_tokens, completion_tokens, first_token_latency)) => {
+                            metrics.record_generation(generation_started.elapsed());
+                            if let Some(first_token_latency) = first_token_latency {
+                                metrics.record_time_to_first_token(first_token_latency);
+                            }
+                            metrics.record_tokens(prompt_tokens, completion_tokens);
+                            let result = agent.step(&model_out).await;
+
+                            if agent.required_tool_call_missing() && tool_call_retries_remaining > 0
+                            {
+                                tool_call_retries_remaining -= 1;
+                                let _ = agent.retry_required_tool_call();
+                                native_messages.push(native_agent_tool_retry_message());
+                                match profile.render_prompt(
+                                    &native_messages,
+                                    &canonical_tools,
+                                    false,
+                                ) {
+                                    Ok(prompt) => {
+                                        current_prompt = prompt;
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        metrics.record_inference_error();
+                                        let _ = tx
+                                            .send(Ok(create_error_chunk_event(
+                                                &cid_clone, &mname, &error,
+                                            )))
+                                            .await;
+                                        finish_reason = "error";
+                                        break;
+                                    }
+                                }
+                            }
+
+                            agent_steps += 1;
+                            if tx
+                                .send(Ok(create_content_chunk_event(&cid_clone, &mname, &result)))
+                                .await
+                                .is_err()
+                            {
+                                if agent.state.phase == mivi_agent::AgentPhase::Failed {
                                     finish_reason = "error";
-                                    break;
+                                }
+                                break;
+                            }
+
+                            if agent.state.phase == mivi_agent::AgentPhase::Failed {
+                                finish_reason = "error";
+                                break;
+                            }
+                            if agent.state.phase == mivi_agent::AgentPhase::Completed {
+                                break;
+                            }
+
+                            if let Err(error) = append_native_agent_turn(
+                                &mut native_messages,
+                                &profile,
+                                &model_out,
+                                agent.last_tool_results(),
+                            ) {
+                                metrics.record_inference_error();
+                                let _ = tx
+                                    .send(Ok(create_error_chunk_event(&cid_clone, &mname, &error)))
+                                    .await;
+                                finish_reason = "error";
+                                break;
+                            } else {
+                                match profile.render_prompt(
+                                    &native_messages,
+                                    &canonical_tools,
+                                    false,
+                                ) {
+                                    Ok(prompt) => current_prompt = prompt,
+                                    Err(error) => {
+                                        metrics.record_inference_error();
+                                        let _ = tx
+                                            .send(Ok(create_error_chunk_event(
+                                                &cid_clone, &mname, &error,
+                                            )))
+                                            .await;
+                                        finish_reason = "error";
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        metrics.record_generation(generation_started.elapsed());
-                        metrics.record_inference_error();
-                        tracing::error!("Agent inference failed: {}", e);
-                        let _ = tx
-                            .send(Ok(create_error_chunk_event(&cid_clone, &mname, &e)))
-                            .await;
-                        finish_reason = "error";
-                        break;
+                        Err(e) => {
+                            metrics.record_generation(generation_started.elapsed());
+                            metrics.record_inference_error();
+                            tracing::error!("Agent inference failed: {}", e);
+                            let _ = tx
+                                .send(Ok(create_error_chunk_event(&cid_clone, &mname, &e)))
+                                .await;
+                            finish_reason = "error";
+                            break;
+                        }
                     }
                 }
-            }
 
-            let last_reply = agent
-                .state
-                .memory
-                .back()
-                .cloned()
-                .unwrap_or_else(|| "Completed agent task execution.".to_string());
-            metrics.record_tool_timeouts(agent.timed_out_tools);
-            crate::logging::print_interaction_box(
-                Some(&task_for_log),
-                None,
-                None,
-                Some(&last_reply),
-                true,
-            );
-            finish_reason
-        })
-        .await;
+                let last_reply = agent
+                    .state
+                    .memory
+                    .back()
+                    .cloned()
+                    .unwrap_or_else(|| "Completed agent task execution.".to_string());
+                metrics.record_tool_timeouts(agent.timed_out_tools);
+                crate::logging::print_interaction_box(
+                    Some(&task_for_log),
+                    None,
+                    None,
+                    Some(&last_reply),
+                    true,
+                );
+                finish_reason
+            });
+        run_agent_sequence(sequence, task_deadline, &tx, &cid_clone, &mname, &metrics).await;
     });
 
     let mut resp = sse_response(rx);

@@ -630,6 +630,11 @@ fn handle_generate(
     options: GenerationOptions,
     responder: oneshot::Sender<std::result::Result<(String, usize, usize), String>>,
 ) {
+    // Dropping a blocking request's future closes its oneshot receiver. This
+    // also covers TimeoutLayer expiry and abandoned commands still in the queue.
+    if responder.is_closed() {
+        return;
+    }
     if let Some(ref mut m) = model {
         let checkpoint = SamplingCheckpoint::capture(m, options.seed);
         apply_generation_options(m, &options);
@@ -641,9 +646,22 @@ fn handle_generate(
             .filter(|prefix| !prefix.is_empty());
         let model_prompt = prompt_with_forced_prefix(&prompt, forced_prefix);
         let res = match options.response_mode {
-            ResponseMode::Text => m.generate(&model_prompt, max_tokens),
-            ResponseMode::JsonObject => m.generate_with_json_grammar(&model_prompt, max_tokens),
+            ResponseMode::Text => m.generate_streaming_with_cancel(
+                &model_prompt,
+                max_tokens,
+                |_, _| true,
+                || responder.is_closed(),
+            ),
+            ResponseMode::JsonObject => {
+                m.generate_with_json_grammar_and_cancel(&model_prompt, max_tokens, || {
+                    responder.is_closed()
+                })
+            }
         };
+        if responder.is_closed() {
+            checkpoint.restore(m);
+            return;
+        }
         let res = match res {
             Ok(out) => {
                 if options.response_mode == ResponseMode::JsonObject {
@@ -1220,6 +1238,122 @@ mod tests {
     use std::time::Duration;
 
     const CALLBACK_WORKER_TIMEOUT: Duration = Duration::from_secs(2);
+
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; use the tiny local fixture"]
+    fn blocking_cancelled_before_start_preserves_model_state() {
+        let path = std::env::var("MIVI_TEST_MODEL").expect("explicit test model required");
+        let mut model = Some(
+            mivi_model::Model::load_with_ctx(std::path::Path::new(&path), Some(64))
+                .expect("load bounded fixture"),
+        );
+        for response_mode in [ResponseMode::Text, ResponseMode::JsonObject] {
+            model.as_mut().unwrap().state.logits.fill(42.0);
+            let (sender, receiver) = oneshot::channel();
+            drop(receiver);
+            handle_generate(
+                &mut model,
+                false,
+                "hello".to_string(),
+                1,
+                GenerationOptions {
+                    response_mode,
+                    ..GenerationOptions::default()
+                },
+                sender,
+            );
+            assert!(
+                model
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .logits
+                    .iter()
+                    .all(|&v| v == 42.0),
+                "cancelled {response_mode:?} request must not run model work"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; use the tiny local fixture"]
+    fn blocking_json_cancellation_stops_before_forward() {
+        let path = std::env::var("MIVI_TEST_MODEL").expect("explicit test model required");
+        let mut model = mivi_model::Model::load_with_ctx(std::path::Path::new(&path), Some(64))
+            .expect("load bounded fixture");
+        model.state.logits.fill(42.0);
+        let output = model
+            .generate_with_json_grammar_and_cancel("hello", 8, || true)
+            .unwrap();
+        assert!(output.is_empty());
+        assert!(
+            model.state.logits.iter().all(|&v| v == 42.0),
+            "JSON cancellation must not execute a forward"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; use the tiny local fixture"]
+    fn blocking_json_cancellation_stops_during_prefill() {
+        let path = std::env::var("MIVI_TEST_MODEL").expect("explicit test model required");
+        let mut model =
+            mivi_model::Model::load_with_ctx(std::path::Path::new(&path), Some(64)).unwrap();
+        let prompt = "hello hello";
+        assert!(
+            model.tokenizer.encode(prompt).len() > 1,
+            "fixture must exercise multiple tokens"
+        );
+        let mut checks = 0;
+        let output = model
+            .generate_with_json_grammar_and_cancel(prompt, 8, || {
+                checks += 1;
+                checks >= 3
+            })
+            .unwrap();
+        assert!(output.is_empty());
+        assert_eq!(checks, 3);
+        assert_eq!(model.current_pos(), 1, "cancel before the second forward");
+    }
+
+    #[test]
+    #[ignore = "requires explicit MIVI_TEST_MODEL; use the tiny local fixture"]
+    fn blocking_completion_preserves_output_and_sampling_settings() {
+        let path = std::env::var("MIVI_TEST_MODEL").expect("explicit test model required");
+        for response_mode in [ResponseMode::Text, ResponseMode::JsonObject] {
+            let mut baseline =
+                mivi_model::Model::load_with_ctx(std::path::Path::new(&path), Some(64)).unwrap();
+            let mut model = Some(
+                mivi_model::Model::load_with_ctx(std::path::Path::new(&path), Some(64)).unwrap(),
+            );
+            let options = GenerationOptions {
+                response_mode,
+                temperature: Some(0.0),
+                seed: Some(7),
+                ..GenerationOptions::default()
+            };
+            apply_generation_options(&mut baseline, &options);
+            let expected = match response_mode {
+                ResponseMode::Text => baseline.generate("hello", 8).unwrap(),
+                ResponseMode::JsonObject => {
+                    baseline.generate_with_json_grammar("hello", 8).unwrap()
+                }
+            };
+            let saved_rng = model.as_ref().unwrap().sampler.rng_state();
+            let saved_temperature = model.as_ref().unwrap().sampler.config.temperature;
+            let (sender, receiver) = oneshot::channel();
+            handle_generate(&mut model, false, "hello".to_string(), 8, options, sender);
+            let result = receiver.blocking_recv().unwrap();
+            if response_mode == ResponseMode::JsonObject && validate_json_output(&expected).is_err()
+            {
+                assert!(result.is_err(), "incomplete JSON must remain rejected");
+            } else {
+                assert_eq!(result.unwrap().0, expected);
+            }
+            let model = model.as_ref().unwrap();
+            assert_eq!(model.sampler.rng_state(), saved_rng);
+            assert_eq!(model.sampler.config.temperature, saved_temperature);
+        }
+    }
 
     struct CallbackWorker {
         receiver: mpsc::Receiver<Result<String, String>>,

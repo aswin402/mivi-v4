@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.81] - 2026-10-10
+
+### Request Cancellation and Task-Wide Native-Agent Deadlines
+
+#### Ideas, Inspirations & Sources
+
+- Extend Mivi's existing streaming cancellation guards to blocking generation and tool-future lifetimes. Reuse receiver closure as the cancellation signal, following [Tokio oneshot Sender::is_closed](https://docs.rs/tokio/latest/tokio/sync/oneshot/struct.Sender.html#method.is_closed).
+- Use one absolute task deadline rather than restarting the budget per model turn, informed by [Tokio absolute timeout semantics](https://docs.rs/tokio/latest/tokio/time/fn.timeout_at.html). Retain physical tool permits until handlers return, respecting [Tokio spawn_blocking cancellation limits](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html). Independently implemented; no external engine code copied.
+
+#### Fixed and Verified
+
+- Skip abandoned blocking requests before inference and observe receiver closure during text/JSON generation. Preserve successful output, incomplete-JSON rejection and request sampling-state restoration; retain the existing JSON API as a non-cancelling wrapper.
+- Bound native-agent generations, retries, tools and SSE delivery with one deadline. Disconnects and deadlines drop active generation/tool futures. Timeout terminal events are nonblocking and best-effort, avoiding indefinite request-slot retention by a stalled SSE consumer.
+- Cancel cooperative tool handlers when their execution future is dropped; recheck cancellation after capacity admission and inside queued blocking closures before invoking either handler type. Successful calls do not cancel a shared token. Legacy handlers already running may continue; cancellation cannot undo side effects or preempt synchronous work.
+- Add four tiny-model blocking/JSON controls, four actual agent-endpoint lifecycle tests with simulated model output, and three new broker regressions alongside the existing capacity test. Red/green checks reproduce abandoned work, restarted deadlines, disconnect/backpressure leaks and queued-handler cancellation. These are lifecycle/correctness checks, not live coding-agent quality or performance benchmarks.
+- Scoped offline Cargo verification uses jobs=1, Rayon threads=2 and serial test harnesses; no full-workspace build/check/test, dependency changes, new unsafe code or model-filename dispatch.
+
 ## [v0.2.80] - 2026-10-10
 
 ### Safe Calculator Agent Example and Correlated Tool Replies
