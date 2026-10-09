@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.80] - 2026-10-10
+
+### Safe Calculator Agent Example and Correlated Tool Replies
+
+#### Ideas, Inspirations & Sources
+
+- Address the unsafe model-text `eval` and missing tool-result IDs identified in Mivi's own agent example during the Magnitude/llama.cpp/Colibri comparison. Use an independently written allowlist interpreter based on [Python AST nodes](https://docs.python.org/3/library/ast.html) and [numeric operators](https://docs.python.org/3/library/operator.html); no external implementation was copied.
+- Separate protocol completion from model-answer correctness following [Colibri benchmarking](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). Socket timeout semantics follow [Requests documentation](https://requests.readthedocs.io/en/latest/user/quickstart/#timeouts).
+
+#### Fixed and Verified
+
+- Replace Python execution in `scripts/test_agents/02_agent_loop.py` with bounded numeric arithmetic. Reject names, calls, attributes, containers, booleans, complex numbers and powers; enforce expression size, AST node/depth and intermediate numeric limits.
+- Preserve each `tool_call_id`, reply to unknown tools and malformed arguments with correlated errors, and reject missing/duplicate IDs before executing calls. Check HTTP status and set finite connect/read timeouts. Empty tool-call lists, incomplete finish reasons and exhausted step budgets no longer masquerade as successful answers.
+- Add 18 focused offline regression tests and [example documentation](scripts/test_agents/README.md), with red/green checks for the original defects and rejection of empty/nontext final answers. Tests replace only HTTP transport; they do not establish live model/agent quality or performance.
+- No inference kernels, server cancellation paths, dependencies or production defaults change. Blocking-generation cancellation, task-wide agent deadlines and the broader provider-contract suite remain next steps. No Cargo build/check/test was needed.
+
 ## [v0.2.79] - 2026-10-10
 
 ### Exact-Gated Q4/Q6 Projection Stage Replay
