@@ -1,5 +1,7 @@
 //! SIMD acceleration dispatcher.
 
+#[cfg(feature = "batch-four-row-experiment")]
+pub mod four_row;
 pub mod norm;
 pub mod scalar;
 
@@ -164,6 +166,7 @@ pub fn matmul_accumulate_transposed_pair_simd(
 /// Panics if either output/weight slice is too short, the input dimensions
 /// overflow, or the transposed input slice does not cover those dimensions.
 #[inline]
+#[allow(clippy::too_many_arguments)] // Established explicit two-row slice contract.
 pub fn matmul_accumulate_transposed_pair_with_column_tile_simd(
     out0: &mut [f32],
     out1: &mut [f32],

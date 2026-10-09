@@ -3,6 +3,11 @@
 use crate::{GgmlType, QuantError, Result};
 use rayon::prelude::*;
 
+#[cfg(feature = "batch-four-row-experiment")]
+mod four_row;
+#[cfg(feature = "batch-four-row-experiment")]
+pub use four_row::quantized_matmul_rows_four_row;
+
 /// Caller-owned capacity, allocated once. Not used by default inference dispatch.
 pub struct BatchProjectionScratch {
     batch: usize,
@@ -265,7 +270,7 @@ fn compute(
 mod tests {
     use super::*;
 
-    fn weights(kind: GgmlType, rows: usize, cols: usize) -> Vec<u8> {
+    pub(super) fn weights(kind: GgmlType, rows: usize, cols: usize) -> Vec<u8> {
         let block = kind.block_size_checked().unwrap();
         let size = kind.type_size_checked().unwrap();
         let mut bytes = vec![0u8; rows * (cols / block) * size];
@@ -299,7 +304,7 @@ mod tests {
         bytes
     }
 
-    fn storage(s: &BatchProjectionScratch) -> Vec<(usize, usize, usize)> {
+    pub(super) fn storage(s: &BatchProjectionScratch) -> Vec<(usize, usize, usize)> {
         std::iter::once(&s.transposed)
             .chain(std::iter::once(&s.output))
             .chain(s.workers.iter().flat_map(|w| [&w.decoded, &w.output]))
@@ -307,7 +312,7 @@ mod tests {
             .collect()
     }
 
-    fn contents(s: &BatchProjectionScratch) -> Vec<u32> {
+    pub(super) fn contents(s: &BatchProjectionScratch) -> Vec<u32> {
         s.transposed
             .iter()
             .chain(&s.output)
@@ -320,7 +325,7 @@ mod tests {
             .collect()
     }
 
-    fn poison(s: &mut BatchProjectionScratch) {
+    pub(super) fn poison(s: &mut BatchProjectionScratch) {
         s.transposed.fill(f32::NAN);
         s.output.fill(f32::NAN);
         for w in &mut s.workers {

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.77] - 2026-10-10
+
+### Faithful Four-Row Batch Projection Experiment (Opt-In, Stage 2)
+
+#### Ideas, Inspirations & Sources
+
+- Share activation loads across four decoded output rows while retaining Mivi's established F32 pair-panel accumulation order. [Projection-cost evidence](docs/PROJECTION_COST_EVIDENCE_2026-10-05.md) identified accumulation as dominant; [scratch-only evidence](docs/BATCH_SCRATCH_EVIDENCE_2026-10-09.md) supplies a separate control.
+- Three-way comparisons, balanced order and retained regressions follow [Colibri's benchmarking protocol](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference source was copied.
+- See the [approved design](docs/superpowers/specs/2026-10-09-four-row-prefill-design.md), [implementation plan](docs/superpowers/plans/2026-10-09-four-row-prefill.md), and [all raw operator timings](docs/FOUR_ROW_PREFILL_EVIDENCE_2026-10-10.md).
+
+#### Added and Evaluated
+
+- Add feature-gated four-row SIMD accumulation behind checked slice bounds and AVX2/FMA detection, with existing pair-helper fallback. User-approved unsafe intrinsics stay in a private routine; preserve vector FMA, scalar-tail arithmetic, column order and panels of 128.
+- Add a separate four-row scratch constructor and explicit checked quant projection API. Retain ordinary and scratch-only control math, worker partitions, small-batch/partial-group behavior and allocation reuse. Add a narrow Clippy annotation to the established eight-argument pair API without changing its behavior.
+- Verify complete bits over 3,168 six-format projection cases plus constructor, invalid-buffer/capacity, unaligned delegate, odd-width float, core cancellation/tail and fallback controls.
+- Run a bounded two-thread, three-control operator pilot with generated F32 activations, full real Q4_K/Q6_K matrices and synthetic Q8_0, one warmup plus six balanced-order triples per case. All member-final outputs matched baseline bits and were finite; preserve all measured and warmup times.
+- Against scratch-only, paired median time was 14.57% lower for Q6_K batch 64, 17.08% lower for Q6_K batch 65, and 16.74% lower for Q4_K batch 65. Q4_K batch 32 was 9.58% slower; Q4_K batch 64 and synthetic/small cases were mixed or regressed. No universal speedup or default-promotion claim.
+- Default model/server behavior stays unchanged. Captured-activation/model-state parity, agent latency, RSS, other models and cross-ISA execution remain open gates. Cargo uses one job and inference at most two threads; no full-workspace build/check/test.
+
 ## [v0.2.76] - 2026-10-09
 
 ### Reusable Batch Projection Scratch (Opt-In, Stage 1)
