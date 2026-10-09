@@ -146,8 +146,8 @@ Critical/Important issues. Its pending-verification note is resolved by the
 final-version results below.
 v0.2.79 release feature-enabled batch filter: 26 passed, four diagnostics ignored.
 Feature-off release batch filter: six passed. Debug diagnostic filter: eight
-passed, three live diagnostics intentionally ignored. Scoped rustfmt passes;
-staged whitespace checks are the final precommit gate. No Clippy-clean or
+passed, three live diagnostics intentionally ignored. Scoped rustfmt and
+staged whitespace checks passed before publication. No Clippy-clean or
 workspace-wide test claim is made.
 No workspace-wide check/build/test; no hardware counters or assembly findings.
 

@@ -136,7 +136,7 @@ Files: new `docs/Q4_STAGE_REPLAY_EVIDENCE_2026-10-10.md`;
 - [x] Final scoped release feature-enabled batch filter, feature-off batch filter,
   debug stage/capture controls; nonzero counts, Cargo1/Rayon2 serial. Check changed
   Rust files with rustfmt and tracked/new staged diffs with git diff --check.
-- [ ] Stage only task files, commit/push existing feature branch without force;
+- [x] Stage only task files, commit/push existing feature branch without force;
   preserve .gitignore. Record publication after confirming push/sync.
 
 Final v0.2.79 verification: feature-enabled release batch filter26 passed/4 ignored;
@@ -146,3 +146,7 @@ publication bump. All measured math/timing unchanged by later fallible buffer
 construction and extra rejection tests. Luna/high source/evidence reviewed and
 independently recomputed summaries; no Critical/Important findings. No Clippy or
 full-workspace success claim. Changed-source rustfmt and diff whitespace checked.
+
+Publication: implementation/evidence/version commit `2a4c265` pushed to
+`origin/feat/runtime-parity-profiling`, including the prior approved design commit.
+User `.gitignore` stays unstaged. Staged whitespace check passed before commit.
