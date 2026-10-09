@@ -9,6 +9,8 @@ use mivi_model::{
 use std::hint::black_box;
 use std::time::Instant;
 
+mod stages;
+
 struct Capture {
     layer: usize,
     role: &'static str,
@@ -38,12 +40,10 @@ fn faithful_diagnostic_capture_prompt_budget() {
     assert!(!prompt_within_budget(&"é".repeat(32 * 1024 + 1)));
 }
 
-#[test]
-#[ignore = "requires MIVI_TEST_MODEL; exact baseline gate before captured timings"]
-fn four_row_captured_activation() -> EvalResult<()> {
+fn prepare_capture() -> EvalResult<(Model, Vec<u32>)> {
     require_benchmark_environment()?;
     let path = std::env::var_os("MIVI_TEST_MODEL").ok_or("set MIVI_TEST_MODEL")?;
-    let mut model = Model::load_with_ctx(std::path::Path::new(&path), Some(65))?;
+    let model = Model::load_with_ctx(std::path::Path::new(&path), Some(65))?;
     if !model.active_adapters.active.is_empty() {
         return Err("capture rejects active adapters".into());
     }
@@ -74,21 +74,35 @@ fn four_row_captured_activation() -> EvalResult<()> {
     if ids.len() < 64 {
         return Err("capture prompt must encode at least 64 effective IDs".into());
     }
+    Ok((model, ids))
+}
+
+fn gated_captures(model: &mut Model, ids: &[u32], batch: usize) -> EvalResult<Vec<Capture>> {
+    if !matches!(batch, 32 | 64) || ids.len() < batch {
+        return Err("invalid capture origin batch".into());
+    }
+    model.reset_context();
+    model.set_prefill_strategy(PrefillStrategy::Chunked { tile_tokens: batch })?;
+    model.generate_tokens_incremental(&ids[..batch], 0, 0, |_, _| true)?;
+    if model.current_pos() != batch {
+        return Err("production prefill did not process complete effective prompt".into());
+    }
+    let production = model.state.logits.to_vec();
+    let (walk_logits, captures) = capture_walk(model, &ids[..batch])?;
+    validate_exact(&production, &walk_logits)?;
+    if captures.len() != 2 {
+        return Err("capture requires one executed eligible Q4_K and Q6_K projection".into());
+    }
+    println!("CAPTURE_GATE batch={batch} complete_logits={} bits=exact captured_formats=2 context=65 prompt_ids_activations=memory-only candidate_model_injection=false", production.len());
+    Ok(captures)
+}
+
+#[test]
+#[ignore = "requires MIVI_TEST_MODEL; exact baseline gate before captured timings"]
+fn four_row_captured_activation() -> EvalResult<()> {
+    let (mut model, ids) = prepare_capture()?;
     for batch in [32, 64] {
-        model.reset_context();
-        model.set_prefill_strategy(PrefillStrategy::Chunked { tile_tokens: batch })?;
-        model.generate_tokens_incremental(&ids[..batch], 0, 0, |_, _| true)?;
-        if model.current_pos() != batch {
-            return Err("production prefill did not process complete effective prompt".into());
-        }
-        let production = model.state.logits.to_vec();
-        let (walk_logits, captures) = capture_walk(&mut model, &ids[..batch])?;
-        // No candidate is timed (or injected into inference) until this gate passes.
-        validate_exact(&production, &walk_logits)?;
-        if captures.len() != 2 {
-            return Err("capture requires one executed eligible Q4_K and Q6_K projection".into());
-        }
-        println!("CAPTURE_GATE batch={batch} complete_logits={} bits=exact captured_formats=2 context=65 prompt_ids_activations=memory-only candidate_model_injection=false", production.len());
+        let captures = gated_captures(&mut model, &ids, batch)?;
         for capture in &captures {
             replay(&model, capture, batch)?;
         }

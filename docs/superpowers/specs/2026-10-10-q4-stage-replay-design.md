@@ -3,8 +3,8 @@
 ## Approval and scope
 
 The user approved test-only stage measurements after reproducing the Q4 batch-32
-regression. This document makes that approach concrete; written-spec review is the
-remaining gate before the implementation plan/code. No production kernel,
+regression and then approved this written design before the implementation plan/code.
+This document makes that approach concrete. No production kernel,
 precision, default dispatch, model integration, dependencies or new unsafe code
 changes are in scope.
 

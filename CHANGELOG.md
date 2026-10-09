@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.79] - 2026-10-10
+
+### Exact-Gated Q4/Q6 Projection Stage Replay
+
+#### Ideas, Inspirations & Sources
+
+- Investigate the batch-32 regression from [v0.2.78 evidence](docs/FOUR_ROW_ISOLATION_CAPTURE_EVIDENCE_2026-10-10.md) using unchanged Mivi decode/SIMD helpers and private shared capture gates. Separate elapsed wall stages from overlapping worker work, following [projection-cost accounting](docs/PROJECTION_COST_EVIDENCE_2026-10-05.md).
+- Balanced four-route orders, declared cache state and retained negatives follow [Colibri benchmarking](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference implementation was copied.
+- See the [design](docs/superpowers/specs/2026-10-10-q4-stage-replay-design.md), [plan](docs/superpowers/plans/2026-10-10-q4-stage-replay.md) and [all raw stage evidence](docs/Q4_STAGE_REPLAY_EVIDENCE_2026-10-10.md).
+
+#### Added and Evaluated
+
+- Add safe test-only pair/four-row stage replay with checked shapes/buffers/capacities, reusable scratch, exact decode/zero order, wall accounting and per-worker elapsed/count reports. Production kernels/defaults stay unchanged; no dependencies, new unsafe code or model-name rules.
+- Compare unchanged scratch-only/four-row controls with both profiled replays over 144 complete timed projections. All finite output bits and both 65,536-logit origin gates pass; rerun the existing capture diagnostic after private helper extraction. Prompt IDs/weight/activation/output values stay memory-only.
+- Unchanged four-row/scratch paired medians: Q4 batch32 1.003644 (mixed range 0.897858–1.163256); Q6 batch32 0.990703 (mixed); Q4 batch64 0.810169 and Q6 batch64 0.857840 (all eight below one). Retain all warmups, regressions and stage records.
+- Profiled Q4 batch32 accumulation worker work is higher, but replay/compiler/clock/host disturbance prevents hardware-root-cause attribution. Worker sums are not wall shares; profiled replay times are not production stage times. No fixed-regression, agent latency, RSS or superiority claim; candidate remains default-off.
+- Scoped checks and live measurements use Cargo jobs=1, Rayon threads=2 and serial harness only; no workspace-wide check/build/test.
+
 ## [v0.2.78] - 2026-10-10
 
 ### Four-Row Accumulation Isolation and Faithful Activation Replay
