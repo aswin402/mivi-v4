@@ -11,7 +11,8 @@ in-place work, preserve unrelated `.gitignore` edits.
 - [x] Run scoped quant batch regression tests, feature-off compilation through
       those tests, formatting and review. Cargo jobs=1, no workspace-wide commands.
 - [x] Record evidence/limits, bump patch version, update sourced changelog.
-- [ ] Commit and push scoped files, excluding unrelated `.gitignore`.
+- [x] Commit and push scoped files, excluding unrelated `.gitignore`. Implementation
+      `0b9ac52` was pushed to `origin/feat/runtime-parity-profiling`.
 
 Stage 2 remains separate: implement an explicit four-row candidate, compare it
 against both old API and scratch-only baseline with alternating fixed-work pairs.
