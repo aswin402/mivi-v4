@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.76] - 2026-10-09
+
+### Reusable Batch Projection Scratch (Opt-In, Stage 1)
+
+#### Ideas, Inspirations & Sources
+
+- Reuse caller-owned projection buffers while preserving Mivi's existing checked batch arithmetic. The [projection-cost evidence](docs/PROJECTION_COST_EVIDENCE_2026-10-05.md) separates allocation/layout costs from dominant accumulation work; [agent-sized evidence](docs/Q4_AGENT_SIZED_EVIDENCE_2026-10-07.md) motivates work on prefill rather than decode alone.
+- Separating candidates and limiting performance claims follows [Colibri's benchmarking protocol](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference code was copied.
+- See the [approved design](docs/superpowers/specs/2026-10-09-batch-prefill-scratch-design.md), [implementation plan](docs/superpowers/plans/2026-10-09-batch-prefill-scratch.md), and [correctness evidence](docs/BATCH_SCRATCH_EVIDENCE_2026-10-09.md).
+
+#### Added and Verified
+
+- Add `batch-scratch-experiment` with fallible, overflow-checked `BatchProjectionScratch` ownership and an explicit scratch-taking batch API. Caller-supplied shapes/worker capacity are checked before writes; no model-name dispatch or new dependencies.
+- Preserve existing dot/FMA order, paired-row SIMD/portable dispatch, partition boundaries and single-token delegation. Reuse disjoint worker buffers without projection-owned resizing; reject insufficient capacity when moving into a larger Rayon pool.
+- Add six focused controls: all six supported formats across batch boundaries, odd/parallel rows, exact output bits, poisoned-buffer reuse with stable allocation identities, failure-before-write, constructor overflow, empty work, unaligned F32 delegation and zero-column tails.
+- Default runtime/server behavior is unchanged. This is stage 1 infrastructure, not a measured latency gain; four-row accumulation, model integration and end-to-end performance/RSS gates remain pending. Cargo uses one job, inference at most two threads; no full-workspace build/check/test.
+
 ## [v0.2.75] - 2026-10-07
 
 ### Agent-Sized Q4 First-Output and Decode Evaluation

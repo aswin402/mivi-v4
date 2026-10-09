@@ -88,8 +88,8 @@ Names without a directory in a table cell belong to the directory of its first f
 
 - [x] Measure allocation/transpose/weight decoding separately using short synthetic shapes and observed real tensor shapes. The [bounded projection cost evidence](../../PROJECTION_COST_EVIDENCE_2026-10-05.md) separates allocation-plus-initialization, stage wall time, and worker work; allocation alone is not isolated. Fifteen accepted pairs select a faithful locality experiment as a hypothesis, not a production optimization or speedup claim.
 - [x] Complete the bounded, exact-parity [faithful column-panel locality experiment](../../PROJECTION_LOCALITY_EVIDENCE_2026-10-06.md) against the production baseline. Fresh Q6_K medians were 0.909–0.935× baseline; synthetic Q8_0 was mixed, with a noisy 1.280 paired ratio for panel 128. The three-repetition pilot is inconclusive; no selector is promoted and all broader P1-A gates below remain open.
-- [ ] Write reference comparisons for batch 1/2/8/9/32/64/65, odd output rows, valid format block widths, and invalid buffers/overflow.
-- [ ] Define scratch ownership/capacity checks and demonstrate reuse across successive projections.
+- [x] Write baseline-reference comparisons for batch 1/2/8/9/32/64/65, odd output rows, valid format block widths, and invalid buffers/overflow. The [stage-1 scratch evidence](../../BATCH_SCRATCH_EVIDENCE_2026-10-09.md) covers six formats and one/two-thread pools; real-model and cross-ISA gates remain separate.
+- [x] Define caller-owned quant-operator scratch capacity and demonstrate reuse across successive shapes/formats. Stage 1 is explicit and default-off; ownership in model prefill workspaces is not yet integrated.
 - [ ] Implement one blocked F32-activation path without changing activation precision.
 - [ ] Run `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2 cargo test -p mivi-quant matmul -- --test-threads=1`; require a nonzero matching test count.
 - [ ] Run selected model chunked-versus-token parity and the P0 comparison; inspect RSS and short-case regressions.

@@ -7,6 +7,7 @@ license.workspace = true
 description = "Quantization types (Q4_K_M, Q8_0, F16), block layouts, dequantization, and matrix-vector compute"
 
 [features]
+batch-scratch-experiment = []
 q4-cached-sums-experiment = ["mivi-core/q4-cached-sums-experiment"]
 projection-diagnostics = []
 projection-locality-experiment = []

@@ -12,6 +12,16 @@ pub enum QuantError {
     DimensionMisaligned { dim: usize, block_size: usize },
     #[error("Arithmetic overflow in quantization operation")]
     ArithmeticOverflow,
+    #[cfg(feature = "batch-scratch-experiment")]
+    #[error("Scratch {dimension} capacity too small: need {required}, have {available}")]
+    ScratchCapacity {
+        dimension: &'static str,
+        required: usize,
+        available: usize,
+    },
+    #[cfg(feature = "batch-scratch-experiment")]
+    #[error("Unable to allocate batch projection scratch")]
+    ScratchAllocationFailed,
 }
 
 pub type Result<T> = std::result::Result<T, QuantError>;

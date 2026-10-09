@@ -1,5 +1,7 @@
 //! Quantization definitions, dequantization routines, and quantized matrix-vector operations.
 
+#[cfg(feature = "batch-scratch-experiment")]
+pub mod batch_scratch;
 pub mod f16;
 #[cfg(feature = "projection-diagnostics")]
 pub mod projection_diagnostics;
