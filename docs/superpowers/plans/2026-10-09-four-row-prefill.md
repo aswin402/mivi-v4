@@ -62,7 +62,8 @@ Files: test-only `crates/mivi-quant/src/batch_scratch/four_row/measurement.rs`,
       no findings, no reviewer edits or Cargo commands.
 - [x] Run scoped enabled/disabled regression filters, formatting and diff checks.
 - [x] Bump 0.2.76 to 0.2.77; document measured positives/negatives and sources.
-- [ ] Commit and push scoped files; record publication after confirmed push.
+- [x] Commit and push scoped files; implementation `c7cc24d` was pushed to
+      `origin/feat/runtime-parity-profiling`. Unrelated `.gitignore` edits excluded.
 
 Default promotion/model integration remains a subsequent decision requiring model
 state/logit parity, agent-sized timing, RSS and short-case regression gates.
