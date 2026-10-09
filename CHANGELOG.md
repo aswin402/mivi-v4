@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.78] - 2026-10-10
+
+### Four-Row Accumulation Isolation and Faithful Activation Replay
+
+#### Ideas, Inspirations & Sources
+
+- Separate accumulation from decode/layout costs and replay actual FFN inputs, motivated by [v0.2.77 mixed operator evidence](docs/FOUR_ROW_PREFILL_EVIDENCE_2026-10-10.md). Reuse Mivi's production tile helpers and memory-only capture pattern, with a new exact gate instead of the older tolerance-based test.
+- Balanced orders, declared working/cache state and retained negatives follow [Colibri benchmarking](https://github.com/JustVugg/colibri/blob/main/docs/benchmarking.md). No external inference code was copied.
+- See the [approved design](docs/superpowers/specs/2026-10-10-four-row-isolation-capture-design.md), [plan](docs/superpowers/plans/2026-10-10-four-row-isolation-capture.md) and [complete raw evidence](docs/FOUR_ROW_ISOLATION_CAPTURE_EVIDENCE_2026-10-10.md).
+
+#### Added and Evaluated
+
+- Add two test-only, bounded release diagnostics: decoded four-row accumulation versus two pair helpers, and full ordinary/scratch-only/four-row projections with actual Q4_K/Q6_K FFN activations. No production math, dispatch, new unsafe code or dependencies change.
+- Require complete finite final-logit bits to match production one-tile prefill before captured timings. Both 32/64-token origins matched all 65,536 logits; all 84 member-final projection outputs matched exact reference bits across 252 timed projections. Prompt IDs/weights/activation contents remain memory-only.
+- Captured paired median four-row/scratch-only ratios: Q4 batch32 1.116057 (11.61% slower, all six pairs); Q4 batch64 0.918635 (8.14% lower time); Q6 batch64 0.840792 (15.92% lower). Q6 batch32 and small-group accumulation have mixed/noisy cases; preserve every warmup and measured timing.
+- Keep the candidate default-off. This is replay-origin/operator evidence, not candidate-integrated model-state parity, agent latency, RSS or superiority over other engines. Q4 batch32 cause and broader promotion gates remain open. Scoped Cargo jobs=1, Rayon threads=2 only; no full-workspace build/check/test.
+
 ## [v0.2.77] - 2026-10-10
 
 ### Faithful Four-Row Batch Projection Experiment (Opt-In, Stage 2)

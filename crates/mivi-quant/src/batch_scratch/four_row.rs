@@ -5,6 +5,8 @@ use super::{BatchProjectionScratch, GgmlType, QuantError, Result};
 use rayon::prelude::*;
 
 #[cfg(test)]
+mod faithful_diagnostics;
+#[cfg(test)]
 mod measurement;
 
 impl BatchProjectionScratch {
