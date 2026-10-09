@@ -31,7 +31,7 @@ activations stay in memory; all timings and negative cases retained. Default dis
       isolate diagnostic command timeout 180s, captured command timeout 240s.
 - [x] Review source/evidence with Luna/high; run final-version targeted regressions,
       formatting/diff checks; retain exact-gate failures if encountered, never relax them.
-- [ ] Record evidence/limits and ideas/sources; bump 0.2.77 to 0.2.78, commit/push scoped files.
+- [x] Record evidence/limits and ideas/sources; bump 0.2.77 to 0.2.78, commit/push scoped files.
 
 Targeted commands (prefix every Cargo invocation with `CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=2`):
 
@@ -51,3 +51,6 @@ diagnostics passed before the publication bump, with unchanged timing/arithmetic
 after review. Luna/high initial and follow-up reviews approved; 64KiB UTF-8 override
 guard and clear operation counts address its two minor notes. Prompt-budget control
 also observed RED before GREEN. Scoped rustfmt/git diff checks passed.
+
+Publication: implementation/evidence/version commit `d9b9990` pushed to
+`origin/feat/runtime-parity-profiling`; user `.gitignore` remains unstaged.

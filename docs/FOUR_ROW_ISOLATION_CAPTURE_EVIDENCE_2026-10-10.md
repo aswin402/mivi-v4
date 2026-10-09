@@ -230,4 +230,3 @@ before changing kernels; separately approve model-workspace ownership and an
 explicit default-off candidate integration. Promotion still requires complete
 candidate-integrated model/KV/SSM parity, representative prompt/tool loops, RSS,
 short/small-case regression and broader model/CPU evidence.
-
