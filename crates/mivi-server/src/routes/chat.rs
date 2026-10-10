@@ -1019,3 +1019,104 @@ mod streaming_tests {
         assert_eq!(emitted, "normal completion marker");
     }
 }
+
+#[cfg(test)]
+mod provider_contract_tests {
+    use super::{extract_tool_calls_for_choice, tool_call_values};
+    use crate::generation::{validate_tool_calls_against_tools, ToolChoice};
+    use crate::types::MessageDto;
+    use mivi_tools::{DelimitedPythonToolCallCodec, LegacyJsonXmlToolCallCodec, ToolCallCodec};
+
+    #[test]
+    fn legacy_and_configured_tool_protocols_round_trip_through_openai_messages() {
+        let cases: Vec<(Box<dyn ToolCallCodec>, &str)> = vec![
+            (
+                Box::new(LegacyJsonXmlToolCallCodec),
+                r#"<tool_call>{"name":"lookup","arguments":{"query":"mivi","limit":2}}</tool_call>"#,
+            ),
+            (
+                Box::new(DelimitedPythonToolCallCodec::new("<call>", "</call>")),
+                r#"<call>[lookup(query="mivi", limit=2)]</call>"#,
+            ),
+        ];
+        let openai_tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a term",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }
+        })];
+
+        for (codec, model_output) in cases {
+            let choice = ToolChoice::Named("lookup".to_string());
+            let parsed = extract_tool_calls_for_choice(model_output, &choice, codec.as_ref())
+                .expect("selected provider codec should parse the tool call");
+            validate_tool_calls_against_tools(&parsed, &openai_tools)
+                .expect("parsed arguments should match the OpenAI tool schema");
+
+            let response_calls = tool_call_values(model_output, &choice, codec.as_ref(), None);
+            assert_eq!(response_calls.len(), 1);
+            assert_eq!(response_calls[0]["type"], "function");
+            assert_eq!(response_calls[0]["function"]["name"], "lookup");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    response_calls[0]["function"]["arguments"].as_str().unwrap()
+                )
+                .unwrap(),
+                serde_json::json!({"query": "mivi", "limit": 2})
+            );
+
+            let assistant = MessageDto {
+                role: "assistant".to_string(),
+                content: None,
+                name: None,
+                thinking: None,
+                tool_calls: Some(response_calls.clone()),
+                tool_call_id: None,
+            }
+            .to_canonical_message()
+            .expect("OpenAI tool-call response should be accepted as history");
+            let call_id = assistant.tool_calls[0]
+                .id
+                .clone()
+                .expect("response must assign a call ID");
+            let result = MessageDto {
+                role: "tool".to_string(),
+                content: Some("found it".to_string()),
+                name: Some("lookup".to_string()),
+                thinking: None,
+                tool_calls: None,
+                tool_call_id: Some(call_id.clone()),
+            }
+            .to_canonical_message()
+            .expect("OpenAI tool result should be accepted as history");
+
+            assert_eq!(result.tool_call_id.as_deref(), Some(call_id.as_str()));
+            assert_eq!(assistant.tool_calls[0].arguments["query"], "mivi");
+            assert_eq!(result.content.as_deref(), Some("found it"));
+        }
+    }
+
+    #[test]
+    fn named_tool_choice_rejects_a_different_provider_tool() {
+        let codec = LegacyJsonXmlToolCallCodec;
+        let output =
+            r#"<tool_call>{"name":"delete_file","arguments":{"path":"README.md"}}</tool_call>"#;
+        let error = extract_tool_calls_for_choice(
+            output,
+            &ToolChoice::Named("read_file".to_string()),
+            &codec,
+        )
+        .expect_err("provider output must respect the client's named choice");
+        assert!(error.contains("requires 'read_file'"));
+    }
+}

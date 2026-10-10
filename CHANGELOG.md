@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.82] - 2026-10-10
+
+### Provider Tool-Call Contract Coverage
+
+#### Ideas, Inspirations & Sources
+
+- Exercise the same tool-call lifecycle across Mivi's legacy JSON/XML and configurable delimiter protocols, motivated by the provider-parity gaps observed while testing local coding agents. The external message contract follows the [OpenAI Chat Completions tool-call format](https://platform.openai.com/docs/api-reference/chat/object); no provider implementation was copied.
+
+#### Added and Verified
+
+- Add server contract tests that parse both provider formats, validate arguments against the caller's JSON Schema, serialize OpenAI-compatible assistant tool calls, and accept the follow-up tool result while preserving its `tool_call_id`.
+- Verify named tool choice rejects a model-emitted call to a different tool. Both focused tests pass offline with Cargo jobs=1, Rayon threads=2 and serial harness. No production routing or model-specific defaults change; no live model quality or performance is claimed.
+
 ## [v0.2.81] - 2026-10-10
 
 ### Request Cancellation and Task-Wide Native-Agent Deadlines
