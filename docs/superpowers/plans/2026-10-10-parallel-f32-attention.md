@@ -48,7 +48,17 @@
 - [x] Review diff for new unsafe code, default dispatch, unsupported precision behavior, out-of-bounds handling, test independence and measurement confounders.
 - [x] Record completed versus pending gates; keep candidate default-off irrespective of pilot outcome. No actual15K agent improvement is inferred from the small workload.
 - [x] Increment0.2.82 to0.2.83 only after the implemented slice passes its required verification. Changelog includes local source paths and evidence inspirations, without claiming new internet research.
-- [ ] Stage only explicit task files, commit and non-force push `feat/runtime-parity-profiling`; inspect final status to confirm .gitignore remains unstaged.
+- [x] Stage only explicit task files, commit and non-force push `feat/runtime-parity-profiling`; inspect final status to confirm .gitignore remains unstaged.
+
+## Completion record
+
+Implementation and evidence published as `b9685e5`, version0.2.83, on
+`feat/runtime-parity-profiling`. All nine bounded live cases completed in743.28s;
+final scoped feature-enabled/disabled tests and formatting checks passed.
+The user's .gitignore change remains unstaged. Experimental dispatch is still
+off by default; production promotion and a15K-token real-agent success are not
+completed or claimed. This documentation-only follow-up closes the publication
+checklist after confirmed GitHub push; it adds no feature or version bump.
 
 ## Execution choice
 

@@ -1,8 +1,8 @@
 # Experimental parallel F32 attention
 
 Date: 2026-10-10. Baseline: v0.2.82, b2db472.
-Status: written spec approved by the user on2026-10-10; implementation and
-diagnostic evaluation in progress. Production promotion is not authorized.
+Status: approved experiment implemented, verified and published as v0.2.83
+(commit b9685e5). Candidate remains default-off; production promotion is separate.
 
 ## Motivation and scope
 
@@ -97,12 +97,12 @@ review. Do not add a silent mature-runtime backend or claim general superiority.
 
 ## Completion and TODO
 
-- [ ] Written-spec approval and detailed implementation plan.
-- [ ] Feature-gated candidate and independently retained serial reference.
-- [ ] Focused bit/state/error/fallback correctness gates.
-- [ ] Bounded operator pilot and model-integrated comparison.
-- [ ] Evidence report retaining negative and inconclusive outcomes.
-- [ ] On completed implementation: patch version+0.0.1, changelog with ideas,
+- [x] Written-spec approval and detailed implementation plan.
+- [x] Feature-gated candidate and independently retained serial reference.
+- [x] Focused bit/state/error/fallback correctness gates.
+- [x] Bounded operator pilot and model-integrated comparison.
+- [x] Evidence report retaining negative and inconclusive outcomes.
+- [x] On completed implementation: patch version+0.0.1, changelog with ideas,
       inspirations and direct sources, scoped verification, commit and push the
       existing feature branch. Preserve and exclude the user's .gitignore edit.
 
