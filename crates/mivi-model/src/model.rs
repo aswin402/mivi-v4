@@ -23,6 +23,14 @@ mod cached_sums_tests;
 
 #[cfg(all(
     test,
+    feature = "parallel-attention-experiment",
+    feature = "fixture-diagnostics"
+))]
+#[path = "model/parallel_attention_tests.rs"]
+mod parallel_attention_tests;
+
+#[cfg(all(
+    test,
     feature = "q4-cached-sums-experiment",
     feature = "fixture-diagnostics"
 ))]
@@ -106,6 +114,12 @@ pub struct Model {
 }
 
 impl Model {
+    /// Select the default-off F32 query-head experiment for diagnostic runs.
+    /// Other KV precisions and single-worker execution retain the serial path.
+    #[cfg(feature = "parallel-attention-experiment")]
+    pub fn set_parallel_attention_experiment(&mut self, enabled: bool) {
+        self.state.parallel_attention_enabled = enabled;
+    }
     /// Load model with default context length ceiling (4096).
     pub fn load(path: &Path) -> Result<Self> {
         Self::load_with_options(path, None, None)

@@ -23,6 +23,12 @@ pub struct ArenaConfig {
 /// RunState holds all temporary activation arrays for single-token forward pass.
 #[derive(Debug)]
 pub struct RunState {
+    /// Explicit diagnostic selector; compiling the feature does not enable it.
+    #[cfg(feature = "parallel-attention-experiment")]
+    pub parallel_attention_enabled: bool,
+    /// Number of successful multi-worker F32 attention dispatches since reset.
+    #[cfg(feature = "parallel-attention-experiment")]
+    pub parallel_attention_calls: usize,
     // Current token hidden representation (dim)
     pub x: Box<[f32]>,
     // Ping-pong double buffer for zero-copy layer handoff (dim)
@@ -75,6 +81,10 @@ impl RunState {
     /// Allocates all fixed-size arrays once at engine initialization.
     pub fn new(cfg: &ArenaConfig) -> Self {
         Self {
+            #[cfg(feature = "parallel-attention-experiment")]
+            parallel_attention_enabled: false,
+            #[cfg(feature = "parallel-attention-experiment")]
+            parallel_attention_calls: 0,
             x: vec![0.0f32; cfg.dim].into_boxed_slice(),
             x_pong: vec![0.0f32; cfg.dim].into_boxed_slice(),
             xb: vec![0.0f32; cfg.dim].into_boxed_slice(),
@@ -105,6 +115,10 @@ impl RunState {
 
     /// Reset recurrent states and working buffers between independent sequences.
     pub fn reset(&mut self) {
+        #[cfg(feature = "parallel-attention-experiment")]
+        {
+            self.parallel_attention_calls = 0;
+        }
         self.x.fill(0.0);
         self.x_pong.fill(0.0);
         self.xb.fill(0.0);

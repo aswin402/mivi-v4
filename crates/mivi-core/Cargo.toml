@@ -9,6 +9,7 @@ description = "Core tensor operations, SIMD acceleration, RunState memory arena,
 [features]
 batch-four-row-experiment = []
 q4-cached-sums-experiment = []
+parallel-attention-experiment = []
 
 [dependencies]
 rayon.workspace = true

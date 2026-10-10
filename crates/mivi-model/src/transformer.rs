@@ -13,6 +13,9 @@ use mivi_kv::KvCache;
 use mivi_quant::quantized_matmul_rows;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "parallel-attention-experiment")]
+mod parallel_attention;
+
 /// Optional timings for the stages within an attention block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AttentionStageProfile {
@@ -131,6 +134,16 @@ fn compute_gqa_attention(
     pos: usize,
     cfg: &ModelConfig,
 ) -> Result<()> {
+    #[cfg(feature = "parallel-attention-experiment")]
+    if state.parallel_attention_enabled
+        && kv.precision() == mivi_kv::KvPrecision::F32
+        && cfg.n_heads > 1
+        && rayon::current_num_threads() > 1
+    {
+        parallel_attention::compute(state, kv, layer, pos, cfg)?;
+        state.parallel_attention_calls = state.parallel_attention_calls.saturating_add(1);
+        return Ok(());
+    }
     let head_dim = cfg.head_dim;
     let n_heads = cfg.n_heads;
     let heads_per_kv = (n_heads / cfg.n_kv_heads.max(1)).max(1);

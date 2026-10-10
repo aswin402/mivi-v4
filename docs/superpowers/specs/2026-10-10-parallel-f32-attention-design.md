@@ -1,8 +1,8 @@
 # Experimental parallel F32 attention
 
 Date: 2026-10-10. Baseline: v0.2.82, b2db472.
-Status: proposed design, awaiting written-spec review. No implementation or
-production promotion is authorized by this document alone.
+Status: written spec approved by the user on2026-10-10; implementation and
+diagnostic evaluation in progress. Production promotion is not authorized.
 
 ## Motivation and scope
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.2.83] - 2026-10-10
+
+### Default-Off Parallel F32 Attention Experiment
+
+#### Ideas, Inspirations & Sources
+
+- Investigate the serial per-query-head scan identified in Mivi's latest local prefill profile. Retain the existing [GQA implementation](crates/mivi-model/src/transformer.rs) as an independent arithmetic reference, share [checked immutable KV access](crates/mivi-kv/src/cache.rs), and follow the diagnostic-selector/reset conventions in [RunState](crates/mivi-core/src/arena.rs). No external inference code, new unsafe code, model-filename dispatch or new dependency download.
+- Separate operator gains from real-model results, following the existing [CPU runtime evidence](docs/CPU_RUNTIME_EVIDENCE_2026-10-05.md) and [captured projection evidence](docs/FOUR_ROW_ISOLATION_CAPTURE_EVIDENCE_2026-10-10.md). Design, commands, raw paired times and limitations are recorded in the [parallel-attention evidence](docs/PARALLEL_F32_ATTENTION_EVIDENCE_2026-10-10.md); no new online research is claimed.
+
+#### Added and Verified
+
+- Add an optional `parallel-attention-experiment` feature with an explicit model selector, off even when compiled. F32 head outputs use safe disjoint slices and the existing pool; per-head traversal/arithmetic and sequential KV/query ordering remain unchanged. Non-F32, one-worker and one-head cases retain the established serial path.
+- Gate complete output bits, dimensions/overflow/position/layer errors before writes, output sentinels, precision fallback, reset behavior, tiny hybrid-model generated output/logits/KV/SSM parity, and real-model continuation/prefix parity. Focused offline commands use Cargo jobs=1, Rayon threads=2 and serial harnesses; no workspace-wide build/check/test.
+- Complete nine bounded real-model pair cases: six unprofiled cold pairs, two separate profile controls and one exact-prefix control. Median paired first-text reductions were3.40% at513 effective tokens and11.00% at2049, with all complete output/state comparisons passing. The single long profile's causal region was52.24% lower; this is not a whole-engine speedup. The candidate remains default-off: three pairs, uncontrolled host variation and a result below the proposed20% target do not justify production promotion or claim a resolved15K-token Minicode timeout.
+
 ## [v0.2.82] - 2026-10-10
 
 ### Provider Tool-Call Contract Coverage

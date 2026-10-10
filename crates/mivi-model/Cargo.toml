@@ -9,6 +9,7 @@ description = "GGUF parser, hybrid LFM architecture (SSM+GQA), LoRA adapters, fo
 [features]
 q4-cached-sums-experiment = ["mivi-quant/q4-cached-sums-experiment"]
 fixture-diagnostics = []
+parallel-attention-experiment = ["mivi-core/parallel-attention-experiment", "dep:rayon"]
 projection-diagnostics = ["fixture-diagnostics", "mivi-quant/projection-diagnostics"]
 projection-locality-experiment = ["projection-diagnostics", "mivi-quant/projection-locality-experiment"]
 
@@ -23,6 +24,7 @@ byteorder.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 rayon.workspace = true
